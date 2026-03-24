@@ -1,0 +1,16 @@
+{
+  "crons": [
+    {
+      "path": "/api/cron/generate-matches",
+      "schedule": "0 0 * * 0"
+    },
+    {
+      "path": "/api/cron/generate-teams",
+      "schedule": "*/15 * * * *"
+    },
+    {
+      "path": "/api/cron/close-ratings",
+      "schedule": "0 * * * *"
+    }
+  ]
+}
