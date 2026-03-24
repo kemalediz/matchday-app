@@ -6,11 +6,11 @@
     },
     {
       "path": "/api/cron/generate-teams",
-      "schedule": "*/15 * * * *"
+      "schedule": "0 12 * * *"
     },
     {
       "path": "/api/cron/close-ratings",
-      "schedule": "0 * * * *"
+      "schedule": "0 6 * * *"
     }
   ]
 }
