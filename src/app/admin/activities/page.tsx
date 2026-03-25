@@ -22,6 +22,7 @@ interface Activity {
   format: string;
   isActive: boolean;
   deadlineHours: number;
+  matchDurationMins: number;
   ratingWindowHours: number;
 }
 
@@ -37,6 +38,7 @@ export default function ActivitiesPage() {
   const [venue, setVenue] = useState("");
   const [format, setFormat] = useState<"FIVE_A_SIDE" | "SEVEN_A_SIDE">("SEVEN_A_SIDE");
   const [deadlineHours, setDeadlineHours] = useState("5");
+  const [matchDurationMins, setMatchDurationMins] = useState("60");
 
   useEffect(() => {
     loadActivities();
@@ -60,6 +62,7 @@ export default function ActivitiesPage() {
         venue,
         format,
         deadlineHours: parseInt(deadlineHours),
+        matchDurationMins: parseInt(matchDurationMins),
       });
       toast.success("Activity created!");
       setDialogOpen(false);
@@ -145,6 +148,11 @@ export default function ActivitiesPage() {
                   <Input type="number" value={deadlineHours} onChange={(e) => setDeadlineHours(e.target.value)} min="1" max="48" className="h-11" />
                 </div>
               </div>
+              <div className="space-y-2">
+                <Label className="text-[15px]">Match Duration (minutes)</Label>
+                <Input type="number" value={matchDurationMins} onChange={(e) => setMatchDurationMins(e.target.value)} min="20" max="180" className="h-11" placeholder="60" />
+                <p className="text-xs text-muted-foreground">Rating emails are sent automatically when this time expires after match start</p>
+              </div>
               <Button type="submit" className="w-full text-base py-5" size="lg">Create</Button>
             </form>
           </DialogContent>
@@ -166,7 +174,7 @@ export default function ActivitiesPage() {
                   {DAYS_OF_WEEK[activity.dayOfWeek]}s at {activity.time} &middot; {activity.venue}
                 </p>
                 <p className="text-sm text-muted-foreground">
-                  {activity.format === "SEVEN_A_SIDE" ? "7-a-side" : "5-a-side"} &middot; Deadline: {activity.deadlineHours}h before
+                  {activity.format === "SEVEN_A_SIDE" ? "7-a-side" : "5-a-side"} &middot; {activity.matchDurationMins}min &middot; Deadline: {activity.deadlineHours}h before
                 </p>
               </div>
               <div className="flex gap-2 shrink-0">

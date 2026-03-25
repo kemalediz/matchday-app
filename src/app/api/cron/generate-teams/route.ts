@@ -3,6 +3,8 @@ import { balanceTeams } from "@/lib/team-balancer";
 import { FORMAT_CONFIG } from "@/lib/constants";
 import { PlayerWithRating } from "@/types";
 import { NextResponse } from "next/server";
+import { sendRatingEmails } from "@/lib/email";
+import { format } from "date-fns";
 
 export async function GET(request: Request) {
   const authHeader = request.headers.get("authorization");
@@ -90,5 +92,46 @@ export async function GET(request: Request) {
     published++;
   }
 
-  return NextResponse.json({ generated, published });
+  // Auto-complete matches whose duration has expired (match date + duration minutes)
+  const publishedMatches = await db.match.findMany({
+    where: {
+      status: "TEAMS_PUBLISHED",
+      date: { lte: now },
+    },
+    include: {
+      activity: true,
+      attendances: {
+        where: { status: "CONFIRMED" },
+        include: { user: { select: { email: true, name: true } } },
+      },
+    },
+  });
+
+  let completed = 0;
+  for (const match of publishedMatches) {
+    const matchEndTime = new Date(match.date.getTime() + match.activity.matchDurationMins * 60 * 1000);
+    if (now < matchEndTime) continue;
+
+    await db.match.update({
+      where: { id: match.id },
+      data: { status: "COMPLETED" },
+    });
+
+    // Send rating emails to all confirmed players
+    const players = match.attendances.map((a) => ({
+      email: a.user.email,
+      name: a.user.name,
+    }));
+
+    sendRatingEmails(
+      match.id,
+      match.activity.name,
+      format(match.date, "EEEE, d MMMM yyyy"),
+      players
+    ).catch((err) => console.error("Failed to send rating emails:", err));
+
+    completed++;
+  }
+
+  return NextResponse.json({ generated, published, completed });
 }

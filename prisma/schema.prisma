@@ -114,6 +114,7 @@ model Activity {
   format            MatchFormat @default(SEVEN_A_SIDE)
   isActive          Boolean     @default(true)
   deadlineHours     Int         @default(5)
+  matchDurationMins Int         @default(60)
   ratingWindowHours Int         @default(48)
 
   matches Match[]

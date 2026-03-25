@@ -3,21 +3,36 @@
 import { useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { useSession } from "next-auth/react";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
-import { Slider } from "@/components/ui/slider";
 import { Badge } from "@/components/ui/badge";
-import { Separator } from "@/components/ui/separator";
 import { submitRatings, submitMoMVote } from "@/app/actions/ratings";
 import { toast } from "sonner";
-import { Star, Send } from "lucide-react";
+import { Star, Send, Trophy } from "lucide-react";
 
 interface Player {
   id: string;
   name: string | null;
   image: string | null;
   positions: string[];
+}
+
+const SCORES = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+
+function ScoreButton({ score, selected, onClick }: { score: number; selected: boolean; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`w-9 h-9 sm:w-10 sm:h-10 rounded-full text-sm font-bold transition-all ${
+        selected
+          ? "bg-primary text-primary-foreground shadow-md scale-110"
+          : "bg-muted hover:bg-accent text-muted-foreground hover:text-foreground"
+      }`}
+    >
+      {score}
+    </button>
+  );
 }
 
 export default function RatePlayersPage() {
@@ -40,24 +55,15 @@ export default function RatePlayersPage() {
         .map((a: { user: Player }) => a.user);
       setPlayers(otherPlayers);
 
-      // Load existing ratings
-      if (data.existingRatings) {
-        const ratingMap: Record<string, number> = {};
-        data.existingRatings.forEach((r: { playerId: string; score: number }) => {
-          ratingMap[r.playerId] = r.score;
-        });
-        setRatings(ratingMap);
-      }
+      const defaultRatings: Record<string, number> = {};
+      otherPlayers.forEach((p: Player) => {
+        defaultRatings[p.id] = data.existingRatings?.find((r: { playerId: string }) => r.playerId === p.id)?.score ?? 6;
+      });
+      setRatings(defaultRatings);
+
       if (data.existingMoMVote) {
         setMomPick(data.existingMoMVote.playerId);
       }
-
-      // Default all unrated to 5
-      const defaultRatings: Record<string, number> = {};
-      otherPlayers.forEach((p: Player) => {
-        defaultRatings[p.id] = data.existingRatings?.find((r: { playerId: string }) => r.playerId === p.id)?.score ?? 5;
-      });
-      setRatings(defaultRatings);
       setLoading(false);
     }
     if (session?.user?.id) load();
@@ -72,7 +78,7 @@ export default function RatePlayersPage() {
       if (momPick) {
         await submitMoMVote(matchId, { playerId: momPick });
       }
-      toast.success("Ratings submitted!");
+      toast.success("Ratings submitted! Thanks for voting.");
       router.push(`/matches/${matchId}`);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed to submit");
@@ -83,91 +89,98 @@ export default function RatePlayersPage() {
 
   if (loading) {
     return (
-      <div className="mx-auto max-w-3xl px-6 py-10">
-        <p className="text-muted-foreground text-lg">Loading...</p>
+      <div className="mx-auto max-w-lg px-4 py-10 text-center">
+        <p className="text-muted-foreground text-lg">Loading players...</p>
       </div>
     );
   }
 
+  const allRated = players.every((p) => ratings[p.id] !== undefined);
+
   return (
-    <div className="mx-auto max-w-3xl px-6 py-10 space-y-8">
-      <div>
-        <h1>Rate Players</h1>
-        <p className="text-muted-foreground mt-1 text-lg">Rate each player&apos;s performance (1-10) and pick your Man of the Match.</p>
+    <div className="mx-auto max-w-lg px-4 py-6 space-y-4">
+      {/* Header */}
+      <div className="text-center space-y-1">
+        <h1 className="text-2xl font-bold">Rate Players</h1>
+        <p className="text-muted-foreground text-sm">Tap a score for each player, then pick MoM</p>
       </div>
 
-      <Card className="shadow-sm">
-        <CardHeader>
-          <CardTitle className="text-xl">Player Ratings</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-8">
-          {players.map((player) => (
-            <div key={player.id} className="space-y-3">
-              <div className="flex items-center gap-3">
-                <Avatar className="h-10 w-10">
-                  <AvatarImage src={player.image ?? undefined} />
-                  <AvatarFallback className="bg-primary/10 text-primary font-semibold">
-                    {player.name?.charAt(0)}
-                  </AvatarFallback>
-                </Avatar>
-                <span className="font-semibold text-[15px] flex-1">{player.name}</span>
-                <span className="text-2xl font-bold text-primary w-10 text-center">{ratings[player.id] ?? 5}</span>
-              </div>
-              <Slider
-                value={[ratings[player.id] ?? 5]}
-                onValueChange={(value) => {
-                  const num = Array.isArray(value) ? value[0] : value;
-                  setRatings((prev) => ({ ...prev, [player.id]: num }));
-                }}
-                min={1}
-                max={10}
-                step={1}
-                className="w-full"
-              />
-              <div className="flex justify-between text-xs text-muted-foreground px-1">
-                <span>1</span>
-                <span>5</span>
-                <span>10</span>
-              </div>
+      {/* Player ratings - compact cards */}
+      <div className="space-y-3">
+        {players.map((player) => (
+          <div
+            key={player.id}
+            className={`rounded-xl border p-3 transition-all ${
+              ratings[player.id] ? "border-primary/20 bg-card" : "border-border bg-card"
+            }`}
+          >
+            <div className="flex items-center gap-2.5 mb-2.5">
+              <Avatar className="h-8 w-8">
+                <AvatarImage src={player.image ?? undefined} />
+                <AvatarFallback className="text-xs bg-primary/10 text-primary font-semibold">
+                  {player.name?.charAt(0)}
+                </AvatarFallback>
+              </Avatar>
+              <span className="font-semibold text-sm flex-1 truncate">{player.name}</span>
+              {player.positions.length > 0 && (
+                <Badge variant="outline" className="text-xs shrink-0">{player.positions[0]}</Badge>
+              )}
+              {ratings[player.id] && (
+                <span className="text-lg font-bold text-primary w-7 text-center">{ratings[player.id]}</span>
+              )}
             </div>
-          ))}
-        </CardContent>
-      </Card>
-
-      <Separator />
-
-      <Card className="shadow-sm">
-        <CardHeader>
-          <CardTitle className="text-xl flex items-center gap-2">
-            <Star className="h-5 w-5 text-yellow-500" />
-            Man of the Match
-          </CardTitle>
-        </CardHeader>
-        <CardContent>
-          <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
-            {players.map((player) => (
-              <button
-                key={player.id}
-                onClick={() => setMomPick(player.id)}
-                className={`flex items-center gap-3 p-4 rounded-xl border-2 transition-all ${
-                  momPick === player.id
-                    ? "border-primary bg-primary/5 shadow-sm"
-                    : "border-border hover:bg-accent/50 hover:border-primary/30"
-                }`}
-              >
-                <Avatar className="h-8 w-8">
-                  <AvatarImage src={player.image ?? undefined} />
-                  <AvatarFallback className="text-xs bg-primary/10 text-primary">{player.name?.charAt(0)}</AvatarFallback>
-                </Avatar>
-                <span className="text-sm font-medium truncate">{player.name}</span>
-                {momPick === player.id && <Badge className="ml-auto text-xs shrink-0">MoM</Badge>}
-              </button>
-            ))}
+            <div className="flex justify-between gap-1">
+              {SCORES.map((score) => (
+                <ScoreButton
+                  key={score}
+                  score={score}
+                  selected={ratings[player.id] === score}
+                  onClick={() => setRatings((prev) => ({ ...prev, [player.id]: score }))}
+                />
+              ))}
+            </div>
           </div>
-        </CardContent>
-      </Card>
+        ))}
+      </div>
 
-      <Button onClick={handleSubmit} disabled={submitting} size="lg" className="w-full text-base py-6">
+      {/* MoM Selection - inline */}
+      <div className="rounded-xl border-2 border-yellow-200 dark:border-yellow-900/50 bg-card p-4 space-y-3">
+        <div className="flex items-center gap-2">
+          <Trophy className="h-5 w-5 text-yellow-500" />
+          <h2 className="font-bold text-base">Man of the Match</h2>
+        </div>
+        <div className="grid grid-cols-2 gap-2">
+          {players.map((player) => (
+            <button
+              key={player.id}
+              type="button"
+              onClick={() => setMomPick(player.id)}
+              className={`flex items-center gap-2 p-2.5 rounded-lg border transition-all text-left ${
+                momPick === player.id
+                  ? "border-yellow-400 bg-yellow-50 dark:bg-yellow-950/30 shadow-sm"
+                  : "border-border hover:bg-accent/50"
+              }`}
+            >
+              <Avatar className="h-7 w-7 shrink-0">
+                <AvatarImage src={player.image ?? undefined} />
+                <AvatarFallback className="text-xs bg-primary/10 text-primary">{player.name?.charAt(0)}</AvatarFallback>
+              </Avatar>
+              <span className="text-sm font-medium truncate">{player.name}</span>
+              {momPick === player.id && (
+                <Star className="h-4 w-4 text-yellow-500 fill-yellow-500 ml-auto shrink-0" />
+              )}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Submit */}
+      <Button
+        onClick={handleSubmit}
+        disabled={submitting || !allRated}
+        size="lg"
+        className="w-full text-base py-6 sticky bottom-4 shadow-lg"
+      >
         <Send className="h-4 w-4 mr-2" />
         {submitting ? "Submitting..." : "Submit Ratings"}
       </Button>

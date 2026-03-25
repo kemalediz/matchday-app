@@ -12,6 +12,7 @@ export const activitySchema = z.object({
   venue: z.string().min(2),
   format: z.enum(["FIVE_A_SIDE", "SEVEN_A_SIDE"]),
   deadlineHours: z.number().min(1).max(48).default(5),
+  matchDurationMins: z.number().min(20).max(180).default(60),
   ratingWindowHours: z.number().min(1).max(168).default(48),
 });
 

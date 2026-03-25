@@ -13,6 +13,7 @@ export async function createActivity(formData: {
   venue: string;
   format: "FIVE_A_SIDE" | "SEVEN_A_SIDE";
   deadlineHours?: number;
+  matchDurationMins?: number;
   ratingWindowHours?: number;
 }) {
   const session = await auth();

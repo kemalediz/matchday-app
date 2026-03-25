@@ -1,9 +1,11 @@
 import { Resend } from "resend";
 
-const resend = new Resend(process.env.RESEND_API_KEY);
+function getResend() {
+  return new Resend(process.env.RESEND_API_KEY);
+}
 
 const FROM_EMAIL = process.env.EMAIL_FROM || "MatchDay <noreply@resend.dev>";
-const APP_URL = process.env.NEXTAUTH_URL || "https://matchday.vercel.app";
+const APP_URL = process.env.NEXTAUTH_URL || "https://matchday-nine-zeta.vercel.app";
 
 export async function sendRatingEmails(
   matchId: string,
@@ -20,7 +22,7 @@ export async function sendRatingEmails(
 
   const results = await Promise.allSettled(
     players.map((player) =>
-      resend.emails.send({
+      getResend().emails.send({
         from: FROM_EMAIL,
         to: player.email,
         subject: `Rate your teammates - ${activityName}`,
