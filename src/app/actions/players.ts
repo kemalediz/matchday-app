@@ -3,6 +3,7 @@
 import { auth } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { onboardingSchema } from "@/lib/validations";
+import { ADMIN_EMAIL } from "@/lib/constants";
 import { Position } from "@/generated/prisma/client";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
@@ -45,9 +46,7 @@ export async function updateProfile(formData: { name: string; positions: string[
 export async function updatePlayerRole(userId: string, role: "ADMIN" | "PLAYER") {
   const session = await auth();
   if (!session?.user?.id) throw new Error("Not authenticated");
-
-  const user = await db.user.findUnique({ where: { id: session.user.id } });
-  if (user?.role !== "ADMIN") throw new Error("Admin only");
+  if (session.user.email !== ADMIN_EMAIL) throw new Error("Admin only");
 
   await db.user.update({
     where: { id: userId },
@@ -60,9 +59,7 @@ export async function updatePlayerRole(userId: string, role: "ADMIN" | "PLAYER")
 export async function seedPlayerRating(userId: string, rating: number) {
   const session = await auth();
   if (!session?.user?.id) throw new Error("Not authenticated");
-
-  const user = await db.user.findUnique({ where: { id: session.user.id } });
-  if (user?.role !== "ADMIN") throw new Error("Admin only");
+  if (session.user.email !== ADMIN_EMAIL) throw new Error("Admin only");
 
   if (rating < 1 || rating > 10) throw new Error("Rating must be between 1 and 10");
 

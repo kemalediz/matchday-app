@@ -3,7 +3,7 @@
 import { auth } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { activitySchema } from "@/lib/validations";
-import { FORMAT_CONFIG } from "@/lib/constants";
+import { FORMAT_CONFIG, ADMIN_EMAIL } from "@/lib/constants";
 import { revalidatePath } from "next/cache";
 
 export async function createActivity(formData: {
@@ -17,9 +17,7 @@ export async function createActivity(formData: {
 }) {
   const session = await auth();
   if (!session?.user?.id) throw new Error("Not authenticated");
-
-  const user = await db.user.findUnique({ where: { id: session.user.id } });
-  if (user?.role !== "ADMIN") throw new Error("Admin only");
+  if (session.user.email !== ADMIN_EMAIL) throw new Error("Admin only");
 
   const parsed = activitySchema.parse(formData);
 
@@ -43,9 +41,7 @@ export async function updateActivity(
 ) {
   const session = await auth();
   if (!session?.user?.id) throw new Error("Not authenticated");
-
-  const user = await db.user.findUnique({ where: { id: session.user.id } });
-  if (user?.role !== "ADMIN") throw new Error("Admin only");
+  if (session.user.email !== ADMIN_EMAIL) throw new Error("Admin only");
 
   await db.activity.update({
     where: { id: activityId },
@@ -58,9 +54,7 @@ export async function updateActivity(
 export async function deleteActivity(activityId: string) {
   const session = await auth();
   if (!session?.user?.id) throw new Error("Not authenticated");
-
-  const user = await db.user.findUnique({ where: { id: session.user.id } });
-  if (user?.role !== "ADMIN") throw new Error("Admin only");
+  if (session.user.email !== ADMIN_EMAIL) throw new Error("Admin only");
 
   await db.activity.update({
     where: { id: activityId },
@@ -73,9 +67,7 @@ export async function deleteActivity(activityId: string) {
 export async function generateMatchesForActivity(activityId: string) {
   const session = await auth();
   if (!session?.user?.id) throw new Error("Not authenticated");
-
-  const user = await db.user.findUnique({ where: { id: session.user.id } });
-  if (user?.role !== "ADMIN") throw new Error("Admin only");
+  if (session.user.email !== ADMIN_EMAIL) throw new Error("Admin only");
 
   const activity = await db.activity.findUnique({ where: { id: activityId } });
   if (!activity) throw new Error("Activity not found");
