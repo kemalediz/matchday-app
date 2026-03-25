@@ -7,6 +7,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { FORMAT_CONFIG } from "@/lib/constants";
 import { format } from "date-fns";
+import { Calendar, Trophy, MapPin, Users, Clock, ChevronRight } from "lucide-react";
 
 export default async function DashboardPage() {
   const session = await auth();
@@ -54,34 +55,43 @@ export default async function DashboardPage() {
   const benchCount = nextMatch?.attendances.filter((a) => a.status === "BENCH").length ?? 0;
 
   return (
-    <div className="mx-auto max-w-5xl px-4 py-8 space-y-6">
-      <h1 className="text-2xl font-bold">Welcome back, {user.name}!</h1>
+    <div className="mx-auto max-w-6xl px-6 py-10 space-y-8">
+      <div>
+        <h1>Welcome back, {user.name}!</h1>
+        <p className="text-muted-foreground mt-1">Here&apos;s what&apos;s happening with your matches.</p>
+      </div>
 
-      <div className="grid gap-4 sm:grid-cols-3">
-        <Card>
+      <div className="grid gap-5 sm:grid-cols-3">
+        <Card className="shadow-sm">
           <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground">Matches Played</CardTitle>
+            <CardTitle className="text-sm font-medium text-muted-foreground flex items-center gap-2">
+              <Calendar className="h-4 w-4" />
+              Matches Played
+            </CardTitle>
           </CardHeader>
           <CardContent>
-            <p className="text-3xl font-bold">{matchesPlayed}</p>
+            <p className="text-4xl font-bold">{matchesPlayed}</p>
           </CardContent>
         </Card>
-        <Card>
+        <Card className="shadow-sm">
           <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground">MoM Awards</CardTitle>
+            <CardTitle className="text-sm font-medium text-muted-foreground flex items-center gap-2">
+              <Trophy className="h-4 w-4" />
+              MoM Awards
+            </CardTitle>
           </CardHeader>
           <CardContent>
-            <p className="text-3xl font-bold">{momWins.length}</p>
+            <p className="text-4xl font-bold">{momWins.length}</p>
           </CardContent>
         </Card>
-        <Card>
+        <Card className="shadow-sm">
           <CardHeader className="pb-2">
             <CardTitle className="text-sm font-medium text-muted-foreground">Positions</CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="flex gap-1 flex-wrap">
+            <div className="flex gap-2 flex-wrap">
               {user.positions.map((pos) => (
-                <Badge key={pos} variant="secondary">{pos}</Badge>
+                <Badge key={pos} variant="secondary" className="text-sm px-3 py-1">{pos}</Badge>
               ))}
             </div>
           </CardContent>
@@ -89,11 +99,14 @@ export default async function DashboardPage() {
       </div>
 
       {nextMatch && (
-        <Card>
+        <Card className="shadow-sm border-primary/20 bg-gradient-to-br from-card to-accent/30">
           <CardHeader>
             <div className="flex items-center justify-between">
-              <CardTitle>Next Match</CardTitle>
-              <Badge variant={myAttendance && myAttendance.status !== "DROPPED" ? "default" : "outline"}>
+              <CardTitle className="text-xl">Next Match</CardTitle>
+              <Badge
+                variant={myAttendance && myAttendance.status !== "DROPPED" ? "default" : "outline"}
+                className="text-sm px-3 py-1"
+              >
                 {myAttendance?.status === "CONFIRMED"
                   ? "You're in!"
                   : myAttendance?.status === "BENCH"
@@ -102,27 +115,39 @@ export default async function DashboardPage() {
               </Badge>
             </div>
           </CardHeader>
-          <CardContent className="space-y-3">
+          <CardContent className="space-y-4">
             <div>
-              <p className="font-medium">{nextMatch.activity.name}</p>
-              <p className="text-sm text-muted-foreground">
-                {format(nextMatch.date, "EEEE, d MMMM yyyy 'at' HH:mm")}
-              </p>
-              <p className="text-sm text-muted-foreground">{nextMatch.activity.venue}</p>
+              <p className="text-lg font-semibold">{nextMatch.activity.name}</p>
+              <div className="flex flex-col sm:flex-row sm:items-center gap-1 sm:gap-4 mt-2 text-muted-foreground">
+                <span className="flex items-center gap-1.5">
+                  <Clock className="h-4 w-4" />
+                  {format(nextMatch.date, "EEEE, d MMMM yyyy 'at' HH:mm")}
+                </span>
+                <span className="flex items-center gap-1.5">
+                  <MapPin className="h-4 w-4" />
+                  {nextMatch.activity.venue}
+                </span>
+              </div>
             </div>
-            <div className="flex items-center gap-4 text-sm">
-              <span>{confirmedCount}/{nextMatch.maxPlayers} players</span>
+            <div className="flex items-center gap-5 text-[15px]">
+              <span className="flex items-center gap-1.5">
+                <Users className="h-4 w-4 text-muted-foreground" />
+                {confirmedCount}/{nextMatch.maxPlayers} players
+              </span>
               {benchCount > 0 && <span className="text-muted-foreground">{benchCount} on bench</span>}
-              <span className="text-muted-foreground">{FORMAT_CONFIG[nextMatch.format].label}</span>
+              <Badge variant="secondary">{FORMAT_CONFIG[nextMatch.format].label}</Badge>
             </div>
-            <Button render={<Link href={`/matches/${nextMatch.id}`} />}>View Match</Button>
+            <Button render={<Link href={`/matches/${nextMatch.id}`} />} size="lg" className="mt-2">
+              View Match
+              <ChevronRight className="h-4 w-4 ml-1" />
+            </Button>
           </CardContent>
         </Card>
       )}
 
       {!nextMatch && (
-        <Card>
-          <CardContent className="py-8 text-center text-muted-foreground">
+        <Card className="shadow-sm">
+          <CardContent className="py-12 text-center text-muted-foreground text-lg">
             No upcoming matches scheduled. Check back later!
           </CardContent>
         </Card>
@@ -130,21 +155,21 @@ export default async function DashboardPage() {
 
       {recentMatches.length > 0 && (
         <div>
-          <h2 className="text-lg font-semibold mb-3">Recent Results</h2>
-          <div className="space-y-2">
+          <h2 className="mb-4">Recent Results</h2>
+          <div className="space-y-3">
             {recentMatches.map((match) => (
               <Link key={match.id} href={`/matches/${match.id}`}>
-                <Card className="hover:bg-accent/50 transition-colors">
-                  <CardContent className="py-3 flex items-center justify-between">
+                <Card className="hover:bg-accent/50 transition-all hover:shadow-sm shadow-none">
+                  <CardContent className="py-4 flex items-center justify-between">
                     <div>
-                      <p className="font-medium">{match.activity.name}</p>
-                      <p className="text-sm text-muted-foreground">{format(match.date, "d MMM yyyy")}</p>
+                      <p className="text-[15px] font-semibold">{match.activity.name}</p>
+                      <p className="text-sm text-muted-foreground mt-0.5">{format(match.date, "d MMM yyyy")}</p>
                     </div>
                     {match.redScore !== null && match.yellowScore !== null && (
-                      <div className="flex items-center gap-2 text-sm font-mono">
-                        <span className="text-red-500 font-bold">{match.redScore}</span>
-                        <span className="text-muted-foreground">-</span>
-                        <span className="text-yellow-500 font-bold">{match.yellowScore}</span>
+                      <div className="flex items-center gap-3 text-lg font-mono font-bold">
+                        <span className="text-red-500">{match.redScore}</span>
+                        <span className="text-muted-foreground text-base">-</span>
+                        <span className="text-yellow-500">{match.yellowScore}</span>
                       </div>
                     )}
                   </CardContent>

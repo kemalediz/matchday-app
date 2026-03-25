@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -11,6 +11,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from 
 import { createActivity, updateActivity, generateMatchesForActivity } from "@/app/actions/activities";
 import { DAYS_OF_WEEK } from "@/lib/constants";
 import { toast } from "sonner";
+import { Plus, Zap } from "lucide-react";
 
 interface Activity {
   id: string;
@@ -87,28 +88,31 @@ export default function ActivitiesPage() {
     }
   }
 
-  if (loading) return <p className="text-muted-foreground">Loading...</p>;
+  if (loading) return <p className="text-muted-foreground text-lg">Loading...</p>;
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-8">
       <div className="flex items-center justify-between">
-        <h2 className="text-lg font-semibold">Activities</h2>
+        <h2>Activities</h2>
         <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
-          <DialogTrigger render={<Button />}>Create Activity</DialogTrigger>
-          <DialogContent>
+          <DialogTrigger render={<Button size="lg" />}>
+            <Plus className="h-4 w-4 mr-2" />
+            Create Activity
+          </DialogTrigger>
+          <DialogContent className="sm:max-w-md">
             <DialogHeader>
-              <DialogTitle>New Activity</DialogTitle>
+              <DialogTitle className="text-xl">New Activity</DialogTitle>
             </DialogHeader>
-            <form onSubmit={handleCreate} className="space-y-4">
+            <form onSubmit={handleCreate} className="space-y-5 mt-2">
               <div className="space-y-2">
-                <Label>Name</Label>
-                <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g., Tuesday 7-a-side" />
+                <Label className="text-[15px]">Name</Label>
+                <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g., Tuesday 7-a-side" className="h-11" />
               </div>
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-2">
-                  <Label>Day</Label>
+                  <Label className="text-[15px]">Day</Label>
                   <Select value={dayOfWeek} onValueChange={(v) => v && setDayOfWeek(v)}>
-                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectTrigger className="h-11"><SelectValue /></SelectTrigger>
                     <SelectContent>
                       {DAYS_OF_WEEK.map((day, i) => (
                         <SelectItem key={i} value={String(i)}>{day}</SelectItem>
@@ -117,19 +121,19 @@ export default function ActivitiesPage() {
                   </Select>
                 </div>
                 <div className="space-y-2">
-                  <Label>Time</Label>
-                  <Input type="time" value={time} onChange={(e) => setTime(e.target.value)} />
+                  <Label className="text-[15px]">Time</Label>
+                  <Input type="time" value={time} onChange={(e) => setTime(e.target.value)} className="h-11" />
                 </div>
               </div>
               <div className="space-y-2">
-                <Label>Venue</Label>
-                <Input value={venue} onChange={(e) => setVenue(e.target.value)} placeholder="e.g., Goals North Cheam" />
+                <Label className="text-[15px]">Venue</Label>
+                <Input value={venue} onChange={(e) => setVenue(e.target.value)} placeholder="e.g., Goals North Cheam" className="h-11" />
               </div>
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-2">
-                  <Label>Format</Label>
+                  <Label className="text-[15px]">Format</Label>
                   <Select value={format} onValueChange={(v) => v && setFormat(v as typeof format)}>
-                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectTrigger className="h-11"><SelectValue /></SelectTrigger>
                     <SelectContent>
                       <SelectItem value="SEVEN_A_SIDE">7-a-side (14 players)</SelectItem>
                       <SelectItem value="FIVE_A_SIDE">5-a-side (10 players)</SelectItem>
@@ -137,11 +141,11 @@ export default function ActivitiesPage() {
                   </Select>
                 </div>
                 <div className="space-y-2">
-                  <Label>Deadline (hours before)</Label>
-                  <Input type="number" value={deadlineHours} onChange={(e) => setDeadlineHours(e.target.value)} min="1" max="48" />
+                  <Label className="text-[15px]">Deadline (hours before)</Label>
+                  <Input type="number" value={deadlineHours} onChange={(e) => setDeadlineHours(e.target.value)} min="1" max="48" className="h-11" />
                 </div>
               </div>
-              <Button type="submit" className="w-full">Create</Button>
+              <Button type="submit" className="w-full text-base py-5" size="lg">Create</Button>
             </form>
           </DialogContent>
         </Dialog>
@@ -149,11 +153,11 @@ export default function ActivitiesPage() {
 
       <div className="space-y-3">
         {activities.map((activity) => (
-          <Card key={activity.id}>
-            <CardContent className="py-4 flex items-center justify-between">
-              <div>
-                <div className="flex items-center gap-2">
-                  <p className="font-medium">{activity.name}</p>
+          <Card key={activity.id} className="shadow-sm">
+            <CardContent className="py-5 flex items-center justify-between gap-4">
+              <div className="space-y-1">
+                <div className="flex items-center gap-2.5">
+                  <p className="text-[15px] font-semibold">{activity.name}</p>
                   <Badge variant={activity.isActive ? "default" : "secondary"}>
                     {activity.isActive ? "Active" : "Inactive"}
                   </Badge>
@@ -165,11 +169,12 @@ export default function ActivitiesPage() {
                   {activity.format === "SEVEN_A_SIDE" ? "7-a-side" : "5-a-side"} &middot; Deadline: {activity.deadlineHours}h before
                 </p>
               </div>
-              <div className="flex gap-2">
-                <Button size="sm" variant="outline" onClick={() => handleGenerateMatch(activity.id)}>
+              <div className="flex gap-2 shrink-0">
+                <Button variant="outline" onClick={() => handleGenerateMatch(activity.id)}>
+                  <Zap className="h-4 w-4 mr-1.5" />
                   Generate Match
                 </Button>
-                <Button size="sm" variant="ghost" onClick={() => handleToggleActive(activity)}>
+                <Button variant="ghost" onClick={() => handleToggleActive(activity)}>
                   {activity.isActive ? "Deactivate" : "Activate"}
                 </Button>
               </div>
@@ -177,7 +182,7 @@ export default function ActivitiesPage() {
           </Card>
         ))}
         {activities.length === 0 && (
-          <p className="text-muted-foreground text-center py-8">No activities yet. Create your first one!</p>
+          <p className="text-muted-foreground text-center py-12 text-lg">No activities yet. Create your first one!</p>
         )}
       </div>
     </div>

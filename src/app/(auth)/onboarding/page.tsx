@@ -48,33 +48,34 @@ export default function OnboardingPage() {
   }
 
   return (
-    <div className="flex min-h-[80vh] items-center justify-center px-4">
-      <Card className="w-full max-w-md">
-        <CardHeader className="text-center">
-          <CardTitle>Welcome to MatchDay!</CardTitle>
-          <CardDescription>Set up your player profile to get started</CardDescription>
+    <div className="flex min-h-[80vh] items-center justify-center px-6">
+      <Card className="w-full max-w-md shadow-lg">
+        <CardHeader className="text-center space-y-2">
+          <CardTitle className="text-2xl">Welcome to MatchDay!</CardTitle>
+          <CardDescription className="text-base">Set up your player profile to get started</CardDescription>
         </CardHeader>
         <CardContent>
           <form onSubmit={handleSubmit} className="space-y-6">
             <div className="space-y-2">
-              <Label htmlFor="name">Your Name</Label>
+              <Label htmlFor="name" className="text-[15px]">Your Name</Label>
               <Input
                 id="name"
                 value={name}
                 onChange={(e) => setName(e.target.value)}
                 placeholder="Enter your name"
+                className="h-11 text-[15px]"
               />
             </div>
 
-            <div className="space-y-2">
-              <Label>Preferred Positions</Label>
-              <p className="text-sm text-muted-foreground">Select all positions you can play (in order of preference)</p>
-              <div className="flex flex-wrap gap-2">
+            <div className="space-y-3">
+              <Label className="text-[15px]">Preferred Positions</Label>
+              <p className="text-sm text-muted-foreground">Select all positions you can play</p>
+              <div className="flex flex-wrap gap-3">
                 {POSITIONS.map((pos) => (
                   <Badge
                     key={pos}
                     variant={selectedPositions.includes(pos) ? "default" : "outline"}
-                    className="cursor-pointer text-sm px-3 py-1"
+                    className="cursor-pointer text-sm px-4 py-2 hover:bg-primary/10 transition-colors"
                     onClick={() => togglePosition(pos)}
                   >
                     {POSITION_LABELS[pos]}
@@ -83,9 +84,9 @@ export default function OnboardingPage() {
               </div>
             </div>
 
-            {error && <p className="text-sm text-destructive">{error}</p>}
+            {error && <p className="text-sm text-destructive font-medium">{error}</p>}
 
-            <Button type="submit" className="w-full" disabled={loading}>
+            <Button type="submit" className="w-full text-base py-5" size="lg" disabled={loading}>
               {loading ? "Saving..." : "Complete Setup"}
             </Button>
           </form>

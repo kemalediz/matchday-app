@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useParams, useRouter } from "next/navigation";
+import { useParams } from "next/navigation";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
@@ -11,6 +11,7 @@ import { Label } from "@/components/ui/label";
 import { generateTeams, swapPlayers, publishTeams } from "@/app/actions/teams";
 import { updateMatchScore } from "@/app/actions/matches";
 import { toast } from "sonner";
+import { RefreshCw, Send, Save } from "lucide-react";
 
 interface Player {
   id: string;
@@ -27,7 +28,6 @@ interface TeamAssignment {
 
 export default function TeamManagementPage() {
   const { matchId } = useParams<{ matchId: string }>();
-  const router = useRouter();
   const [match, setMatch] = useState<{
     status: string;
     teamAssignments: TeamAssignment[];
@@ -105,25 +105,25 @@ export default function TeamManagementPage() {
     });
   }
 
-  if (loading) return <p className="text-muted-foreground">Loading...</p>;
-  if (!match) return <p className="text-muted-foreground">Match not found</p>;
+  if (loading) return <p className="text-muted-foreground text-lg">Loading...</p>;
+  if (!match) return <p className="text-muted-foreground text-lg">Match not found</p>;
 
   const redTeam = match.teamAssignments.filter((a) => a.team === "RED");
   const yellowTeam = match.teamAssignments.filter((a) => a.team === "YELLOW");
   const hasTeams = match.teamAssignments.length > 0;
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-8">
       <div className="flex items-center justify-between">
-        <h2 className="text-lg font-semibold">Team Management</h2>
-        <Badge>{match.status.replace("_", " ")}</Badge>
+        <h2>Team Management</h2>
+        <Badge className="text-sm px-3 py-1">{match.status.replace(/_/g, " ")}</Badge>
       </div>
 
       {!hasTeams && (
-        <Card>
-          <CardContent className="py-8 text-center">
-            <p className="text-muted-foreground mb-4">No teams generated yet.</p>
-            <Button onClick={handleGenerate}>Generate Teams</Button>
+        <Card className="shadow-sm">
+          <CardContent className="py-12 text-center">
+            <p className="text-muted-foreground mb-5 text-lg">No teams generated yet.</p>
+            <Button onClick={handleGenerate} size="lg">Generate Teams</Button>
           </CardContent>
         </Card>
       )}
@@ -131,18 +131,18 @@ export default function TeamManagementPage() {
       {hasTeams && (
         <>
           {selectedSwap.length === 2 && (
-            <div className="flex items-center gap-3 p-3 bg-accent rounded-lg">
-              <p className="text-sm flex-1">Swap these two players?</p>
-              <Button size="sm" onClick={handleSwap}>Confirm Swap</Button>
-              <Button size="sm" variant="ghost" onClick={() => setSelectedSwap([])}>Cancel</Button>
+            <div className="flex items-center gap-3 p-4 bg-accent rounded-xl border border-primary/20">
+              <p className="text-[15px] flex-1 font-medium">Swap these two players?</p>
+              <Button onClick={handleSwap}>Confirm Swap</Button>
+              <Button variant="ghost" onClick={() => setSelectedSwap([])}>Cancel</Button>
             </div>
           )}
 
-          <div className="grid gap-4 sm:grid-cols-2">
-            <Card className="border-red-200 dark:border-red-900">
-              <CardHeader className="pb-2">
-                <CardTitle className="flex items-center gap-2">
-                  <span className="h-3 w-3 rounded-full bg-red-500" /> Red Team
+          <div className="grid gap-5 sm:grid-cols-2">
+            <Card className="border-2 border-red-200 dark:border-red-900/50 shadow-sm">
+              <CardHeader className="pb-3">
+                <CardTitle className="flex items-center gap-2.5 text-lg">
+                  <span className="h-4 w-4 rounded-full bg-red-500" /> Red Team
                 </CardTitle>
               </CardHeader>
               <CardContent>
@@ -151,15 +151,15 @@ export default function TeamManagementPage() {
                     <li
                       key={a.userId}
                       onClick={() => toggleSwap(a.userId)}
-                      className={`flex items-center gap-2 p-2 rounded cursor-pointer transition-colors ${
-                        selectedSwap.includes(a.userId) ? "bg-primary/10 ring-1 ring-primary" : "hover:bg-accent"
+                      className={`flex items-center gap-3 p-3 rounded-lg cursor-pointer transition-all ${
+                        selectedSwap.includes(a.userId) ? "bg-primary/10 ring-2 ring-primary shadow-sm" : "hover:bg-accent"
                       }`}
                     >
-                      <Avatar className="h-6 w-6">
+                      <Avatar className="h-8 w-8">
                         <AvatarImage src={a.user.image ?? undefined} />
-                        <AvatarFallback className="text-xs">{a.user.name?.charAt(0)}</AvatarFallback>
+                        <AvatarFallback className="text-xs bg-red-50 text-red-700 dark:bg-red-950 dark:text-red-300 font-semibold">{a.user.name?.charAt(0)}</AvatarFallback>
                       </Avatar>
-                      <span className="text-sm">{a.user.name}</span>
+                      <span className="text-[15px] font-medium">{a.user.name}</span>
                       {a.user.positions.length > 0 && (
                         <Badge variant="outline" className="text-xs ml-auto">{a.user.positions[0]}</Badge>
                       )}
@@ -169,10 +169,10 @@ export default function TeamManagementPage() {
               </CardContent>
             </Card>
 
-            <Card className="border-yellow-200 dark:border-yellow-900">
-              <CardHeader className="pb-2">
-                <CardTitle className="flex items-center gap-2">
-                  <span className="h-3 w-3 rounded-full bg-yellow-400" /> Yellow Team
+            <Card className="border-2 border-yellow-200 dark:border-yellow-900/50 shadow-sm">
+              <CardHeader className="pb-3">
+                <CardTitle className="flex items-center gap-2.5 text-lg">
+                  <span className="h-4 w-4 rounded-full bg-yellow-400" /> Yellow Team
                 </CardTitle>
               </CardHeader>
               <CardContent>
@@ -181,15 +181,15 @@ export default function TeamManagementPage() {
                     <li
                       key={a.userId}
                       onClick={() => toggleSwap(a.userId)}
-                      className={`flex items-center gap-2 p-2 rounded cursor-pointer transition-colors ${
-                        selectedSwap.includes(a.userId) ? "bg-primary/10 ring-1 ring-primary" : "hover:bg-accent"
+                      className={`flex items-center gap-3 p-3 rounded-lg cursor-pointer transition-all ${
+                        selectedSwap.includes(a.userId) ? "bg-primary/10 ring-2 ring-primary shadow-sm" : "hover:bg-accent"
                       }`}
                     >
-                      <Avatar className="h-6 w-6">
+                      <Avatar className="h-8 w-8">
                         <AvatarImage src={a.user.image ?? undefined} />
-                        <AvatarFallback className="text-xs">{a.user.name?.charAt(0)}</AvatarFallback>
+                        <AvatarFallback className="text-xs bg-yellow-50 text-yellow-700 dark:bg-yellow-950 dark:text-yellow-300 font-semibold">{a.user.name?.charAt(0)}</AvatarFallback>
                       </Avatar>
-                      <span className="text-sm">{a.user.name}</span>
+                      <span className="text-[15px] font-medium">{a.user.name}</span>
                       {a.user.positions.length > 0 && (
                         <Badge variant="outline" className="text-xs ml-auto">{a.user.positions[0]}</Badge>
                       )}
@@ -201,46 +201,55 @@ export default function TeamManagementPage() {
           </div>
 
           <div className="flex gap-3">
-            <Button onClick={handleGenerate} variant="outline">Regenerate</Button>
+            <Button onClick={handleGenerate} variant="outline" size="lg">
+              <RefreshCw className="h-4 w-4 mr-2" />
+              Regenerate
+            </Button>
             {match.status === "TEAMS_GENERATED" && (
-              <Button onClick={handlePublish}>Publish Teams</Button>
+              <Button onClick={handlePublish} size="lg">
+                <Send className="h-4 w-4 mr-2" />
+                Publish Teams
+              </Button>
             )}
           </div>
         </>
       )}
 
-      {/* Score entry - available when teams are published */}
+      {/* Score entry */}
       {(match.status === "TEAMS_PUBLISHED" || match.status === "COMPLETED") && (
-        <Card>
+        <Card className="shadow-sm">
           <CardHeader>
-            <CardTitle>Match Score</CardTitle>
+            <CardTitle className="text-xl">Match Score</CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="flex items-center gap-4">
-              <div className="flex items-center gap-2">
-                <span className="h-3 w-3 rounded-full bg-red-500" />
-                <Label>Red</Label>
+            <div className="flex items-center gap-5">
+              <div className="flex items-center gap-3">
+                <span className="h-4 w-4 rounded-full bg-red-500" />
+                <Label className="text-[15px] font-medium">Red</Label>
                 <Input
                   type="number"
-                  className="w-16"
+                  className="w-20 h-11 text-center text-lg font-bold"
                   value={redScore}
                   onChange={(e) => setRedScore(e.target.value)}
                   min="0"
                 />
               </div>
-              <span className="text-muted-foreground">-</span>
-              <div className="flex items-center gap-2">
-                <span className="h-3 w-3 rounded-full bg-yellow-400" />
-                <Label>Yellow</Label>
+              <span className="text-xl text-muted-foreground font-bold">-</span>
+              <div className="flex items-center gap-3">
+                <span className="h-4 w-4 rounded-full bg-yellow-400" />
+                <Label className="text-[15px] font-medium">Yellow</Label>
                 <Input
                   type="number"
-                  className="w-16"
+                  className="w-20 h-11 text-center text-lg font-bold"
                   value={yellowScore}
                   onChange={(e) => setYellowScore(e.target.value)}
                   min="0"
                 />
               </div>
-              <Button onClick={handleScore}>Save Score</Button>
+              <Button onClick={handleScore} size="lg">
+                <Save className="h-4 w-4 mr-2" />
+                Save Score
+              </Button>
             </div>
           </CardContent>
         </Card>

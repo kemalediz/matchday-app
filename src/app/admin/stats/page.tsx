@@ -1,10 +1,10 @@
 import { db } from "@/lib/db";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent } from "@/components/ui/card";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
+import { Trophy, Star } from "lucide-react";
 
 export default async function StatsPage() {
-  // Top rated players
   const players = await db.user.findMany({
     where: { isActive: true },
     include: {
@@ -28,21 +28,23 @@ export default async function StatsPage() {
     .sort((a, b) => (b.avgRating ?? 0) - (a.avgRating ?? 0));
 
   return (
-    <div className="space-y-6">
-      <h2 className="text-lg font-semibold">Player Leaderboard</h2>
+    <div className="space-y-8">
+      <h2>Player Leaderboard</h2>
 
-      <div className="space-y-2">
+      <div className="space-y-3">
         {playerStats.map((player, i) => (
-          <Card key={player.id}>
-            <CardContent className="py-3 flex items-center gap-4">
-              <span className="text-lg font-bold text-muted-foreground w-8">{i + 1}</span>
-              <Avatar className="h-8 w-8">
+          <Card key={player.id} className={`shadow-sm ${i < 3 ? "border-primary/20" : ""}`}>
+            <CardContent className="py-4 flex items-center gap-4">
+              <span className={`text-xl font-bold w-10 text-center ${i < 3 ? "text-primary" : "text-muted-foreground"}`}>
+                {i === 0 ? <Trophy className="h-6 w-6 text-yellow-500 mx-auto" /> : i + 1}
+              </span>
+              <Avatar className="h-10 w-10">
                 <AvatarImage src={player.image ?? undefined} />
-                <AvatarFallback>{player.name?.charAt(0) ?? "?"}</AvatarFallback>
+                <AvatarFallback className="bg-primary/10 text-primary font-semibold">{player.name?.charAt(0) ?? "?"}</AvatarFallback>
               </Avatar>
               <div className="flex-1 min-w-0">
-                <p className="font-medium truncate">{player.name}</p>
-                <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                <p className="text-[15px] font-semibold truncate">{player.name}</p>
+                <div className="flex items-center gap-2 text-sm text-muted-foreground mt-0.5">
                   {player.positions.slice(0, 2).map((pos) => (
                     <Badge key={pos} variant="outline" className="text-xs">{pos}</Badge>
                   ))}
@@ -50,14 +52,16 @@ export default async function StatsPage() {
                 </div>
               </div>
               <div className="text-right">
-                <p className="text-lg font-bold">{player.avgRating?.toFixed(1) ?? "N/A"}</p>
-                <p className="text-xs text-muted-foreground">{player.momVotes} MoM votes</p>
+                <p className="text-xl font-bold">{player.avgRating?.toFixed(1) ?? "N/A"}</p>
+                <p className="text-xs text-muted-foreground flex items-center justify-end gap-1">
+                  <Star className="h-3 w-3" /> {player.momVotes} MoM
+                </p>
               </div>
             </CardContent>
           </Card>
         ))}
         {playerStats.length === 0 && (
-          <p className="text-muted-foreground text-center py-8">No stats available yet.</p>
+          <p className="text-muted-foreground text-center py-12 text-lg">No stats available yet.</p>
         )}
       </div>
     </div>

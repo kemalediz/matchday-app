@@ -11,6 +11,7 @@ import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { submitRatings, submitMoMVote } from "@/app/actions/ratings";
 import { toast } from "sonner";
+import { Star, Send } from "lucide-react";
 
 interface Player {
   id: string;
@@ -82,31 +83,35 @@ export default function RatePlayersPage() {
 
   if (loading) {
     return (
-      <div className="mx-auto max-w-3xl px-4 py-8">
-        <p className="text-muted-foreground">Loading...</p>
+      <div className="mx-auto max-w-3xl px-6 py-10">
+        <p className="text-muted-foreground text-lg">Loading...</p>
       </div>
     );
   }
 
   return (
-    <div className="mx-auto max-w-3xl px-4 py-8 space-y-6">
-      <h1 className="text-2xl font-bold">Rate Players</h1>
-      <p className="text-muted-foreground">Rate each player&apos;s performance (1-10) and pick your Man of the Match.</p>
+    <div className="mx-auto max-w-3xl px-6 py-10 space-y-8">
+      <div>
+        <h1>Rate Players</h1>
+        <p className="text-muted-foreground mt-1 text-lg">Rate each player&apos;s performance (1-10) and pick your Man of the Match.</p>
+      </div>
 
-      <Card>
+      <Card className="shadow-sm">
         <CardHeader>
-          <CardTitle>Player Ratings</CardTitle>
+          <CardTitle className="text-xl">Player Ratings</CardTitle>
         </CardHeader>
-        <CardContent className="space-y-6">
+        <CardContent className="space-y-8">
           {players.map((player) => (
-            <div key={player.id} className="space-y-2">
+            <div key={player.id} className="space-y-3">
               <div className="flex items-center gap-3">
-                <Avatar className="h-8 w-8">
+                <Avatar className="h-10 w-10">
                   <AvatarImage src={player.image ?? undefined} />
-                  <AvatarFallback>{player.name?.charAt(0)}</AvatarFallback>
+                  <AvatarFallback className="bg-primary/10 text-primary font-semibold">
+                    {player.name?.charAt(0)}
+                  </AvatarFallback>
                 </Avatar>
-                <span className="font-medium flex-1">{player.name}</span>
-                <span className="text-lg font-bold w-8 text-center">{ratings[player.id] ?? 5}</span>
+                <span className="font-semibold text-[15px] flex-1">{player.name}</span>
+                <span className="text-2xl font-bold text-primary w-10 text-center">{ratings[player.id] ?? 5}</span>
               </div>
               <Slider
                 value={[ratings[player.id] ?? 5]}
@@ -119,6 +124,11 @@ export default function RatePlayersPage() {
                 step={1}
                 className="w-full"
               />
+              <div className="flex justify-between text-xs text-muted-foreground px-1">
+                <span>1</span>
+                <span>5</span>
+                <span>10</span>
+              </div>
             </div>
           ))}
         </CardContent>
@@ -126,35 +136,39 @@ export default function RatePlayersPage() {
 
       <Separator />
 
-      <Card>
+      <Card className="shadow-sm">
         <CardHeader>
-          <CardTitle>Man of the Match</CardTitle>
+          <CardTitle className="text-xl flex items-center gap-2">
+            <Star className="h-5 w-5 text-yellow-500" />
+            Man of the Match
+          </CardTitle>
         </CardHeader>
         <CardContent>
-          <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
             {players.map((player) => (
               <button
                 key={player.id}
                 onClick={() => setMomPick(player.id)}
-                className={`flex items-center gap-2 p-3 rounded-lg border transition-colors ${
+                className={`flex items-center gap-3 p-4 rounded-xl border-2 transition-all ${
                   momPick === player.id
-                    ? "border-primary bg-primary/5"
-                    : "border-border hover:bg-accent/50"
+                    ? "border-primary bg-primary/5 shadow-sm"
+                    : "border-border hover:bg-accent/50 hover:border-primary/30"
                 }`}
               >
-                <Avatar className="h-6 w-6">
+                <Avatar className="h-8 w-8">
                   <AvatarImage src={player.image ?? undefined} />
-                  <AvatarFallback className="text-xs">{player.name?.charAt(0)}</AvatarFallback>
+                  <AvatarFallback className="text-xs bg-primary/10 text-primary">{player.name?.charAt(0)}</AvatarFallback>
                 </Avatar>
-                <span className="text-sm truncate">{player.name}</span>
-                {momPick === player.id && <Badge className="ml-auto text-xs">MoM</Badge>}
+                <span className="text-sm font-medium truncate">{player.name}</span>
+                {momPick === player.id && <Badge className="ml-auto text-xs shrink-0">MoM</Badge>}
               </button>
             ))}
           </div>
         </CardContent>
       </Card>
 
-      <Button onClick={handleSubmit} disabled={submitting} size="lg" className="w-full">
+      <Button onClick={handleSubmit} disabled={submitting} size="lg" className="w-full text-base py-6">
+        <Send className="h-4 w-4 mr-2" />
         {submitting ? "Submitting..." : "Submit Ratings"}
       </Button>
     </div>

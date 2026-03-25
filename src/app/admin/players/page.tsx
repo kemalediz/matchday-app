@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
@@ -56,33 +56,33 @@ export default function PlayersPage() {
     }
   }
 
-  if (loading) return <p className="text-muted-foreground">Loading...</p>;
+  if (loading) return <p className="text-muted-foreground text-lg">Loading...</p>;
 
   return (
-    <div className="space-y-6">
-      <h2 className="text-lg font-semibold">Players ({players.length})</h2>
+    <div className="space-y-8">
+      <h2>Players ({players.length})</h2>
 
-      <div className="space-y-2">
+      <div className="space-y-3">
         {players.map((player) => (
-          <Card key={player.id}>
-            <CardContent className="py-3 flex items-center gap-4">
-              <Avatar className="h-8 w-8">
+          <Card key={player.id} className="shadow-sm">
+            <CardContent className="py-4 flex items-center gap-4">
+              <Avatar className="h-10 w-10">
                 <AvatarImage src={player.image ?? undefined} />
-                <AvatarFallback>{player.name?.charAt(0) ?? "?"}</AvatarFallback>
+                <AvatarFallback className="bg-primary/10 text-primary font-semibold">{player.name?.charAt(0) ?? "?"}</AvatarFallback>
               </Avatar>
               <div className="flex-1 min-w-0">
-                <p className="font-medium truncate">{player.name ?? player.email}</p>
-                <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                <p className="text-[15px] font-semibold truncate">{player.name ?? player.email}</p>
+                <div className="flex items-center gap-2 text-sm text-muted-foreground mt-0.5">
                   {player.positions.map((pos) => (
                     <Badge key={pos} variant="outline" className="text-xs">{pos}</Badge>
                   ))}
                   <span>{player._count.attendances} matches</span>
                 </div>
               </div>
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-3 shrink-0">
                 <Input
                   type="number"
-                  className="w-16 h-8 text-sm"
+                  className="w-20 h-10"
                   placeholder="Seed"
                   defaultValue={player.seedRating ?? ""}
                   min={1}
@@ -91,7 +91,7 @@ export default function PlayersPage() {
                   onBlur={(e) => e.target.value && handleSeedRating(player.id, e.target.value)}
                 />
                 <Select value={player.role} onValueChange={(v) => v && handleRoleChange(player.id, v)}>
-                  <SelectTrigger className="w-24 h-8 text-sm">
+                  <SelectTrigger className="w-28 h-10">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>

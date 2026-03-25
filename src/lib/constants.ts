@@ -1,5 +1,7 @@
 import { MatchFormat, Position } from "@/generated/prisma/client";
 
+export const ADMIN_EMAIL = "kemal.ediz@cressoft.io";
+
 export const POSITION_LABELS: Record<Position, string> = {
   GK: "Goalkeeper",
   DEF: "Defender",

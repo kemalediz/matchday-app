@@ -7,6 +7,7 @@ import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { FORMAT_CONFIG } from "@/lib/constants";
 import { format } from "date-fns";
+import { Calendar, MapPin, Users } from "lucide-react";
 
 export default async function MatchesPage() {
   const session = await auth();
@@ -39,18 +40,18 @@ export default async function MatchesPage() {
   const myAttendanceMap = new Map(myAttendances.map((a) => [a.matchId, a]));
 
   return (
-    <div className="mx-auto max-w-5xl px-4 py-8">
-      <h1 className="text-2xl font-bold mb-6">Matches</h1>
+    <div className="mx-auto max-w-6xl px-6 py-10">
+      <h1 className="mb-8">Matches</h1>
 
       <Tabs defaultValue="upcoming">
-        <TabsList>
-          <TabsTrigger value="upcoming">Upcoming ({upcomingMatches.length})</TabsTrigger>
-          <TabsTrigger value="past">Past ({pastMatches.length})</TabsTrigger>
+        <TabsList className="mb-6">
+          <TabsTrigger value="upcoming" className="text-[15px] px-5">Upcoming ({upcomingMatches.length})</TabsTrigger>
+          <TabsTrigger value="past" className="text-[15px] px-5">Past ({pastMatches.length})</TabsTrigger>
         </TabsList>
 
-        <TabsContent value="upcoming" className="space-y-3 mt-4">
+        <TabsContent value="upcoming" className="space-y-3">
           {upcomingMatches.length === 0 && (
-            <p className="text-muted-foreground py-8 text-center">No upcoming matches</p>
+            <p className="text-muted-foreground py-12 text-center text-lg">No upcoming matches</p>
           )}
           {upcomingMatches.map((match) => {
             const confirmed = match.attendances.filter((a) => a.status === "CONFIRMED").length;
@@ -59,23 +60,33 @@ export default async function MatchesPage() {
 
             return (
               <Link key={match.id} href={`/matches/${match.id}`}>
-                <Card className="hover:bg-accent/50 transition-colors">
-                  <CardContent className="py-4 flex items-center justify-between">
-                    <div>
-                      <p className="font-medium">{match.activity.name}</p>
-                      <p className="text-sm text-muted-foreground">
-                        {format(match.date, "EEE, d MMM yyyy 'at' HH:mm")} &middot; {match.activity.venue}
-                      </p>
-                      <div className="flex items-center gap-3 mt-1 text-sm">
-                        <span>{confirmed}/{match.maxPlayers} players</span>
+                <Card className="hover:bg-accent/50 transition-all hover:shadow-sm shadow-none">
+                  <CardContent className="py-5 flex items-center justify-between gap-4">
+                    <div className="space-y-1.5">
+                      <p className="text-[15px] font-semibold">{match.activity.name}</p>
+                      <div className="flex flex-col sm:flex-row sm:items-center gap-1 sm:gap-4 text-sm text-muted-foreground">
+                        <span className="flex items-center gap-1.5">
+                          <Calendar className="h-3.5 w-3.5" />
+                          {format(match.date, "EEE, d MMM yyyy 'at' HH:mm")}
+                        </span>
+                        <span className="flex items-center gap-1.5">
+                          <MapPin className="h-3.5 w-3.5" />
+                          {match.activity.venue}
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-3 text-sm">
+                        <span className="flex items-center gap-1.5">
+                          <Users className="h-3.5 w-3.5 text-muted-foreground" />
+                          {confirmed}/{match.maxPlayers} players
+                        </span>
                         {bench > 0 && <span className="text-muted-foreground">{bench} on bench</span>}
                         <Badge variant="secondary" className="text-xs">{FORMAT_CONFIG[match.format].label}</Badge>
                       </div>
                     </div>
-                    <div>
-                      {myAtt?.status === "CONFIRMED" && <Badge>In</Badge>}
-                      {myAtt?.status === "BENCH" && <Badge variant="outline">Bench</Badge>}
-                      {!myAtt && <Badge variant="outline">Not signed up</Badge>}
+                    <div className="shrink-0">
+                      {myAtt?.status === "CONFIRMED" && <Badge className="text-sm px-3 py-1">In</Badge>}
+                      {myAtt?.status === "BENCH" && <Badge variant="outline" className="text-sm px-3 py-1">Bench</Badge>}
+                      {!myAtt && <Badge variant="outline" className="text-sm px-3 py-1">Not signed up</Badge>}
                     </div>
                   </CardContent>
                 </Card>
@@ -84,23 +95,23 @@ export default async function MatchesPage() {
           })}
         </TabsContent>
 
-        <TabsContent value="past" className="space-y-3 mt-4">
+        <TabsContent value="past" className="space-y-3">
           {pastMatches.length === 0 && (
-            <p className="text-muted-foreground py-8 text-center">No past matches</p>
+            <p className="text-muted-foreground py-12 text-center text-lg">No past matches</p>
           )}
           {pastMatches.map((match) => (
             <Link key={match.id} href={`/matches/${match.id}`}>
-              <Card className="hover:bg-accent/50 transition-colors">
-                <CardContent className="py-4 flex items-center justify-between">
+              <Card className="hover:bg-accent/50 transition-all hover:shadow-sm shadow-none">
+                <CardContent className="py-5 flex items-center justify-between">
                   <div>
-                    <p className="font-medium">{match.activity.name}</p>
-                    <p className="text-sm text-muted-foreground">{format(match.date, "EEE, d MMM yyyy")}</p>
+                    <p className="text-[15px] font-semibold">{match.activity.name}</p>
+                    <p className="text-sm text-muted-foreground mt-0.5">{format(match.date, "EEE, d MMM yyyy")}</p>
                   </div>
                   {match.redScore !== null && match.yellowScore !== null && (
-                    <div className="flex items-center gap-2 font-mono">
-                      <span className="text-red-500 font-bold">{match.redScore}</span>
-                      <span className="text-muted-foreground">-</span>
-                      <span className="text-yellow-500 font-bold">{match.yellowScore}</span>
+                    <div className="flex items-center gap-3 text-lg font-mono font-bold">
+                      <span className="text-red-500">{match.redScore}</span>
+                      <span className="text-muted-foreground text-base">-</span>
+                      <span className="text-yellow-500">{match.yellowScore}</span>
                     </div>
                   )}
                 </CardContent>

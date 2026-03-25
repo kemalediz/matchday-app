@@ -1,20 +1,22 @@
 import { auth } from "@/lib/auth";
-import { db } from "@/lib/db";
 import { redirect } from "next/navigation";
 import Link from "next/link";
+import { ADMIN_EMAIL } from "@/lib/constants";
 
 export default async function AdminLayout({ children }: { children: React.ReactNode }) {
   const session = await auth();
   if (!session?.user?.id) redirect("/login");
 
-  const user = await db.user.findUnique({ where: { id: session.user.id } });
-  if (user?.role !== "ADMIN") redirect("/");
+  if (session.user.email !== ADMIN_EMAIL) redirect("/");
 
   return (
-    <div className="mx-auto max-w-5xl px-4 py-8">
-      <div className="flex items-center gap-6 mb-6 border-b pb-4">
-        <h1 className="text-2xl font-bold">Admin</h1>
-        <nav className="flex gap-4 text-sm">
+    <div className="mx-auto max-w-6xl px-6 py-10">
+      <div className="flex items-center gap-8 mb-8 border-b pb-5">
+        <h1>Admin</h1>
+        <nav className="flex gap-6 text-[15px] font-medium">
+          <Link href="/admin" className="text-muted-foreground hover:text-foreground transition-colors">
+            Dashboard
+          </Link>
           <Link href="/admin/activities" className="text-muted-foreground hover:text-foreground transition-colors">
             Activities
           </Link>
