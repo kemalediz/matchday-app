@@ -7,6 +7,54 @@ function getResend() {
 const FROM_EMAIL = process.env.EMAIL_FROM || "MatchDay <noreply@resend.dev>";
 const APP_URL = process.env.NEXTAUTH_URL || "https://matchday-nine-zeta.vercel.app";
 
+export async function sendVerificationEmail(
+  email: string,
+  code: string,
+  name?: string | null
+) {
+  if (!process.env.RESEND_API_KEY) {
+    console.log("RESEND_API_KEY not set, verification code:", code);
+    return;
+  }
+
+  await getResend().emails.send({
+    from: FROM_EMAIL,
+    to: email,
+    subject: `Your MatchDay verification code: ${code}`,
+    html: `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+</head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background-color: #f5f5f5; margin: 0; padding: 0;">
+  <div style="max-width: 520px; margin: 40px auto; background: white; border-radius: 12px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.1);">
+    <div style="background: linear-gradient(135deg, #16a34a, #15803d); padding: 32px; text-align: center;">
+      <h1 style="color: white; margin: 0; font-size: 24px; font-weight: 700;">MatchDay</h1>
+    </div>
+    <div style="padding: 32px; text-align: center;">
+      <p style="font-size: 16px; color: #333; margin: 0 0 8px;">Hi ${name || "there"},</p>
+      <p style="font-size: 16px; color: #333; margin: 0 0 24px;">
+        Enter this code to verify your email address:
+      </p>
+      <div style="background: #f0fdf4; border: 2px dashed #16a34a; border-radius: 12px; padding: 24px; margin: 24px 0;">
+        <p style="font-size: 36px; font-weight: 700; letter-spacing: 8px; color: #15803d; margin: 0;">${code}</p>
+      </div>
+      <p style="font-size: 14px; color: #666; margin: 0;">
+        This code expires in 10 minutes.
+      </p>
+    </div>
+    <div style="padding: 16px 32px; background: #fafafa; border-top: 1px solid #eee; text-align: center;">
+      <p style="font-size: 12px; color: #999; margin: 0;">Sent by MatchDay</p>
+    </div>
+  </div>
+</body>
+</html>
+    `.trim(),
+  });
+}
+
 export async function sendRatingEmails(
   matchId: string,
   activityName: string,

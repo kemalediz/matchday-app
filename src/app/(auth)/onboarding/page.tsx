@@ -15,6 +15,7 @@ const POSITIONS = ["GK", "DEF", "MID", "FWD"] as const;
 export default function OnboardingPage() {
   const { data: session } = useSession();
   const [name, setName] = useState(session?.user?.name ?? "");
+  const [phoneNumber, setPhoneNumber] = useState("");
   const [selectedPositions, setSelectedPositions] = useState<string[]>([]);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
@@ -40,7 +41,7 @@ export default function OnboardingPage() {
 
     setLoading(true);
     try {
-      await completeOnboarding({ name: name.trim(), positions: selectedPositions });
+      await completeOnboarding({ name: name.trim(), phoneNumber: phoneNumber.trim() || undefined, positions: selectedPositions });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Something went wrong");
       setLoading(false);
@@ -63,6 +64,18 @@ export default function OnboardingPage() {
                 value={name}
                 onChange={(e) => setName(e.target.value)}
                 placeholder="Enter your name"
+                className="h-11 text-[15px]"
+              />
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="phone" className="text-[15px]">Phone Number <span className="text-muted-foreground font-normal">(optional)</span></Label>
+              <Input
+                id="phone"
+                type="tel"
+                value={phoneNumber}
+                onChange={(e) => setPhoneNumber(e.target.value)}
+                placeholder="+44 7700 900000"
                 className="h-11 text-[15px]"
               />
             </div>

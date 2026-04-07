@@ -8,12 +8,24 @@ const prisma = new PrismaClient({ adapter });
 async function main() {
   console.log("Seeding database...");
 
+  // Create default org
+  const org = await prisma.organisation.upsert({
+    where: { slug: "sutton-fc" },
+    update: {},
+    create: {
+      name: "Sutton Football Club",
+      slug: "sutton-fc",
+    },
+  });
+  console.log(`Created org: ${org.name}`);
+
   // Create activities
   const tuesday7aside = await prisma.activity.upsert({
     where: { id: "tuesday-7aside" },
     update: {},
     create: {
       id: "tuesday-7aside",
+      orgId: org.id,
       name: "Tuesday 7-a-side",
       dayOfWeek: 2,
       time: "21:30",
@@ -30,6 +42,7 @@ async function main() {
     update: {},
     create: {
       id: "tuesday-5aside",
+      orgId: org.id,
       name: "Tuesday 5-a-side",
       dayOfWeek: 2,
       time: "21:30",
@@ -44,55 +57,47 @@ async function main() {
 
   // Seed known players
   type P = "GK" | "DEF" | "MID" | "FWD";
-  type R = "ADMIN" | "PLAYER";
-  const players: { name: string; email: string; positions: P[]; role: R; seedRating: number }[] = [
-    { name: "Kemal Ediz", email: "kemal@matchday.local", positions: ["GK", "MID"], role: "ADMIN", seedRating: 6.5 },
-    { name: "Elvin Azeri", email: "elvin@matchday.local", positions: ["MID", "FWD"], role: "ADMIN", seedRating: 7.0 },
-    { name: "Wasim", email: "wasim@matchday.local", positions: ["MID", "FWD"], role: "PLAYER", seedRating: 7.0 },
-    { name: "Hasan Altun", email: "hasan@matchday.local", positions: ["DEF", "MID"], role: "PLAYER", seedRating: 6.5 },
-    { name: "Recai Gunay", email: "recai@matchday.local", positions: ["MID", "FWD"], role: "PLAYER", seedRating: 6.0 },
-    { name: "Idris Y", email: "idris@matchday.local", positions: ["DEF"], role: "PLAYER", seedRating: 6.0 },
-    { name: "Mustafa Cayir", email: "mustafa@matchday.local", positions: ["MID", "FWD"], role: "PLAYER", seedRating: 6.5 },
-    { name: "Sait", email: "sait@matchday.local", positions: ["MID"], role: "PLAYER", seedRating: 6.0 },
-    { name: "Ilkay", email: "ilkay@matchday.local", positions: ["MID", "FWD"], role: "PLAYER", seedRating: 6.5 },
-    { name: "Ersan Arik", email: "ersan@matchday.local", positions: ["FWD", "MID"], role: "PLAYER", seedRating: 7.0 },
-    { name: "Zair", email: "zair@matchday.local", positions: ["DEF", "MID"], role: "PLAYER", seedRating: 6.0 },
-    { name: "Michael Allen", email: "michael@matchday.local", positions: ["MID", "FWD"], role: "PLAYER", seedRating: 6.0 },
-    { name: "Elnur Mammadov", email: "elnur@matchday.local", positions: ["MID", "FWD"], role: "PLAYER", seedRating: 6.5 },
-    { name: "Mojib", email: "mojib@matchday.local", positions: ["MID", "DEF"], role: "PLAYER", seedRating: 5.5 },
-    { name: "Omar", email: "omar@matchday.local", positions: ["MID", "GK"], role: "PLAYER", seedRating: 6.0 },
-    { name: "Baki", email: "baki@matchday.local", positions: ["MID", "FWD"], role: "PLAYER", seedRating: 6.5 },
-    { name: "Fatih Incefidan", email: "fatih@matchday.local", positions: ["MID"], role: "PLAYER", seedRating: 6.0 },
-    { name: "Burak Yildiz", email: "burak@matchday.local", positions: ["FWD", "MID"], role: "PLAYER", seedRating: 6.0 },
-    { name: "Ersin Sevindik", email: "ersin@matchday.local", positions: ["GK"], role: "PLAYER", seedRating: 6.5 },
-    { name: "Akin", email: "akin@matchday.local", positions: ["GK"], role: "PLAYER", seedRating: 6.0 },
-    { name: "Ali", email: "ali@matchday.local", positions: ["DEF"], role: "PLAYER", seedRating: 7.0 },
-    { name: "Muharrem Arslan", email: "muharrem@matchday.local", positions: ["MID", "DEF"], role: "PLAYER", seedRating: 6.0 },
-    { name: "Merdan Parahat", email: "merdan@matchday.local", positions: ["MID", "FWD"], role: "PLAYER", seedRating: 6.5 },
-    { name: "Habib", email: "habib@matchday.local", positions: ["MID"], role: "PLAYER", seedRating: 5.5 },
-    { name: "Eren", email: "eren@matchday.local", positions: ["FWD", "MID"], role: "PLAYER", seedRating: 6.5 },
-    { name: "Hakan U", email: "hakan@matchday.local", positions: ["MID", "DEF"], role: "PLAYER", seedRating: 6.0 },
-    { name: "Ozgur", email: "ozgur@matchday.local", positions: ["MID"], role: "PLAYER", seedRating: 6.0 },
-    { name: "Fabrizio", email: "fab@matchday.local", positions: ["MID", "FWD"], role: "PLAYER", seedRating: 6.0 },
-    { name: "Erdal", email: "erdal@matchday.local", positions: ["FWD", "MID"], role: "PLAYER", seedRating: 6.0 },
-    { name: "Aykut Arsoy", email: "aykut@matchday.local", positions: ["MID"], role: "PLAYER", seedRating: 6.0 },
+  const players: { name: string; email: string; positions: P[]; seedRating: number }[] = [
+    { name: "Kemal Ediz", email: "kemal@matchday.local", positions: ["GK", "MID"], seedRating: 6.5 },
+    { name: "Elvin Azeri", email: "elvin@matchday.local", positions: ["MID", "FWD"], seedRating: 7.0 },
+    { name: "Wasim", email: "wasim@matchday.local", positions: ["MID", "FWD"], seedRating: 7.0 },
+    { name: "Hasan Altun", email: "hasan@matchday.local", positions: ["DEF", "MID"], seedRating: 6.5 },
+    { name: "Recai Gunay", email: "recai@matchday.local", positions: ["MID", "FWD"], seedRating: 6.0 },
+    { name: "Idris Y", email: "idris@matchday.local", positions: ["DEF"], seedRating: 6.0 },
+    { name: "Mustafa Cayir", email: "mustafa@matchday.local", positions: ["MID", "FWD"], seedRating: 6.5 },
+    { name: "Sait", email: "sait@matchday.local", positions: ["MID"], seedRating: 6.0 },
+    { name: "Ilkay", email: "ilkay@matchday.local", positions: ["MID", "FWD"], seedRating: 6.5 },
+    { name: "Ersan Arik", email: "ersan@matchday.local", positions: ["FWD", "MID"], seedRating: 7.0 },
+    { name: "Zair", email: "zair@matchday.local", positions: ["DEF", "MID"], seedRating: 6.0 },
+    { name: "Michael Allen", email: "michael@matchday.local", positions: ["MID", "FWD"], seedRating: 6.0 },
+    { name: "Elnur Mammadov", email: "elnur@matchday.local", positions: ["MID", "FWD"], seedRating: 6.5 },
   ];
 
   for (const player of players) {
-    await prisma.user.upsert({
+    const user = await prisma.user.upsert({
       where: { email: player.email },
-      update: { name: player.name, positions: player.positions, seedRating: player.seedRating, role: player.role },
+      update: { name: player.name, positions: player.positions, seedRating: player.seedRating },
       create: {
         name: player.name,
         email: player.email,
         positions: player.positions,
         seedRating: player.seedRating,
-        role: player.role,
         onboarded: true,
       },
     });
+
+    // Create membership
+    await prisma.membership.upsert({
+      where: { userId_orgId: { userId: user.id, orgId: org.id } },
+      update: {},
+      create: {
+        userId: user.id,
+        orgId: org.id,
+        role: player.email === "kemal@matchday.local" ? "OWNER" : "PLAYER",
+      },
+    });
   }
-  console.log(`Seeded ${players.length} players`);
+  console.log(`Seeded ${players.length} players with memberships`);
 
   console.log("Done!");
 }

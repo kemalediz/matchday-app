@@ -1,16 +1,27 @@
+import { auth } from "@/lib/auth";
 import { db } from "@/lib/db";
+import { getUserOrg } from "@/lib/org";
+import { redirect } from "next/navigation";
 import { Card, CardContent } from "@/components/ui/card";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Trophy, Star } from "lucide-react";
 
 export default async function StatsPage() {
+  const session = await auth();
+  if (!session?.user?.id) redirect("/login");
+
+  const membership = await getUserOrg(session.user.id);
+  if (!membership) redirect("/create-org");
+
+  const orgId = membership.orgId;
+
   const players = await db.user.findMany({
-    where: { isActive: true },
+    where: { memberships: { some: { orgId } } },
     include: {
-      ratingsReceived: { orderBy: { createdAt: "desc" }, take: 60 },
-      momVotesReceived: true,
-      attendances: { where: { status: "CONFIRMED", match: { status: "COMPLETED" } } },
+      ratingsReceived: { where: { match: { activity: { orgId } } }, orderBy: { createdAt: "desc" }, take: 60 },
+      momVotesReceived: { where: { match: { activity: { orgId } } } },
+      attendances: { where: { status: "CONFIRMED", match: { status: "COMPLETED", activity: { orgId } } } },
     },
   });
 

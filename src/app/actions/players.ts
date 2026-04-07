@@ -3,12 +3,12 @@
 import { auth } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { onboardingSchema } from "@/lib/validations";
-import { ADMIN_EMAIL } from "@/lib/constants";
+import { requireOrgAdmin } from "@/lib/org";
 import { Position } from "@/generated/prisma/client";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 
-export async function completeOnboarding(formData: { name: string; positions: string[] }) {
+export async function completeOnboarding(formData: { name: string; phoneNumber?: string; positions: string[] }) {
   const session = await auth();
   if (!session?.user?.id) throw new Error("Not authenticated");
 
@@ -18,6 +18,7 @@ export async function completeOnboarding(formData: { name: string; positions: st
     where: { id: session.user.id },
     data: {
       name: parsed.name,
+      phoneNumber: parsed.phoneNumber || null,
       positions: parsed.positions as Position[],
       onboarded: true,
     },
@@ -26,7 +27,7 @@ export async function completeOnboarding(formData: { name: string; positions: st
   redirect("/");
 }
 
-export async function updateProfile(formData: { name: string; positions: string[] }) {
+export async function updateProfile(formData: { name: string; phoneNumber?: string; positions: string[] }) {
   const session = await auth();
   if (!session?.user?.id) throw new Error("Not authenticated");
 
@@ -36,6 +37,7 @@ export async function updateProfile(formData: { name: string; positions: string[
     where: { id: session.user.id },
     data: {
       name: parsed.name,
+      phoneNumber: parsed.phoneNumber || null,
       positions: parsed.positions as Position[],
     },
   });
@@ -43,29 +45,45 @@ export async function updateProfile(formData: { name: string; positions: string[
   revalidatePath("/profile");
 }
 
-export async function updatePlayerRole(userId: string, role: "ADMIN" | "PLAYER") {
+export async function updatePlayerRole(userId: string, orgId: string, role: "ADMIN" | "PLAYER") {
   const session = await auth();
   if (!session?.user?.id) throw new Error("Not authenticated");
-  if (session.user.email !== ADMIN_EMAIL) throw new Error("Admin only");
 
-  await db.user.update({
-    where: { id: userId },
+  await requireOrgAdmin(session.user.id, orgId);
+
+  await db.membership.update({
+    where: { userId_orgId: { userId, orgId } },
     data: { role },
   });
 
   revalidatePath("/admin/players");
 }
 
-export async function seedPlayerRating(userId: string, rating: number) {
+export async function seedPlayerRating(userId: string, orgId: string, rating: number) {
   const session = await auth();
   if (!session?.user?.id) throw new Error("Not authenticated");
-  if (session.user.email !== ADMIN_EMAIL) throw new Error("Admin only");
+
+  await requireOrgAdmin(session.user.id, orgId);
 
   if (rating < 1 || rating > 10) throw new Error("Rating must be between 1 and 10");
 
   await db.user.update({
     where: { id: userId },
     data: { seedRating: rating },
+  });
+
+  revalidatePath("/admin/players");
+}
+
+export async function updatePlayerPhone(userId: string, orgId: string, phone: string) {
+  const session = await auth();
+  if (!session?.user?.id) throw new Error("Not authenticated");
+
+  await requireOrgAdmin(session.user.id, orgId);
+
+  await db.user.update({
+    where: { id: userId },
+    data: { phoneNumber: phone },
   });
 
   revalidatePath("/admin/players");

@@ -25,8 +25,14 @@ interface Player {
 export default function PlayersPage() {
   const [players, setPlayers] = useState<Player[]>([]);
   const [loading, setLoading] = useState(true);
+  const [orgId, setOrgId] = useState<string | null>(null);
 
-  useEffect(() => { loadPlayers(); }, []);
+  useEffect(() => {
+    fetch("/api/org/settings")
+      .then((r) => r.json())
+      .then((data) => setOrgId(data.id));
+    loadPlayers();
+  }, []);
 
   async function loadPlayers() {
     const res = await fetch("/api/players");
@@ -35,8 +41,9 @@ export default function PlayersPage() {
   }
 
   async function handleRoleChange(userId: string, role: string) {
+    if (!orgId) return;
     try {
-      await updatePlayerRole(userId, role as "ADMIN" | "PLAYER");
+      await updatePlayerRole(userId, orgId, role as "ADMIN" | "PLAYER");
       toast.success("Role updated");
       loadPlayers();
     } catch (err) {
@@ -47,8 +54,9 @@ export default function PlayersPage() {
   async function handleSeedRating(userId: string, rating: string) {
     const num = parseFloat(rating);
     if (isNaN(num) || num < 1 || num > 10) return;
+    if (!orgId) return;
     try {
-      await seedPlayerRating(userId, num);
+      await seedPlayerRating(userId, orgId, num);
       toast.success("Rating updated");
       loadPlayers();
     } catch (err) {

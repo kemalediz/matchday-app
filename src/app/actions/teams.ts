@@ -3,7 +3,8 @@
 import { auth } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { balanceTeams } from "@/lib/team-balancer";
-import { FORMAT_CONFIG, ADMIN_EMAIL } from "@/lib/constants";
+import { FORMAT_CONFIG } from "@/lib/constants";
+import { requireOrgAdmin } from "@/lib/org";
 import { PlayerWithRating } from "@/types";
 import { revalidatePath } from "next/cache";
 
@@ -27,13 +28,17 @@ async function getPlayerRating(userId: string): Promise<number> {
 export async function generateTeams(matchId: string) {
   const session = await auth();
   if (!session?.user?.id) throw new Error("Not authenticated");
-  if (session.user.email !== ADMIN_EMAIL) throw new Error("Admin only");
 
   const match = await db.match.findUnique({
     where: { id: matchId },
-    include: { attendances: { where: { status: "CONFIRMED" }, include: { user: true } } },
+    include: {
+      activity: true,
+      attendances: { where: { status: "CONFIRMED" }, include: { user: true } },
+    },
   });
   if (!match) throw new Error("Match not found");
+
+  await requireOrgAdmin(session.user.id, match.activity.orgId);
 
   const perTeam = FORMAT_CONFIG[match.format].perTeam;
   const confirmedPlayers = match.attendances;
@@ -77,7 +82,14 @@ export async function generateTeams(matchId: string) {
 export async function swapPlayers(matchId: string, playerId1: string, playerId2: string) {
   const session = await auth();
   if (!session?.user?.id) throw new Error("Not authenticated");
-  if (session.user.email !== ADMIN_EMAIL) throw new Error("Admin only");
+
+  const match = await db.match.findUnique({
+    where: { id: matchId },
+    include: { activity: true },
+  });
+  if (!match) throw new Error("Match not found");
+
+  await requireOrgAdmin(session.user.id, match.activity.orgId);
 
   const assignment1 = await db.teamAssignment.findUnique({
     where: { matchId_userId: { matchId, userId: playerId1 } },
@@ -105,7 +117,14 @@ export async function swapPlayers(matchId: string, playerId1: string, playerId2:
 export async function publishTeams(matchId: string) {
   const session = await auth();
   if (!session?.user?.id) throw new Error("Not authenticated");
-  if (session.user.email !== ADMIN_EMAIL) throw new Error("Admin only");
+
+  const match = await db.match.findUnique({
+    where: { id: matchId },
+    include: { activity: true },
+  });
+  if (!match) throw new Error("Match not found");
+
+  await requireOrgAdmin(session.user.id, match.activity.orgId);
 
   await db.match.update({
     where: { id: matchId },

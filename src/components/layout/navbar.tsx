@@ -11,11 +11,9 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { ADMIN_EMAIL } from "@/lib/constants";
 
 export function Navbar() {
   const { data: session } = useSession();
-  const isAdmin = session?.user?.email === ADMIN_EMAIL;
 
   return (
     <nav className="sticky top-0 z-50 border-b bg-card/80 backdrop-blur-lg">
@@ -32,11 +30,6 @@ export function Navbar() {
               <Link href="/profile" className="text-muted-foreground hover:text-foreground transition-colors">
                 Profile
               </Link>
-              {isAdmin && (
-                <Link href="/admin" className="text-muted-foreground hover:text-foreground transition-colors">
-                  Admin
-                </Link>
-              )}
             </div>
           )}
         </div>
@@ -61,20 +54,20 @@ export function Navbar() {
               <DropdownMenuSeparator />
               <DropdownMenuItem render={<Link href="/matches" />}>Matches</DropdownMenuItem>
               <DropdownMenuItem render={<Link href="/profile" />}>Profile</DropdownMenuItem>
-              {isAdmin && (
-                <DropdownMenuItem render={<Link href="/admin" />}>Admin</DropdownMenuItem>
-              )}
+              <DropdownMenuItem render={<Link href="/admin" />}>Admin</DropdownMenuItem>
               <DropdownMenuSeparator />
               <DropdownMenuItem onClick={() => signOut()}>Sign out</DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
         ) : (
-          <Link
-            href="/login"
-            className="inline-flex items-center justify-center rounded-lg bg-primary text-primary-foreground text-sm font-semibold h-9 px-4 hover:bg-primary/90 transition-all shadow-sm"
-          >
-            Sign in
-          </Link>
+          <div className="flex items-center gap-3">
+            <Link
+              href="/login"
+              className="inline-flex items-center justify-center rounded-lg bg-primary text-primary-foreground text-sm font-semibold h-9 px-4 hover:bg-primary/90 transition-all shadow-sm"
+            >
+              Sign in
+            </Link>
+          </div>
         )}
       </div>
     </nav>

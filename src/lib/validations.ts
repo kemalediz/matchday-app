@@ -2,6 +2,7 @@ import { z } from "zod";
 
 export const onboardingSchema = z.object({
   name: z.string().min(2, "Name must be at least 2 characters"),
+  phoneNumber: z.string().optional(),
   positions: z.array(z.enum(["GK", "DEF", "MID", "FWD"])).min(1, "Select at least one position"),
 });
 
@@ -32,6 +33,22 @@ export const momVoteSchema = z.object({
 export const matchScoreSchema = z.object({
   redScore: z.number().min(0),
   yellowScore: z.number().min(0),
+});
+
+export const signUpSchema = z.object({
+  name: z.string().min(2, "Name must be at least 2 characters"),
+  email: z.string().email("Invalid email address"),
+  password: z.string().min(8, "Password must be at least 8 characters"),
+});
+
+export const signInSchema = z.object({
+  email: z.string().email(),
+  password: z.string().min(1),
+});
+
+export const createOrgSchema = z.object({
+  name: z.string().min(2, "Organisation name must be at least 2 characters"),
+  slug: z.string().min(2).max(50).regex(/^[a-z0-9-]+$/, "URL slug must be lowercase letters, numbers and hyphens only"),
 });
 
 export const seedRatingSchema = z.object({

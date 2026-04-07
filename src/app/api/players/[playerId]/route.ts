@@ -18,7 +18,7 @@ export async function GET(
       email: true,
       image: true,
       positions: true,
-      role: true,
+      phoneNumber: true,
     },
   });
 

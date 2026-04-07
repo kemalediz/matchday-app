@@ -3,10 +3,12 @@
 import { auth } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { activitySchema } from "@/lib/validations";
-import { FORMAT_CONFIG, ADMIN_EMAIL } from "@/lib/constants";
+import { FORMAT_CONFIG } from "@/lib/constants";
+import { requireOrgAdmin } from "@/lib/org";
 import { revalidatePath } from "next/cache";
 
 export async function createActivity(formData: {
+  orgId: string;
   name: string;
   dayOfWeek: number;
   time: string;
@@ -18,11 +20,13 @@ export async function createActivity(formData: {
 }) {
   const session = await auth();
   if (!session?.user?.id) throw new Error("Not authenticated");
-  if (session.user.email !== ADMIN_EMAIL) throw new Error("Admin only");
 
-  const parsed = activitySchema.parse(formData);
+  await requireOrgAdmin(session.user.id, formData.orgId);
 
-  await db.activity.create({ data: parsed });
+  const { orgId, ...rest } = formData;
+  const parsed = activitySchema.parse(rest);
+
+  await db.activity.create({ data: { ...parsed, orgId } });
 
   revalidatePath("/admin/activities");
 }
@@ -42,7 +46,11 @@ export async function updateActivity(
 ) {
   const session = await auth();
   if (!session?.user?.id) throw new Error("Not authenticated");
-  if (session.user.email !== ADMIN_EMAIL) throw new Error("Admin only");
+
+  const activity = await db.activity.findUnique({ where: { id: activityId } });
+  if (!activity) throw new Error("Activity not found");
+
+  await requireOrgAdmin(session.user.id, activity.orgId);
 
   await db.activity.update({
     where: { id: activityId },
@@ -55,7 +63,11 @@ export async function updateActivity(
 export async function deleteActivity(activityId: string) {
   const session = await auth();
   if (!session?.user?.id) throw new Error("Not authenticated");
-  if (session.user.email !== ADMIN_EMAIL) throw new Error("Admin only");
+
+  const activity = await db.activity.findUnique({ where: { id: activityId } });
+  if (!activity) throw new Error("Activity not found");
+
+  await requireOrgAdmin(session.user.id, activity.orgId);
 
   await db.activity.update({
     where: { id: activityId },
@@ -68,10 +80,11 @@ export async function deleteActivity(activityId: string) {
 export async function generateMatchesForActivity(activityId: string) {
   const session = await auth();
   if (!session?.user?.id) throw new Error("Not authenticated");
-  if (session.user.email !== ADMIN_EMAIL) throw new Error("Admin only");
 
   const activity = await db.activity.findUnique({ where: { id: activityId } });
   if (!activity) throw new Error("Activity not found");
+
+  await requireOrgAdmin(session.user.id, activity.orgId);
 
   // Find next occurrence of this day of week
   const now = new Date();

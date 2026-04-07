@@ -1,18 +1,39 @@
 import { auth } from "@/lib/auth";
 import { db } from "@/lib/db";
+import { getUserOrg } from "@/lib/org";
 import { NextResponse } from "next/server";
 
 export async function GET() {
   const session = await auth();
   if (!session?.user?.id) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-  const players = await db.user.findMany({
-    where: { isActive: true },
-    orderBy: { name: "asc" },
+  const membership = await getUserOrg(session.user.id);
+  if (!membership) return NextResponse.json({ error: "No organisation" }, { status: 404 });
+
+  const memberships = await db.membership.findMany({
+    where: { orgId: membership.orgId },
     include: {
-      _count: { select: { attendances: { where: { status: "CONFIRMED" } } } },
+      user: {
+        include: {
+          _count: { select: { attendances: { where: { status: "CONFIRMED" } } } },
+        },
+      },
     },
+    orderBy: { user: { name: "asc" } },
   });
+
+  const players = memberships.map((m) => ({
+    id: m.user.id,
+    name: m.user.name,
+    email: m.user.email,
+    image: m.user.image,
+    phoneNumber: m.user.phoneNumber,
+    role: m.role,
+    positions: m.user.positions,
+    seedRating: m.user.seedRating,
+    isActive: m.user.isActive,
+    _count: m.user._count,
+  }));
 
   return NextResponse.json(players);
 }

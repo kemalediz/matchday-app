@@ -3,7 +3,8 @@
 import { auth } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { matchScoreSchema } from "@/lib/validations";
-import { FORMAT_CONFIG, ADMIN_EMAIL } from "@/lib/constants";
+import { FORMAT_CONFIG } from "@/lib/constants";
+import { requireOrgAdmin } from "@/lib/org";
 import { MatchFormat } from "@/generated/prisma/client";
 import { revalidatePath } from "next/cache";
 import { sendRatingEmails } from "@/lib/email";
@@ -12,11 +13,18 @@ import { format } from "date-fns";
 export async function updateMatchScore(matchId: string, formData: { redScore: number; yellowScore: number }) {
   const session = await auth();
   if (!session?.user?.id) throw new Error("Not authenticated");
-  if (session.user.email !== ADMIN_EMAIL) throw new Error("Admin only");
+
+  const match = await db.match.findUnique({
+    where: { id: matchId },
+    include: { activity: true },
+  });
+  if (!match) throw new Error("Match not found");
+
+  await requireOrgAdmin(session.user.id, match.activity.orgId);
 
   const parsed = matchScoreSchema.parse(formData);
 
-  const match = await db.match.update({
+  const updated = await db.match.update({
     where: { id: matchId },
     data: {
       redScore: parsed.redScore,
@@ -33,15 +41,15 @@ export async function updateMatchScore(matchId: string, formData: { redScore: nu
   });
 
   // Send rating notification emails to all confirmed players
-  const players = match.attendances.map((a) => ({
+  const players = updated.attendances.map((a) => ({
     email: a.user.email,
     name: a.user.name,
   }));
 
   sendRatingEmails(
     matchId,
-    match.activity.name,
-    format(match.date, "EEEE, d MMMM yyyy"),
+    updated.activity.name,
+    format(updated.date, "EEEE, d MMMM yyyy"),
     players
   ).catch((err) => console.error("Failed to send rating emails:", err));
 
@@ -52,7 +60,14 @@ export async function updateMatchScore(matchId: string, formData: { redScore: nu
 export async function switchMatchFormat(matchId: string, format: MatchFormat) {
   const session = await auth();
   if (!session?.user?.id) throw new Error("Not authenticated");
-  if (session.user.email !== ADMIN_EMAIL) throw new Error("Admin only");
+
+  const match = await db.match.findUnique({
+    where: { id: matchId },
+    include: { activity: true },
+  });
+  if (!match) throw new Error("Match not found");
+
+  await requireOrgAdmin(session.user.id, match.activity.orgId);
 
   const config = FORMAT_CONFIG[format];
 

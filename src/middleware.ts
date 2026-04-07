@@ -7,13 +7,17 @@ export function middleware(request: NextRequest) {
   // Public routes - no auth check needed
   if (
     pathname === "/login" ||
+    pathname === "/signup" ||
+    pathname === "/verify-email" ||
+    pathname.startsWith("/join/") ||
     pathname.startsWith("/api/auth") ||
-    pathname.startsWith("/api/cron")
+    pathname.startsWith("/api/cron") ||
+    pathname.startsWith("/api/whatsapp")
   ) {
     return NextResponse.next();
   }
 
-  // Check for session token (set by NextAuth)
+  // Check for session token (JWT strategy uses authjs.session-token)
   const token =
     request.cookies.get("authjs.session-token")?.value ||
     request.cookies.get("__Secure-authjs.session-token")?.value;

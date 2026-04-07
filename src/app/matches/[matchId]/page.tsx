@@ -8,7 +8,8 @@ import { Button } from "@/components/ui/button";
 import { AttendButton } from "@/components/match/attend-button";
 import { AttendanceList } from "@/components/match/attendance-list";
 import { TeamDisplay } from "@/components/match/team-display";
-import { FORMAT_CONFIG, ADMIN_EMAIL } from "@/lib/constants";
+import { FORMAT_CONFIG } from "@/lib/constants";
+import { isOrgAdmin } from "@/lib/org";
 import { format } from "date-fns";
 import { Calendar, MapPin, Clock, Star, ChevronRight } from "lucide-react";
 
@@ -43,7 +44,7 @@ export default async function MatchDetailPage({
     where: { matchId_userId: { matchId, userId: session.user.id } },
   });
 
-  const isAdmin = session.user.email === ADMIN_EMAIL;
+  const isAdmin = await isOrgAdmin(session.user.id, match.activity.orgId);
   const isPastDeadline = new Date() > match.attendanceDeadline;
   const hasTeams = match.teamAssignments.length > 0;
 

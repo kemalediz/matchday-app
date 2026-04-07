@@ -21,6 +21,7 @@ export default function ProfilePage() {
     name: string;
     email: string;
     image: string | null;
+    phoneNumber: string | null;
     positions: string[];
     role: string;
   } | null>(null);
@@ -32,6 +33,7 @@ export default function ProfilePage() {
   } | null>(null);
   const [editing, setEditing] = useState(false);
   const [name, setName] = useState("");
+  const [phoneNumber, setPhoneNumber] = useState("");
   const [selectedPositions, setSelectedPositions] = useState<string[]>([]);
 
   useEffect(() => {
@@ -42,6 +44,7 @@ export default function ProfilePage() {
         setProfile(data.player);
         setStats(data.stats);
         setName(data.player.name);
+        setPhoneNumber(data.player.phoneNumber ?? "");
         setSelectedPositions(data.player.positions);
       });
   }, [session?.user?.id]);
@@ -54,10 +57,10 @@ export default function ProfilePage() {
 
   async function handleSave() {
     try {
-      await updateProfile({ name, positions: selectedPositions });
+      await updateProfile({ name, phoneNumber: phoneNumber.trim() || undefined, positions: selectedPositions });
       toast.success("Profile updated!");
       setEditing(false);
-      setProfile((prev) => prev ? { ...prev, name, positions: selectedPositions } : prev);
+      setProfile((prev) => prev ? { ...prev, name, phoneNumber: phoneNumber.trim() || null, positions: selectedPositions } : prev);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed");
     }
@@ -79,6 +82,10 @@ export default function ProfilePage() {
                 <div>
                   <Label className="text-[15px]">Name</Label>
                   <Input value={name} onChange={(e) => setName(e.target.value)} className="h-11 text-[15px] mt-1" />
+                </div>
+                <div>
+                  <Label className="text-[15px]">Phone Number</Label>
+                  <Input type="tel" value={phoneNumber} onChange={(e) => setPhoneNumber(e.target.value)} placeholder="+44 7700 900000" className="h-11 text-[15px] mt-1" />
                 </div>
                 <div>
                   <Label className="text-[15px]">Positions</Label>
@@ -106,6 +113,7 @@ export default function ProfilePage() {
                   <div>
                     <h1 className="text-2xl sm:text-3xl">{profile.name}</h1>
                     <p className="text-muted-foreground mt-1">{profile.email}</p>
+                    {profile.phoneNumber && <p className="text-muted-foreground text-sm mt-0.5">{profile.phoneNumber}</p>}
                   </div>
                   <Button size="sm" variant="outline" onClick={() => setEditing(true)}>
                     <Pencil className="h-3.5 w-3.5 mr-1.5" />

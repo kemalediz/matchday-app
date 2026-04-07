@@ -1,5 +1,6 @@
 import { auth } from "@/lib/auth";
 import { db } from "@/lib/db";
+import { getUserOrg } from "@/lib/org";
 import { redirect } from "next/navigation";
 import Link from "next/link";
 import { Card, CardContent } from "@/components/ui/card";
@@ -13,8 +14,13 @@ export default async function MatchesPage() {
   const session = await auth();
   if (!session?.user?.id) redirect("/login");
 
+  const membership = await getUserOrg(session.user.id);
+  if (!membership) redirect("/create-org");
+
+  const orgId = membership.orgId;
+
   const upcomingMatches = await db.match.findMany({
-    where: { date: { gte: new Date() } },
+    where: { activity: { orgId }, date: { gte: new Date() } },
     orderBy: { date: "asc" },
     include: {
       activity: true,
@@ -23,7 +29,7 @@ export default async function MatchesPage() {
   });
 
   const pastMatches = await db.match.findMany({
-    where: { status: "COMPLETED" },
+    where: { activity: { orgId }, status: "COMPLETED" },
     orderBy: { date: "desc" },
     take: 20,
     include: { activity: true },

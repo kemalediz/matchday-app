@@ -30,6 +30,7 @@ export default function ActivitiesPage() {
   const [activities, setActivities] = useState<Activity[]>([]);
   const [loading, setLoading] = useState(true);
   const [dialogOpen, setDialogOpen] = useState(false);
+  const [orgId, setOrgId] = useState<string | null>(null);
 
   // Form state
   const [name, setName] = useState("");
@@ -41,6 +42,9 @@ export default function ActivitiesPage() {
   const [matchDurationMins, setMatchDurationMins] = useState("60");
 
   useEffect(() => {
+    fetch("/api/org/settings")
+      .then((r) => r.json())
+      .then((data) => setOrgId(data.id));
     loadActivities();
   }, []);
 
@@ -54,8 +58,10 @@ export default function ActivitiesPage() {
 
   async function handleCreate(e: React.FormEvent) {
     e.preventDefault();
+    if (!orgId) return;
     try {
       await createActivity({
+        orgId,
         name,
         dayOfWeek: parseInt(dayOfWeek),
         time,

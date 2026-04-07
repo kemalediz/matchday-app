@@ -1,13 +1,17 @@
 import { auth } from "@/lib/auth";
 import { redirect } from "next/navigation";
 import Link from "next/link";
-import { ADMIN_EMAIL } from "@/lib/constants";
+import { getUserOrg, isOrgAdmin } from "@/lib/org";
 
 export default async function AdminLayout({ children }: { children: React.ReactNode }) {
   const session = await auth();
   if (!session?.user?.id) redirect("/login");
 
-  if (session.user.email !== ADMIN_EMAIL) redirect("/");
+  const membership = await getUserOrg(session.user.id);
+  if (!membership) redirect("/");
+
+  const admin = await isOrgAdmin(session.user.id, membership.orgId);
+  if (!admin) redirect("/");
 
   return (
     <div className="mx-auto max-w-6xl px-6 py-10">
@@ -25,6 +29,9 @@ export default async function AdminLayout({ children }: { children: React.ReactN
           </Link>
           <Link href="/admin/stats" className="text-muted-foreground hover:text-foreground transition-colors">
             Stats
+          </Link>
+          <Link href="/admin/settings" className="text-muted-foreground hover:text-foreground transition-colors">
+            Settings
           </Link>
         </nav>
       </div>

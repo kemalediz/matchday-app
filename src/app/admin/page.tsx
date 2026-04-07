@@ -1,15 +1,26 @@
+import { auth } from "@/lib/auth";
 import { db } from "@/lib/db";
+import { getUserOrg } from "@/lib/org";
+import { redirect } from "next/navigation";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { Users, Calendar, Clock, CheckCircle, ChevronRight } from "lucide-react";
 
 export default async function AdminDashboardPage() {
+  const session = await auth();
+  if (!session?.user?.id) redirect("/login");
+
+  const membership = await getUserOrg(session.user.id);
+  if (!membership) redirect("/create-org");
+
+  const orgId = membership.orgId;
+
   const [playerCount, activeActivities, upcomingMatches, completedMatches] = await Promise.all([
-    db.user.count({ where: { isActive: true } }),
-    db.activity.count({ where: { isActive: true } }),
-    db.match.count({ where: { status: { in: ["UPCOMING", "TEAMS_GENERATED", "TEAMS_PUBLISHED"] } } }),
-    db.match.count({ where: { status: "COMPLETED" } }),
+    db.membership.count({ where: { orgId } }),
+    db.activity.count({ where: { orgId, isActive: true } }),
+    db.match.count({ where: { activity: { orgId }, status: { in: ["UPCOMING", "TEAMS_GENERATED", "TEAMS_PUBLISHED"] } } }),
+    db.match.count({ where: { activity: { orgId }, status: "COMPLETED" } }),
   ]);
 
   return (

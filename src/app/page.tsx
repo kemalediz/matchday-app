@@ -1,5 +1,6 @@
 import { auth } from "@/lib/auth";
 import { db } from "@/lib/db";
+import { getUserOrg } from "@/lib/org";
 import { redirect } from "next/navigation";
 import Link from "next/link";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -16,9 +17,14 @@ export default async function DashboardPage() {
   const user = await db.user.findUnique({ where: { id: session.user.id } });
   if (!user?.onboarded) redirect("/onboarding");
 
+  const membership = await getUserOrg(session.user.id);
+  if (!membership) redirect("/create-org");
+
+  const orgId = membership.orgId;
+
   // Next upcoming match
   const nextMatch = await db.match.findFirst({
-    where: { date: { gte: new Date() }, status: { in: ["UPCOMING", "TEAMS_GENERATED", "TEAMS_PUBLISHED"] } },
+    where: { activity: { orgId }, date: { gte: new Date() }, status: { in: ["UPCOMING", "TEAMS_GENERATED", "TEAMS_PUBLISHED"] } },
     orderBy: { date: "asc" },
     include: {
       activity: true,
@@ -35,7 +41,7 @@ export default async function DashboardPage() {
 
   // Recent completed matches
   const recentMatches = await db.match.findMany({
-    where: { status: "COMPLETED" },
+    where: { activity: { orgId }, status: "COMPLETED" },
     orderBy: { date: "desc" },
     take: 5,
     include: { activity: true },
@@ -58,7 +64,7 @@ export default async function DashboardPage() {
     <div className="mx-auto max-w-6xl px-6 py-10 space-y-8">
       <div>
         <h1>Welcome back, {user.name}!</h1>
-        <p className="text-muted-foreground mt-1">Here&apos;s what&apos;s happening with your matches.</p>
+        <p className="text-muted-foreground mt-1">Here&apos;s what&apos;s happening at {membership.org.name}.</p>
       </div>
 
       <div className="grid gap-5 sm:grid-cols-3">
