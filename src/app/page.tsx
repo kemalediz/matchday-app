@@ -7,8 +7,16 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { FORMAT_CONFIG } from "@/lib/constants";
-import { format } from "date-fns";
-import { Calendar, Trophy, MapPin, Users, Clock, ChevronRight } from "lucide-react";
+import { format, formatDistanceToNow, isBefore } from "date-fns";
+import { Calendar, Trophy, MapPin, Users, Clock, ChevronRight, Timer } from "lucide-react";
+import { Progress } from "@/components/ui/progress";
+
+function getGreeting(hour: number): string {
+  if (hour < 5) return "Good night";
+  if (hour < 12) return "Good morning";
+  if (hour < 18) return "Good afternoon";
+  return "Good evening";
+}
 
 export default async function DashboardPage() {
   const session = await auth();
@@ -59,11 +67,15 @@ export default async function DashboardPage() {
 
   const confirmedCount = nextMatch?.attendances.filter((a) => a.status === "CONFIRMED").length ?? 0;
   const benchCount = nextMatch?.attendances.filter((a) => a.status === "BENCH").length ?? 0;
+  const slotsRemaining = nextMatch ? Math.max(0, nextMatch.maxPlayers - confirmedCount) : 0;
+  const deadlinePassed = nextMatch ? isBefore(nextMatch.attendanceDeadline, new Date()) : false;
+  const greeting = getGreeting(new Date().getHours());
+  const firstName = (user.name ?? "").split(" ")[0];
 
   return (
     <div className="mx-auto max-w-6xl px-6 py-10 space-y-8">
       <div>
-        <h1>Welcome back, {user.name}!</h1>
+        <h1>{greeting}, {firstName}!</h1>
         <p className="text-muted-foreground mt-1">Here&apos;s what&apos;s happening at {membership.org.name}.</p>
       </div>
 
@@ -135,15 +147,46 @@ export default async function DashboardPage() {
                 </span>
               </div>
             </div>
-            <div className="flex items-center gap-5 text-[15px]">
-              <span className="flex items-center gap-1.5">
-                <Users className="h-4 w-4 text-muted-foreground" />
-                {confirmedCount}/{nextMatch.maxPlayers} players
-              </span>
-              {benchCount > 0 && <span className="text-muted-foreground">{benchCount} on bench</span>}
+
+            {/* Attendance progress */}
+            <div className="space-y-2">
+              <div className="flex items-center justify-between text-sm">
+                <span className="flex items-center gap-1.5 font-medium">
+                  <Users className="h-4 w-4 text-muted-foreground" />
+                  {confirmedCount}/{nextMatch.maxPlayers} confirmed
+                </span>
+                {slotsRemaining > 0 ? (
+                  <span className="text-muted-foreground">{slotsRemaining} slot{slotsRemaining !== 1 ? "s" : ""} left</span>
+                ) : (
+                  <span className="text-green-600 dark:text-green-400 font-medium">Full{benchCount > 0 ? ` · ${benchCount} on bench` : ""}</span>
+                )}
+              </div>
+              <Progress
+                value={confirmedCount}
+                max={nextMatch.maxPlayers}
+                indicatorClassName={
+                  confirmedCount >= nextMatch.maxPlayers
+                    ? "bg-green-500"
+                    : confirmedCount >= nextMatch.maxPlayers * 0.75
+                    ? "bg-primary"
+                    : "bg-amber-500"
+                }
+              />
+            </div>
+
+            {/* Deadline countdown */}
+            {!deadlinePassed && (
+              <div className="flex items-center gap-1.5 text-sm text-muted-foreground">
+                <Timer className="h-4 w-4" />
+                Attendance closes {formatDistanceToNow(nextMatch.attendanceDeadline, { addSuffix: true })}
+              </div>
+            )}
+
+            <div className="flex items-center gap-2">
               <Badge variant="secondary">{FORMAT_CONFIG[nextMatch.format].label}</Badge>
             </div>
-            <Button render={<Link href={`/matches/${nextMatch.id}`} />} size="lg" className="mt-2">
+
+            <Button render={<Link href={`/matches/${nextMatch.id}`} />} size="lg" className="mt-2 active:scale-95 transition-transform">
               View Match
               <ChevronRight className="h-4 w-4 ml-1" />
             </Button>
