@@ -14,6 +14,7 @@ async function main() {
     authStrategy: new LocalAuth(),
     puppeteer: {
       headless: true,
+      executablePath: process.env.CHROMIUM_PATH || "/usr/bin/chromium",
       args: ["--no-sandbox", "--disable-setuid-sandbox"],
     },
   });

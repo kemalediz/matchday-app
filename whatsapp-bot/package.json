@@ -4,8 +4,8 @@
   "description": "WhatsApp bot for MatchDay attendance tracking",
   "type": "module",
   "scripts": {
-    "start": "node --env-file=.env --loader ts-node/esm src/index.ts",
-    "dev": "node --env-file=.env --loader ts-node/esm --watch src/index.ts"
+    "start": "node --env-file=.env --import tsx src/index.ts",
+    "dev": "node --env-file=.env --import tsx --watch src/index.ts"
   },
   "dependencies": {
     "whatsapp-web.js": "^1.26.1-alpha.3",
@@ -13,7 +13,7 @@
   },
   "devDependencies": {
     "typescript": "^5.0.0",
-    "ts-node": "^10.9.0",
+    "tsx": "^4.19.0",
     "@types/node": "^22.0.0",
     "@types/qrcode-terminal": "^0.12.0"
   }
