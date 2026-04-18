@@ -1,6 +1,8 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Link from "next/link";
+import { Phone } from "lucide-react";
 import { toast } from "sonner";
 import { updatePlayerRole, seedPlayerRating } from "@/app/actions/players";
 
@@ -12,6 +14,7 @@ interface Player {
   role: string;
   positions: string[];
   seedRating: number | null;
+  phoneNumber: string | null;
   isActive: boolean;
   _count: { attendances: number };
 }
@@ -57,9 +60,23 @@ export default function PlayersPage() {
 
   if (loading) return <div className="p-10 text-center text-slate-400">Loading…</div>;
 
+  const withPhoneCount = players.filter((p) => p.phoneNumber).length;
+
   return (
     <div className="space-y-6">
-      <h2 className="text-lg font-semibold text-slate-800">Players ({players.length})</h2>
+      <div className="flex items-center justify-between gap-3">
+        <h2 className="text-lg font-semibold text-slate-800">Players ({players.length})</h2>
+        <Link
+          href="/admin/players/phones"
+          className="inline-flex items-center gap-2 px-3 py-2 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 text-sm font-medium"
+        >
+          <Phone className="w-4 h-4" />
+          Bulk edit phones
+          <span className="inline-flex px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 text-[10px] font-semibold">
+            {withPhoneCount}/{players.length}
+          </span>
+        </Link>
+      </div>
 
       <div className="bg-white rounded-xl border border-slate-200 shadow-sm divide-y divide-slate-100">
         {players.map((p) => (

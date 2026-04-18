@@ -4,6 +4,7 @@ import { auth } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { onboardingSchema } from "@/lib/validations";
 import { requireOrgAdmin } from "@/lib/org";
+import { normalisePhone } from "@/lib/phone";
 import { Position } from "@/generated/prisma/client";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
@@ -81,10 +82,29 @@ export async function updatePlayerPhone(userId: string, orgId: string, phone: st
 
   await requireOrgAdmin(session.user.id, orgId);
 
-  await db.user.update({
-    where: { id: userId },
-    data: { phoneNumber: phone },
+  // Verify the target user is actually a member of this org (stops cross-org writes).
+  const membership = await db.membership.findUnique({
+    where: { userId_orgId: { userId, orgId } },
+    select: { userId: true },
   });
+  if (!membership) throw new Error("Player is not a member of this organisation");
+
+  const normalised = normalisePhone(phone);
+
+  try {
+    await db.user.update({
+      where: { id: userId },
+      data: { phoneNumber: normalised },
+    });
+  } catch (err: unknown) {
+    // Prisma P2002 = unique constraint (phoneNumber is @unique)
+    if (typeof err === "object" && err !== null && "code" in err && (err as { code: string }).code === "P2002") {
+      throw new Error(`Phone number ${normalised} is already assigned to another player`);
+    }
+    throw err;
+  }
 
   revalidatePath("/admin/players");
+  revalidatePath("/admin/players/phones");
+  return { phoneNumber: normalised };
 }
