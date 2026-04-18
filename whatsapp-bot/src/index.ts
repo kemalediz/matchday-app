@@ -27,6 +27,20 @@ async function main() {
   client.on("ready", async () => {
     console.log("\nWhatsApp bot is ready!");
 
+    // List every group this account is in — useful for first-time setup
+    // so the admin can copy the right ID into the Org's whatsappGroupId.
+    try {
+      const chats = await (client as typeof pkg.Client.prototype).getChats();
+      const groups = chats.filter((c) => c.isGroup);
+      console.log(`\n=== Groups this account is a member of (${groups.length}) ===`);
+      groups.forEach((g) => {
+        console.log(`  ${g.id._serialized}   "${g.name}"`);
+      });
+      console.log(`=== end groups ===\n`);
+    } catch (err) {
+      console.error("Failed to enumerate groups:", err);
+    }
+
     // Fetch enabled orgs from MatchDay API
     try {
       const data = await getEnabledOrgs();
