@@ -1,19 +1,21 @@
 "use client";
 
 import { useState } from "react";
-import { Button } from "@/components/ui/button";
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
-import { attendMatch, dropFromMatch } from "@/app/actions/attendance";
-import { toast } from "sonner";
 import { Check, X, Clock } from "lucide-react";
+import { toast } from "sonner";
+import { attendMatch, dropFromMatch } from "@/app/actions/attendance";
 
-interface AttendButtonProps {
+type Status = "CONFIRMED" | "BENCH" | "DROPPED" | null;
+
+export function AttendButton({
+  matchId,
+  currentStatus,
+  isPastDeadline,
+}: {
   matchId: string;
-  currentStatus: "CONFIRMED" | "BENCH" | "DROPPED" | null;
+  currentStatus: Status;
   isPastDeadline: boolean;
-}
-
-export function AttendButton({ matchId, currentStatus, isPastDeadline }: AttendButtonProps) {
+}) {
   const [loading, setLoading] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
 
@@ -46,55 +48,71 @@ export function AttendButton({ matchId, currentStatus, isPastDeadline }: AttendB
 
   if (isPastDeadline) {
     return (
-      <Button disabled variant="outline" size="lg">
-        <Clock className="h-4 w-4 mr-2" />
+      <button
+        disabled
+        className="inline-flex items-center gap-2 px-5 py-2.5 rounded-lg border border-slate-200 bg-slate-50 text-slate-400 font-medium cursor-not-allowed"
+      >
+        <Clock className="w-4 h-4" />
         Deadline passed
-      </Button>
+      </button>
     );
   }
 
   if (isAttending) {
     return (
       <>
-        <Button
+        <button
           onClick={() => setConfirmOpen(true)}
           disabled={loading}
-          variant="destructive"
-          size="lg"
-          className="active:scale-95 transition-transform"
+          className="inline-flex items-center gap-2 px-5 py-2.5 rounded-lg bg-red-600 hover:bg-red-700 text-white font-medium transition-colors disabled:opacity-60 active:scale-95"
         >
-          <X className="h-4 w-4 mr-2" />
-          {loading ? "Dropping..." : "Drop Out"}
-        </Button>
-        <Dialog open={confirmOpen} onOpenChange={setConfirmOpen}>
-          <DialogContent>
-            <DialogHeader>
-              <DialogTitle>Drop out of this match?</DialogTitle>
-              <DialogDescription>
+          <X className="w-4 h-4" />
+          {loading ? "Dropping…" : "Drop out"}
+        </button>
+
+        {confirmOpen && (
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-6"
+            onClick={() => setConfirmOpen(false)}
+          >
+            <div
+              className="bg-white rounded-xl shadow-xl max-w-md w-full p-6"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <h3 className="text-lg font-semibold text-slate-800">Drop out of this match?</h3>
+              <p className="text-sm text-slate-500 mt-2">
                 You&apos;ll be removed from the player list. If you were confirmed, the first player on the bench will take your spot.
-              </DialogDescription>
-            </DialogHeader>
-            <div className="flex gap-3 justify-end mt-4">
-              <Button variant="ghost" onClick={() => setConfirmOpen(false)}>Cancel</Button>
-              <Button variant="destructive" onClick={handleDrop} disabled={loading}>
-                Yes, drop out
-              </Button>
+              </p>
+              <div className="flex gap-3 justify-end mt-5">
+                <button
+                  onClick={() => setConfirmOpen(false)}
+                  className="px-4 py-2 rounded-lg text-slate-700 hover:bg-slate-100 font-medium"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleDrop}
+                  disabled={loading}
+                  className="px-4 py-2 rounded-lg bg-red-600 hover:bg-red-700 text-white font-medium disabled:opacity-60"
+                >
+                  Yes, drop out
+                </button>
+              </div>
             </div>
-          </DialogContent>
-        </Dialog>
+          </div>
+        )}
       </>
     );
   }
 
   return (
-    <Button
+    <button
       onClick={handleAttend}
       disabled={loading}
-      size="lg"
-      className="active:scale-95 transition-transform shadow-sm"
+      className="inline-flex items-center gap-2 px-5 py-2.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-medium shadow-sm transition-colors disabled:opacity-60 active:scale-95"
     >
-      <Check className="h-4 w-4 mr-2" />
-      {loading ? "Signing up..." : "I'm In!"}
-    </Button>
+      <Check className="w-4 h-4" />
+      {loading ? "Signing up…" : "I'm in!"}
+    </button>
   );
 }

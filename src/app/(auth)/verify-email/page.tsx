@@ -1,20 +1,11 @@
 "use client";
 
-import { useState, Suspense } from "react";
+import { Suspense, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { toast } from "sonner";
-import { verifyEmail, resendVerification } from "@/app/actions/auth";
-import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
 import { Mail } from "lucide-react";
+import { verifyEmail, resendVerification } from "@/app/actions/auth";
 
 function VerifyEmailForm() {
   const router = useRouter();
@@ -30,15 +21,12 @@ function VerifyEmailForm() {
     e.preventDefault();
     setError("");
     setLoading(true);
-
     try {
       await verifyEmail(email, code);
       toast.success("Email verified! You can now sign in.");
       router.push("/login");
     } catch (err) {
-      const message =
-        err instanceof Error ? err.message : "Verification failed.";
-      setError(message);
+      setError(err instanceof Error ? err.message : "Verification failed.");
     } finally {
       setLoading(false);
     }
@@ -47,94 +35,87 @@ function VerifyEmailForm() {
   async function handleResend() {
     setResending(true);
     setError("");
-
     try {
       await resendVerification(email);
       toast.success("Verification code resent. Check your inbox.");
     } catch (err) {
-      const message =
-        err instanceof Error ? err.message : "Failed to resend code.";
-      setError(message);
+      setError(err instanceof Error ? err.message : "Failed to resend code.");
     } finally {
       setResending(false);
     }
   }
 
   return (
-    <div className="flex min-h-screen items-center justify-center px-6 bg-gradient-to-b from-primary/5 to-background">
-      <Card className="w-full max-w-md shadow-lg">
-        <CardHeader className="text-center space-y-3 pb-2">
-          <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-full bg-primary/10">
-            <Mail className="h-7 w-7 text-primary" />
+    <div className="min-h-screen flex items-center justify-center px-6 bg-gradient-to-br from-slate-900 via-blue-900 to-slate-900">
+      <div className="bg-white rounded-2xl shadow-xl p-8 max-w-sm w-full">
+        <div className="text-center mb-6">
+          <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-full bg-blue-50 mb-3">
+            <Mail className="h-7 w-7 text-blue-600" />
           </div>
-          <CardTitle className="text-2xl font-bold">
-            Check your email
-          </CardTitle>
-          <CardDescription className="text-base">
-            We sent a verification code to{" "}
-            <span className="font-medium text-foreground">{email}</span>
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="pt-4 pb-6">
-          <form onSubmit={handleVerify} className="space-y-4">
-            <div className="flex justify-center">
-              <Input
-                type="text"
-                inputMode="numeric"
-                maxLength={6}
-                placeholder="000000"
-                className="h-14 max-w-[200px] text-center text-2xl tracking-[0.4em] font-mono"
-                value={code}
-                onChange={(e) =>
-                  setCode(e.target.value.replace(/\D/g, "").slice(0, 6))
-                }
-                required
-              />
-            </div>
-
-            {error && (
-              <p className="text-sm text-destructive text-center">{error}</p>
-            )}
-
-            <Button
-              type="submit"
-              size="lg"
-              className="w-full h-11"
-              disabled={loading || code.length !== 6}
-            >
-              {loading ? "Verifying..." : "Verify email"}
-            </Button>
-          </form>
-
-          <div className="mt-6 text-center text-sm text-muted-foreground">
-            Didn&apos;t receive the code?{" "}
-            <button
-              type="button"
-              onClick={handleResend}
-              disabled={resending}
-              className="font-medium text-primary hover:underline disabled:opacity-50"
-            >
-              {resending ? "Sending..." : "Resend"}
-            </button>
-          </div>
-
-          <p className="mt-4 text-center text-sm text-muted-foreground">
-            <Link
-              href="/login"
-              className="font-medium text-primary hover:underline"
-            >
-              Back to sign in
-            </Link>
+          <h1 className="text-2xl font-bold text-slate-800">Check your email</h1>
+          <p className="text-sm text-slate-500 mt-1">
+            We sent a 6-digit code to <span className="font-medium text-slate-700">{email}</span>
           </p>
-        </CardContent>
-      </Card>
+        </div>
+
+        <form onSubmit={handleVerify} className="space-y-4">
+          <div className="flex justify-center">
+            <input
+              type="text"
+              inputMode="numeric"
+              maxLength={6}
+              required
+              value={code}
+              onChange={(e) => setCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
+              placeholder="000000"
+              className="h-14 w-full max-w-[220px] text-center text-2xl tracking-[0.4em] font-mono rounded-lg border border-slate-200 text-slate-800 placeholder:text-slate-300 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+            />
+          </div>
+
+          {error && (
+            <div className="p-3 bg-red-50 text-red-700 rounded-lg text-sm">{error}</div>
+          )}
+
+          <button
+            type="submit"
+            disabled={loading || code.length !== 6}
+            className="w-full h-11 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-medium transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
+          >
+            {loading ? "Verifying…" : "Verify email"}
+          </button>
+        </form>
+
+        <div className="mt-6 text-center text-sm text-slate-500">
+          Didn&apos;t receive the code?{" "}
+          <button
+            type="button"
+            onClick={handleResend}
+            disabled={resending}
+            className="font-medium text-blue-600 hover:text-blue-700 disabled:opacity-50"
+          >
+            {resending ? "Sending…" : "Resend"}
+          </button>
+        </div>
+
+        <p className="mt-4 text-center text-sm">
+          <Link href="/login" className="font-medium text-slate-500 hover:text-slate-700">
+            ← Back to sign in
+          </Link>
+        </p>
+      </div>
     </div>
   );
 }
 
 export default function VerifyEmailPage() {
   return (
-    <Suspense fallback={<div className="flex min-h-screen items-center justify-center"><p className="text-muted-foreground">Loading...</p></div>}>
+    <Suspense
+      fallback={
+        <div className="min-h-screen flex items-center justify-center bg-slate-900">
+          <div className="w-8 h-8 border-4 border-blue-600 border-t-transparent rounded-full animate-spin" />
+        </div>
+      }
+    >
       <VerifyEmailForm />
     </Suspense>
   );

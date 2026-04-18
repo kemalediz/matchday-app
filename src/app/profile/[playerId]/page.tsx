@@ -2,12 +2,9 @@
 
 import { useEffect, useState } from "react";
 import { useParams } from "next/navigation";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
-import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Calendar, Star, Trophy, TrendingUp } from "lucide-react";
 
-interface PlayerProfile {
+interface Data {
   player: {
     id: string;
     name: string;
@@ -26,77 +23,59 @@ interface PlayerProfile {
 
 export default function PlayerProfilePage() {
   const { playerId } = useParams<{ playerId: string }>();
-  const [data, setData] = useState<PlayerProfile | null>(null);
+  const [data, setData] = useState<Data | null>(null);
 
   useEffect(() => {
-    fetch(`/api/players/${playerId}`)
-      .then((r) => r.json())
-      .then(setData);
+    fetch(`/api/players/${playerId}`).then((r) => r.json()).then(setData);
   }, [playerId]);
 
-  if (!data) return <p className="mx-auto max-w-4xl px-6 py-10 text-muted-foreground text-lg">Loading...</p>;
-
+  if (!data) return <div className="p-10 text-center text-slate-400">Loading…</div>;
   const { player, stats } = data;
 
   return (
-    <div className="mx-auto max-w-4xl px-6 py-10 space-y-8">
-      <Card className="shadow-sm">
-        <CardContent className="py-8 flex items-center gap-6">
-          <Avatar className="h-20 w-20 ring-4 ring-primary/10">
-            <AvatarImage src={player.image ?? undefined} />
-            <AvatarFallback className="text-2xl bg-primary/10 text-primary font-bold">{player.name?.charAt(0)}</AvatarFallback>
-          </Avatar>
+    <div className="p-6 sm:p-8 max-w-4xl mx-auto space-y-6">
+      <section className="bg-white rounded-xl border border-slate-200 shadow-sm p-6">
+        <div className="flex items-center gap-5">
+          <div className="w-20 h-20 rounded-full bg-blue-50 text-blue-700 flex items-center justify-center text-3xl font-bold ring-4 ring-blue-100 shrink-0">
+            {(player.name ?? "?").charAt(0).toUpperCase()}
+          </div>
           <div>
-            <h1 className="text-2xl sm:text-3xl">{player.name}</h1>
-            <div className="flex items-center gap-2 mt-3">
+            <h1 className="text-2xl font-bold text-slate-800">{player.name}</h1>
+            <div className="flex items-center gap-1.5 mt-2">
               {player.positions.map((pos) => (
-                <Badge key={pos} variant="secondary" className="text-sm px-3 py-1">{pos}</Badge>
+                <span key={pos} className="inline-flex px-2 py-1 rounded-md bg-slate-100 text-slate-700 text-xs font-semibold">
+                  {pos}
+                </span>
               ))}
             </div>
           </div>
-        </CardContent>
-      </Card>
+        </div>
+      </section>
 
-      <div className="grid gap-5 sm:grid-cols-4">
-        <Card className="shadow-sm">
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground flex items-center gap-2">
-              <Calendar className="h-4 w-4" />
-              Matches
-            </CardTitle>
-          </CardHeader>
-          <CardContent><p className="text-4xl font-bold">{stats.matchesPlayed}</p></CardContent>
-        </Card>
-        <Card className="shadow-sm">
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground flex items-center gap-2">
-              <Star className="h-4 w-4" />
-              Avg Rating
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <p className="text-4xl font-bold">{stats.avgRating ? stats.avgRating.toFixed(1) : "N/A"}</p>
-          </CardContent>
-        </Card>
-        <Card className="shadow-sm">
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground flex items-center gap-2">
-              <Trophy className="h-4 w-4" />
-              MoM Awards
-            </CardTitle>
-          </CardHeader>
-          <CardContent><p className="text-4xl font-bold">{stats.momCount}</p></CardContent>
-        </Card>
-        <Card className="shadow-sm">
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground flex items-center gap-2">
-              <TrendingUp className="h-4 w-4" />
-              Attendance
-            </CardTitle>
-          </CardHeader>
-          <CardContent><p className="text-4xl font-bold">{stats.attendanceRate}%</p></CardContent>
-        </Card>
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+        <Tile icon={<Calendar className="w-4 h-4" />} label="Matches" value={stats.matchesPlayed} color="blue" />
+        <Tile icon={<Star className="w-4 h-4" />} label="Avg rating" value={stats.avgRating != null ? stats.avgRating.toFixed(1) : "—"} color="green" />
+        <Tile icon={<Trophy className="w-4 h-4" />} label="MoM" value={stats.momCount} color="amber" />
+        <Tile icon={<TrendingUp className="w-4 h-4" />} label="Attendance" value={`${stats.attendanceRate}%`} color="purple" />
       </div>
+    </div>
+  );
+}
+
+function Tile({ icon, label, value, color }: { icon: React.ReactNode; label: string; value: string | number; color: "blue" | "green" | "amber" | "purple" }) {
+  const cls = {
+    blue: "bg-blue-50 text-blue-700 border-blue-200",
+    green: "bg-green-50 text-green-700 border-green-200",
+    amber: "bg-amber-50 text-amber-700 border-amber-200",
+    purple: "bg-purple-50 text-purple-700 border-purple-200",
+  }[color];
+  return (
+    <div className={`p-5 rounded-xl border ${cls}`}>
+      <div className="flex items-center gap-2 opacity-75">
+        {icon}
+        <p className="text-xs font-medium uppercase tracking-wider">{label}</p>
+      </div>
+      <p className="text-3xl font-bold mt-2">{value}</p>
     </div>
   );
 }

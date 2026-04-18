@@ -3,13 +3,18 @@ import { db } from "@/lib/db";
 import { getUserOrg } from "@/lib/org";
 import { redirect } from "next/navigation";
 import Link from "next/link";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
 import { FORMAT_CONFIG } from "@/lib/constants";
 import { format, formatDistanceToNow, isBefore } from "date-fns";
-import { Calendar, Trophy, MapPin, Users, Clock, ChevronRight, Timer } from "lucide-react";
-import { Progress } from "@/components/ui/progress";
+import {
+  Calendar,
+  Trophy,
+  MapPin,
+  Users,
+  Clock,
+  ChevronRight,
+  Timer,
+  Shield,
+} from "lucide-react";
 
 function getGreeting(hour: number): string {
   if (hour < 5) return "Good night";
@@ -17,6 +22,13 @@ function getGreeting(hour: number): string {
   if (hour < 18) return "Good afternoon";
   return "Good evening";
 }
+
+const TILE = {
+  blue: "bg-blue-50 text-blue-700 border-blue-200 hover:border-blue-300",
+  green: "bg-green-50 text-green-700 border-green-200 hover:border-green-300",
+  purple: "bg-purple-50 text-purple-700 border-purple-200 hover:border-purple-300",
+  amber: "bg-amber-50 text-amber-700 border-amber-200 hover:border-amber-300",
+} as const;
 
 export default async function DashboardPage() {
   const session = await auth();
@@ -30,9 +42,12 @@ export default async function DashboardPage() {
 
   const orgId = membership.orgId;
 
-  // Next upcoming match
   const nextMatch = await db.match.findFirst({
-    where: { activity: { orgId }, date: { gte: new Date() }, status: { in: ["UPCOMING", "TEAMS_GENERATED", "TEAMS_PUBLISHED"] } },
+    where: {
+      activity: { orgId },
+      date: { gte: new Date() },
+      status: { in: ["UPCOMING", "TEAMS_GENERATED", "TEAMS_PUBLISHED"] },
+    },
     orderBy: { date: "asc" },
     include: {
       activity: true,
@@ -40,14 +55,12 @@ export default async function DashboardPage() {
     },
   });
 
-  // User's attendance for next match
   const myAttendance = nextMatch
     ? await db.attendance.findUnique({
         where: { matchId_userId: { matchId: nextMatch.id, userId: session.user.id } },
       })
     : null;
 
-  // Recent completed matches
   const recentMatches = await db.match.findMany({
     where: { activity: { orgId }, status: "COMPLETED" },
     orderBy: { date: "desc" },
@@ -55,7 +68,6 @@ export default async function DashboardPage() {
     include: { activity: true },
   });
 
-  // Player stats
   const matchesPlayed = await db.attendance.count({
     where: { userId: session.user.id, status: "CONFIRMED", match: { status: "COMPLETED" } },
   });
@@ -69,164 +81,189 @@ export default async function DashboardPage() {
   const benchCount = nextMatch?.attendances.filter((a) => a.status === "BENCH").length ?? 0;
   const slotsRemaining = nextMatch ? Math.max(0, nextMatch.maxPlayers - confirmedCount) : 0;
   const deadlinePassed = nextMatch ? isBefore(nextMatch.attendanceDeadline, new Date()) : false;
+  const progressPct = nextMatch
+    ? Math.min(100, Math.round((confirmedCount / nextMatch.maxPlayers) * 100))
+    : 0;
+  const progressColor =
+    nextMatch && confirmedCount >= nextMatch.maxPlayers
+      ? "bg-green-500"
+      : nextMatch && confirmedCount >= nextMatch.maxPlayers * 0.75
+      ? "bg-blue-600"
+      : "bg-amber-500";
+
   const greeting = getGreeting(new Date().getHours());
   const firstName = (user.name ?? "").split(" ")[0];
 
+  const myAttendBadge = myAttendance?.status === "CONFIRMED"
+    ? { label: "You're in", cls: "bg-green-100 text-green-700" }
+    : myAttendance?.status === "BENCH"
+    ? { label: "On bench", cls: "bg-amber-100 text-amber-700" }
+    : { label: "Not signed up", cls: "bg-slate-100 text-slate-600" };
+
   return (
-    <div className="mx-auto max-w-6xl px-6 py-10 space-y-8">
-      <div>
-        <h1>{greeting}, {firstName}!</h1>
-        <p className="text-muted-foreground mt-1">Here&apos;s what&apos;s happening at {membership.org.name}.</p>
+    <div className="p-6 sm:p-8 max-w-6xl mx-auto">
+      <div className="mb-6">
+        <h1 className="text-2xl font-bold text-slate-800">
+          {greeting}, {firstName}
+        </h1>
+        <p className="text-sm text-slate-500 mt-1">
+          Here&apos;s what&apos;s happening at {membership.org.name}.
+        </p>
       </div>
 
-      <div className="grid gap-5 sm:grid-cols-3">
-        <Card className="shadow-sm">
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground flex items-center gap-2">
-              <Calendar className="h-4 w-4" />
-              Matches Played
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <p className="text-4xl font-bold">{matchesPlayed}</p>
-          </CardContent>
-        </Card>
-        <Card className="shadow-sm">
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground flex items-center gap-2">
-              <Trophy className="h-4 w-4" />
-              MoM Awards
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <p className="text-4xl font-bold">{momWins.length}</p>
-          </CardContent>
-        </Card>
-        <Card className="shadow-sm">
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground">Positions</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="flex gap-2 flex-wrap">
-              {user.positions.map((pos) => (
-                <Badge key={pos} variant="secondary" className="text-sm px-3 py-1">{pos}</Badge>
-              ))}
-            </div>
-          </CardContent>
-        </Card>
+      {/* Stat tiles */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
+        <div className={`p-5 rounded-xl border ${TILE.blue} transition-colors`}>
+          <div className="flex items-center gap-2 opacity-75">
+            <Calendar className="w-4 h-4" />
+            <p className="text-xs font-medium uppercase tracking-wider">Played</p>
+          </div>
+          <p className="text-3xl font-bold mt-2">{matchesPlayed}</p>
+        </div>
+        <div className={`p-5 rounded-xl border ${TILE.amber} transition-colors`}>
+          <div className="flex items-center gap-2 opacity-75">
+            <Trophy className="w-4 h-4" />
+            <p className="text-xs font-medium uppercase tracking-wider">MoM</p>
+          </div>
+          <p className="text-3xl font-bold mt-2">{momWins.length}</p>
+        </div>
+        <div className={`p-5 rounded-xl border ${TILE.purple} transition-colors`}>
+          <div className="flex items-center gap-2 opacity-75">
+            <Shield className="w-4 h-4" />
+            <p className="text-xs font-medium uppercase tracking-wider">Positions</p>
+          </div>
+          <div className="flex gap-1.5 flex-wrap mt-2">
+            {user.positions.length === 0 ? (
+              <span className="text-sm opacity-60">—</span>
+            ) : (
+              user.positions.map((p) => (
+                <span key={p} className="inline-flex px-2 py-0.5 rounded-md bg-white/70 text-xs font-semibold">
+                  {p}
+                </span>
+              ))
+            )}
+          </div>
+        </div>
+        <div className={`p-5 rounded-xl border ${TILE.green} transition-colors`}>
+          <div className="flex items-center gap-2 opacity-75">
+            <Users className="w-4 h-4" />
+            <p className="text-xs font-medium uppercase tracking-wider">Rating</p>
+          </div>
+          <p className="text-3xl font-bold mt-2">
+            {user.seedRating != null ? user.seedRating.toFixed(1) : "—"}
+          </p>
+        </div>
       </div>
 
-      {nextMatch && (
-        <Card className="shadow-sm border-primary/20 bg-gradient-to-br from-card to-accent/30">
-          <CardHeader>
-            <div className="flex items-center justify-between">
-              <CardTitle className="text-xl">Next Match</CardTitle>
-              <Badge
-                variant={myAttendance && myAttendance.status !== "DROPPED" ? "default" : "outline"}
-                className="text-sm px-3 py-1"
-              >
-                {myAttendance?.status === "CONFIRMED"
-                  ? "You're in!"
-                  : myAttendance?.status === "BENCH"
-                  ? "On bench"
-                  : "Not signed up"}
-              </Badge>
-            </div>
-          </CardHeader>
-          <CardContent className="space-y-4">
+      {/* Next match */}
+      {nextMatch ? (
+        <section className="bg-white rounded-xl border border-slate-200 shadow-sm mb-8">
+          <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between">
+            <h2 className="text-lg font-semibold text-slate-800">Next match</h2>
+            <span className={`inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium ${myAttendBadge.cls}`}>
+              {myAttendBadge.label}
+            </span>
+          </div>
+          <div className="p-6 space-y-4">
             <div>
-              <p className="text-lg font-semibold">{nextMatch.activity.name}</p>
-              <div className="flex flex-col sm:flex-row sm:items-center gap-1 sm:gap-4 mt-2 text-muted-foreground">
+              <p className="text-lg font-semibold text-slate-800">{nextMatch.activity.name}</p>
+              <div className="flex flex-col sm:flex-row sm:items-center gap-1 sm:gap-5 mt-2 text-sm text-slate-500">
                 <span className="flex items-center gap-1.5">
-                  <Clock className="h-4 w-4" />
-                  {format(nextMatch.date, "EEEE, d MMMM yyyy 'at' HH:mm")}
+                  <Clock className="w-4 h-4" />
+                  {format(nextMatch.date, "EEEE, d MMM yyyy 'at' HH:mm")}
                 </span>
                 <span className="flex items-center gap-1.5">
-                  <MapPin className="h-4 w-4" />
+                  <MapPin className="w-4 h-4" />
                   {nextMatch.activity.venue}
                 </span>
               </div>
             </div>
 
             {/* Attendance progress */}
-            <div className="space-y-2">
-              <div className="flex items-center justify-between text-sm">
-                <span className="flex items-center gap-1.5 font-medium">
-                  <Users className="h-4 w-4 text-muted-foreground" />
+            <div>
+              <div className="flex items-center justify-between text-sm mb-1.5">
+                <span className="flex items-center gap-1.5 font-medium text-slate-700">
+                  <Users className="w-4 h-4 text-slate-400" />
                   {confirmedCount}/{nextMatch.maxPlayers} confirmed
                 </span>
                 {slotsRemaining > 0 ? (
-                  <span className="text-muted-foreground">{slotsRemaining} slot{slotsRemaining !== 1 ? "s" : ""} left</span>
+                  <span className="text-slate-500">{slotsRemaining} slot{slotsRemaining !== 1 ? "s" : ""} left</span>
                 ) : (
-                  <span className="text-green-600 dark:text-green-400 font-medium">Full{benchCount > 0 ? ` · ${benchCount} on bench` : ""}</span>
+                  <span className="text-green-600 font-medium">
+                    Full{benchCount > 0 ? ` · ${benchCount} bench` : ""}
+                  </span>
                 )}
               </div>
-              <Progress
-                value={confirmedCount}
-                max={nextMatch.maxPlayers}
-                indicatorClassName={
-                  confirmedCount >= nextMatch.maxPlayers
-                    ? "bg-green-500"
-                    : confirmedCount >= nextMatch.maxPlayers * 0.75
-                    ? "bg-primary"
-                    : "bg-amber-500"
-                }
-              />
+              <div className="h-2 w-full bg-slate-100 rounded-full overflow-hidden">
+                <div
+                  className={`h-full ${progressColor} transition-all duration-300`}
+                  style={{ width: `${progressPct}%` }}
+                />
+              </div>
             </div>
 
-            {/* Deadline countdown */}
             {!deadlinePassed && (
-              <div className="flex items-center gap-1.5 text-sm text-muted-foreground">
-                <Timer className="h-4 w-4" />
-                Attendance closes {formatDistanceToNow(nextMatch.attendanceDeadline, { addSuffix: true })}
+              <div className="flex items-center gap-1.5 text-sm text-slate-500">
+                <Timer className="w-4 h-4" />
+                Sign-ups close {formatDistanceToNow(nextMatch.attendanceDeadline, { addSuffix: true })}
               </div>
             )}
 
             <div className="flex items-center gap-2">
-              <Badge variant="secondary">{FORMAT_CONFIG[nextMatch.format].label}</Badge>
+              <span className="inline-flex px-2.5 py-1 rounded-md bg-slate-100 text-slate-700 text-xs font-medium">
+                {FORMAT_CONFIG[nextMatch.format].label}
+              </span>
             </div>
 
-            <Button render={<Link href={`/matches/${nextMatch.id}`} />} size="lg" className="mt-2 active:scale-95 transition-transform">
-              View Match
-              <ChevronRight className="h-4 w-4 ml-1" />
-            </Button>
-          </CardContent>
-        </Card>
+            <Link
+              href={`/matches/${nextMatch.id}`}
+              className="inline-flex items-center gap-1 px-5 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium transition-colors"
+            >
+              View match <ChevronRight className="w-4 h-4" />
+            </Link>
+          </div>
+        </section>
+      ) : (
+        <section className="bg-white rounded-xl border border-slate-200 shadow-sm mb-8">
+          <div className="p-10 text-center text-slate-400">
+            No upcoming matches scheduled.
+          </div>
+        </section>
       )}
 
-      {!nextMatch && (
-        <Card className="shadow-sm">
-          <CardContent className="py-12 text-center text-muted-foreground text-lg">
-            No upcoming matches scheduled. Check back later!
-          </CardContent>
-        </Card>
-      )}
-
+      {/* Recent */}
       {recentMatches.length > 0 && (
-        <div>
-          <h2 className="mb-4">Recent Results</h2>
-          <div className="space-y-3">
-            {recentMatches.map((match) => (
-              <Link key={match.id} href={`/matches/${match.id}`}>
-                <Card className="hover:bg-accent/50 transition-all hover:shadow-sm shadow-none">
-                  <CardContent className="py-4 flex items-center justify-between">
-                    <div>
-                      <p className="text-[15px] font-semibold">{match.activity.name}</p>
-                      <p className="text-sm text-muted-foreground mt-0.5">{format(match.date, "d MMM yyyy")}</p>
-                    </div>
-                    {match.redScore !== null && match.yellowScore !== null && (
-                      <div className="flex items-center gap-3 text-lg font-mono font-bold">
-                        <span className="text-red-500">{match.redScore}</span>
-                        <span className="text-muted-foreground text-base">-</span>
-                        <span className="text-yellow-500">{match.yellowScore}</span>
-                      </div>
-                    )}
-                  </CardContent>
-                </Card>
+        <section className="bg-white rounded-xl border border-slate-200 shadow-sm">
+          <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between">
+            <h2 className="text-lg font-semibold text-slate-800">Recent results</h2>
+            <Link href="/matches" className="text-sm text-blue-600 hover:text-blue-700 font-medium">
+              View all
+            </Link>
+          </div>
+          <div className="divide-y divide-slate-100">
+            {recentMatches.map((m) => (
+              <Link
+                key={m.id}
+                href={`/matches/${m.id}`}
+                className="flex items-center justify-between px-6 py-4 hover:bg-slate-50 transition-colors"
+              >
+                <div>
+                  <p className="font-medium text-slate-800">{m.activity.name}</p>
+                  <p className="text-xs text-slate-500 mt-0.5">
+                    {format(m.date, "EEE, d MMM yyyy")}
+                  </p>
+                </div>
+                {m.redScore !== null && m.yellowScore !== null && (
+                  <div className="flex items-center gap-2 font-mono font-bold">
+                    <span className="text-red-500">{m.redScore}</span>
+                    <span className="text-slate-300">-</span>
+                    <span className="text-amber-500">{m.yellowScore}</span>
+                  </div>
+                )}
               </Link>
             ))}
           </div>
-        </div>
+        </section>
       )}
     </div>
   );

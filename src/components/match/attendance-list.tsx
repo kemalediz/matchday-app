@@ -1,7 +1,3 @@
-import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
-import { Badge } from "@/components/ui/badge";
-import { Separator } from "@/components/ui/separator";
-
 interface AttendancePlayer {
   id: string;
   status: string;
@@ -14,12 +10,22 @@ interface AttendancePlayer {
   };
 }
 
-interface AttendanceListProps {
-  attendances: AttendancePlayer[];
-  maxPlayers: number;
+function Initials({ name }: { name: string | null }) {
+  const letter = (name ?? "?").charAt(0).toUpperCase();
+  return (
+    <div className="w-8 h-8 rounded-full bg-blue-50 text-blue-700 flex items-center justify-center text-xs font-semibold shrink-0">
+      {letter}
+    </div>
+  );
 }
 
-export function AttendanceList({ attendances, maxPlayers }: AttendanceListProps) {
+export function AttendanceList({
+  attendances,
+  maxPlayers,
+}: {
+  attendances: AttendancePlayer[];
+  maxPlayers: number;
+}) {
   const confirmed = attendances
     .filter((a) => a.status === "CONFIRMED")
     .sort((a, b) => a.position - b.position);
@@ -28,51 +34,50 @@ export function AttendanceList({ attendances, maxPlayers }: AttendanceListProps)
     .sort((a, b) => a.position - b.position);
 
   return (
-    <div className="space-y-5">
+    <div className="space-y-6">
       <div>
-        <h3 className="text-sm font-semibold text-muted-foreground uppercase tracking-wider mb-3">
+        <h3 className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-3">
           Players ({confirmed.length}/{maxPlayers})
         </h3>
-        <ul className="space-y-2.5">
+        <ul className="space-y-2">
           {confirmed.map((a, i) => (
             <li key={a.id} className="flex items-center gap-3 py-1">
-              <span className="text-sm text-muted-foreground w-6 text-right font-mono">{i + 1}.</span>
-              <Avatar className="h-8 w-8">
-                <AvatarImage src={a.user.image ?? undefined} />
-                <AvatarFallback className="text-xs bg-primary/10 text-primary font-semibold">{a.user.name?.charAt(0)}</AvatarFallback>
-              </Avatar>
-              <span className="text-[15px] font-medium">{a.user.name}</span>
-              <div className="ml-auto flex gap-1.5">
+              <span className="text-xs text-slate-400 w-5 text-right font-mono">{i + 1}</span>
+              <Initials name={a.user.name} />
+              <span className="text-sm font-medium text-slate-800 truncate">{a.user.name}</span>
+              <div className="ml-auto flex gap-1">
                 {a.user.positions.slice(0, 2).map((pos) => (
-                  <Badge key={pos} variant="outline" className="text-xs">{pos}</Badge>
+                  <span
+                    key={pos}
+                    className="inline-flex px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 text-[10px] font-semibold"
+                  >
+                    {pos}
+                  </span>
                 ))}
               </div>
             </li>
           ))}
+          {confirmed.length === 0 && (
+            <li className="text-sm text-slate-400 py-3">No confirmed players yet.</li>
+          )}
         </ul>
       </div>
 
       {bench.length > 0 && (
-        <>
-          <Separator />
-          <div>
-            <h3 className="text-sm font-semibold text-muted-foreground uppercase tracking-wider mb-3">
-              Bench ({bench.length})
-            </h3>
-            <ul className="space-y-2.5">
-              {bench.map((a, i) => (
-                <li key={a.id} className="flex items-center gap-3 py-1 opacity-60">
-                  <span className="text-sm text-muted-foreground w-6 text-right font-mono">{i + 1}.</span>
-                  <Avatar className="h-8 w-8">
-                    <AvatarImage src={a.user.image ?? undefined} />
-                    <AvatarFallback className="text-xs">{a.user.name?.charAt(0)}</AvatarFallback>
-                  </Avatar>
-                  <span className="text-[15px]">{a.user.name}</span>
-                </li>
-              ))}
-            </ul>
-          </div>
-        </>
+        <div className="pt-6 border-t border-slate-100">
+          <h3 className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-3">
+            Bench ({bench.length})
+          </h3>
+          <ul className="space-y-2">
+            {bench.map((a, i) => (
+              <li key={a.id} className="flex items-center gap-3 py-1 opacity-70">
+                <span className="text-xs text-slate-400 w-5 text-right font-mono">{i + 1}</span>
+                <Initials name={a.user.name} />
+                <span className="text-sm text-slate-700">{a.user.name}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
       )}
     </div>
   );

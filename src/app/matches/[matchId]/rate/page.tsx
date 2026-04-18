@@ -3,12 +3,9 @@
 import { useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { useSession } from "next-auth/react";
-import { Button } from "@/components/ui/button";
-import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
-import { Badge } from "@/components/ui/badge";
-import { submitRatings, submitMoMVote } from "@/app/actions/ratings";
+import { Send, Trophy, Star } from "lucide-react";
 import { toast } from "sonner";
-import { Star, Send, Trophy } from "lucide-react";
+import { submitRatings, submitMoMVote } from "@/app/actions/ratings";
 
 interface Player {
   id: string;
@@ -19,19 +16,11 @@ interface Player {
 
 const SCORES = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
 
-function ScoreButton({ score, selected, onClick }: { score: number; selected: boolean; onClick: () => void }) {
+function Initials({ name }: { name: string | null }) {
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={`w-9 h-9 sm:w-10 sm:h-10 rounded-full text-sm font-bold transition-all ${
-        selected
-          ? "bg-primary text-primary-foreground shadow-md scale-110"
-          : "bg-muted hover:bg-accent text-muted-foreground hover:text-foreground"
-      }`}
-    >
-      {score}
-    </button>
+    <div className="w-8 h-8 rounded-full bg-blue-50 text-blue-700 flex items-center justify-center text-xs font-semibold shrink-0">
+      {(name ?? "?").charAt(0).toUpperCase()}
+    </div>
   );
 }
 
@@ -39,6 +28,7 @@ export default function RatePlayersPage() {
   const { matchId } = useParams<{ matchId: string }>();
   const { data: session } = useSession();
   const router = useRouter();
+
   const [players, setPlayers] = useState<Player[]>([]);
   const [ratings, setRatings] = useState<Record<string, number>>({});
   const [momPick, setMomPick] = useState<string | null>(null);
@@ -50,20 +40,18 @@ export default function RatePlayersPage() {
       const res = await fetch(`/api/matches/${matchId}`);
       if (!res.ok) return;
       const data = await res.json();
-      const otherPlayers = data.attendances
+      const others = data.attendances
         .filter((a: { userId: string; status: string }) => a.status === "CONFIRMED" && a.userId !== session?.user?.id)
         .map((a: { user: Player }) => a.user);
-      setPlayers(otherPlayers);
+      setPlayers(others);
 
-      const defaultRatings: Record<string, number> = {};
-      otherPlayers.forEach((p: Player) => {
-        defaultRatings[p.id] = data.existingRatings?.find((r: { playerId: string }) => r.playerId === p.id)?.score ?? 6;
+      const defaults: Record<string, number> = {};
+      others.forEach((p: Player) => {
+        defaults[p.id] =
+          data.existingRatings?.find((r: { playerId: string }) => r.playerId === p.id)?.score ?? 6;
       });
-      setRatings(defaultRatings);
-
-      if (data.existingMoMVote) {
-        setMomPick(data.existingMoMVote.playerId);
-      }
+      setRatings(defaults);
+      if (data.existingMoMVote) setMomPick(data.existingMoMVote.playerId);
       setLoading(false);
     }
     if (session?.user?.id) load();
@@ -75,9 +63,7 @@ export default function RatePlayersPage() {
       await submitRatings(matchId, {
         ratings: Object.entries(ratings).map(([playerId, score]) => ({ playerId, score })),
       });
-      if (momPick) {
-        await submitMoMVote(matchId, { playerId: momPick });
-      }
+      if (momPick) await submitMoMVote(matchId, { playerId: momPick });
       toast.success("Ratings submitted! Thanks for voting.");
       router.push(`/matches/${matchId}`);
     } catch (err) {
@@ -89,101 +75,100 @@ export default function RatePlayersPage() {
 
   if (loading) {
     return (
-      <div className="mx-auto max-w-lg px-4 py-10 text-center">
-        <p className="text-muted-foreground text-lg">Loading players...</p>
-      </div>
+      <div className="p-10 text-center text-slate-400">Loading players…</div>
     );
   }
 
   const allRated = players.every((p) => ratings[p.id] !== undefined);
 
   return (
-    <div className="mx-auto max-w-lg px-4 py-6 space-y-4">
-      {/* Header */}
-      <div className="text-center space-y-1">
-        <h1 className="text-2xl font-bold">Rate Players</h1>
-        <p className="text-muted-foreground text-sm">Tap a score for each player, then pick MoM</p>
+    <div className="p-4 sm:p-8 max-w-2xl mx-auto space-y-4">
+      <div className="text-center">
+        <h1 className="text-2xl font-bold text-slate-800">Rate players</h1>
+        <p className="text-sm text-slate-500 mt-1">
+          Tap a score for each player, then pick Man of the Match.
+        </p>
       </div>
 
-      {/* Player ratings - compact cards */}
       <div className="space-y-3">
-        {players.map((player) => (
+        {players.map((p) => (
           <div
-            key={player.id}
-            className={`rounded-xl border p-3 transition-all ${
-              ratings[player.id] ? "border-primary/20 bg-card" : "border-border bg-card"
-            }`}
+            key={p.id}
+            className="bg-white rounded-xl border border-slate-200 p-3 shadow-sm"
           >
             <div className="flex items-center gap-2.5 mb-2.5">
-              <Avatar className="h-8 w-8">
-                <AvatarImage src={player.image ?? undefined} />
-                <AvatarFallback className="text-xs bg-primary/10 text-primary font-semibold">
-                  {player.name?.charAt(0)}
-                </AvatarFallback>
-              </Avatar>
-              <span className="font-semibold text-sm flex-1 truncate">{player.name}</span>
-              {player.positions.length > 0 && (
-                <Badge variant="outline" className="text-xs shrink-0">{player.positions[0]}</Badge>
+              <Initials name={p.name} />
+              <span className="font-semibold text-sm text-slate-800 flex-1 truncate">
+                {p.name}
+              </span>
+              {p.positions[0] && (
+                <span className="inline-flex px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 text-[10px] font-semibold">
+                  {p.positions[0]}
+                </span>
               )}
-              {ratings[player.id] && (
-                <span className="text-lg font-bold text-primary w-7 text-center">{ratings[player.id]}</span>
+              {ratings[p.id] !== undefined && (
+                <span className="text-lg font-bold text-blue-600 w-7 text-center">
+                  {ratings[p.id]}
+                </span>
               )}
             </div>
             <div className="flex justify-between gap-1">
-              {SCORES.map((score) => (
-                <ScoreButton
-                  key={score}
-                  score={score}
-                  selected={ratings[player.id] === score}
-                  onClick={() => setRatings((prev) => ({ ...prev, [player.id]: score }))}
-                />
+              {SCORES.map((s) => (
+                <button
+                  key={s}
+                  type="button"
+                  onClick={() => setRatings((r) => ({ ...r, [p.id]: s }))}
+                  className={`w-9 h-9 rounded-full text-sm font-bold transition-all ${
+                    ratings[p.id] === s
+                      ? "bg-blue-600 text-white shadow-md scale-110"
+                      : "bg-slate-100 text-slate-500 hover:bg-slate-200"
+                  }`}
+                >
+                  {s}
+                </button>
               ))}
             </div>
           </div>
         ))}
       </div>
 
-      {/* MoM Selection - inline */}
-      <div className="rounded-xl border-2 border-yellow-200 dark:border-yellow-900/50 bg-card p-4 space-y-3">
-        <div className="flex items-center gap-2">
-          <Trophy className="h-5 w-5 text-yellow-500" />
-          <h2 className="font-bold text-base">Man of the Match</h2>
+      {/* MoM */}
+      <div className="bg-white rounded-xl border-2 border-amber-200 shadow-sm p-4">
+        <div className="flex items-center gap-2 mb-3">
+          <Trophy className="w-5 h-5 text-amber-500" />
+          <h2 className="font-semibold text-slate-800">Man of the Match</h2>
         </div>
         <div className="grid grid-cols-2 gap-2">
-          {players.map((player) => (
-            <button
-              key={player.id}
-              type="button"
-              onClick={() => setMomPick(player.id)}
-              className={`flex items-center gap-2 p-2.5 rounded-lg border transition-all text-left ${
-                momPick === player.id
-                  ? "border-yellow-400 bg-yellow-50 dark:bg-yellow-950/30 shadow-sm"
-                  : "border-border hover:bg-accent/50"
-              }`}
-            >
-              <Avatar className="h-7 w-7 shrink-0">
-                <AvatarImage src={player.image ?? undefined} />
-                <AvatarFallback className="text-xs bg-primary/10 text-primary">{player.name?.charAt(0)}</AvatarFallback>
-              </Avatar>
-              <span className="text-sm font-medium truncate">{player.name}</span>
-              {momPick === player.id && (
-                <Star className="h-4 w-4 text-yellow-500 fill-yellow-500 ml-auto shrink-0" />
-              )}
-            </button>
-          ))}
+          {players.map((p) => {
+            const selected = momPick === p.id;
+            return (
+              <button
+                key={p.id}
+                type="button"
+                onClick={() => setMomPick(p.id)}
+                className={`flex items-center gap-2 p-2.5 rounded-lg border transition-all text-left ${
+                  selected
+                    ? "border-amber-400 bg-amber-50"
+                    : "border-slate-200 hover:bg-slate-50"
+                }`}
+              >
+                <Initials name={p.name} />
+                <span className="text-sm font-medium text-slate-800 truncate">{p.name}</span>
+                {selected && <Star className="w-4 h-4 text-amber-500 fill-amber-500 ml-auto shrink-0" />}
+              </button>
+            );
+          })}
         </div>
       </div>
 
-      {/* Submit */}
-      <Button
+      <button
         onClick={handleSubmit}
         disabled={submitting || !allRated}
-        size="lg"
-        className="w-full text-base py-6 sticky bottom-4 shadow-lg"
+        className="w-full h-12 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-medium shadow-lg sticky bottom-4 inline-flex items-center justify-center gap-2 disabled:opacity-60 disabled:cursor-not-allowed"
       >
-        <Send className="h-4 w-4 mr-2" />
-        {submitting ? "Submitting..." : "Submit Ratings"}
-      </Button>
+        <Send className="w-4 h-4" />
+        {submitting ? "Submitting…" : "Submit ratings"}
+      </button>
     </div>
   );
 }

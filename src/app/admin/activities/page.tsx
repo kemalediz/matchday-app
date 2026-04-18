@@ -1,17 +1,14 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Card, CardContent } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Badge } from "@/components/ui/badge";
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
-import { createActivity, updateActivity, generateMatchesForActivity } from "@/app/actions/activities";
-import { DAYS_OF_WEEK } from "@/lib/constants";
 import { toast } from "sonner";
-import { Plus, Zap } from "lucide-react";
+import { Plus, Zap, X } from "lucide-react";
+import {
+  createActivity,
+  updateActivity,
+  generateMatchesForActivity,
+} from "@/app/actions/activities";
+import { DAYS_OF_WEEK } from "@/lib/constants";
 
 interface Activity {
   id: string;
@@ -32,9 +29,8 @@ export default function ActivitiesPage() {
   const [dialogOpen, setDialogOpen] = useState(false);
   const [orgId, setOrgId] = useState<string | null>(null);
 
-  // Form state
   const [name, setName] = useState("");
-  const [dayOfWeek, setDayOfWeek] = useState("2"); // Tuesday
+  const [dayOfWeek, setDayOfWeek] = useState("2");
   const [time, setTime] = useState("21:30");
   const [venue, setVenue] = useState("");
   const [format, setFormat] = useState<"FIVE_A_SIDE" | "SEVEN_A_SIDE">("SEVEN_A_SIDE");
@@ -42,17 +38,13 @@ export default function ActivitiesPage() {
   const [matchDurationMins, setMatchDurationMins] = useState("60");
 
   useEffect(() => {
-    fetch("/api/org/settings")
-      .then((r) => r.json())
-      .then((data) => setOrgId(data.id));
+    fetch("/api/org/settings").then((r) => r.json()).then((d) => setOrgId(d.id));
     loadActivities();
   }, []);
 
   async function loadActivities() {
     const res = await fetch("/api/activities");
-    if (res.ok) {
-      setActivities(await res.json());
-    }
+    if (res.ok) setActivities(await res.json());
     setLoading(false);
   }
 
@@ -72,133 +64,209 @@ export default function ActivitiesPage() {
       });
       toast.success("Activity created!");
       setDialogOpen(false);
+      setName("");
+      setVenue("");
       loadActivities();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed to create");
     }
   }
 
-  async function handleGenerateMatch(activityId: string) {
+  async function handleGenerateMatch(id: string) {
     try {
-      await generateMatchesForActivity(activityId);
+      await generateMatchesForActivity(id);
       toast.success("Match generated for next week!");
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed to generate");
     }
   }
 
-  async function handleToggleActive(activity: Activity) {
+  async function handleToggleActive(a: Activity) {
     try {
-      await updateActivity(activity.id, { isActive: !activity.isActive });
-      toast.success(activity.isActive ? "Activity deactivated" : "Activity activated");
+      await updateActivity(a.id, { isActive: !a.isActive });
+      toast.success(a.isActive ? "Deactivated" : "Activated");
       loadActivities();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed to update");
     }
   }
 
-  if (loading) return <p className="text-muted-foreground text-lg">Loading...</p>;
+  if (loading) return <div className="p-10 text-center text-slate-400">Loading…</div>;
 
   return (
-    <div className="space-y-8">
+    <div className="space-y-6">
       <div className="flex items-center justify-between">
-        <h2>Activities</h2>
-        <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
-          <DialogTrigger render={<Button size="lg" />}>
-            <Plus className="h-4 w-4 mr-2" />
-            Create Activity
-          </DialogTrigger>
-          <DialogContent className="sm:max-w-md">
-            <DialogHeader>
-              <DialogTitle className="text-xl">New Activity</DialogTitle>
-            </DialogHeader>
-            <form onSubmit={handleCreate} className="space-y-5 mt-2">
-              <div className="space-y-2">
-                <Label className="text-[15px]">Name</Label>
-                <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g., Tuesday 7-a-side" className="h-11" />
-              </div>
-              <div className="grid grid-cols-2 gap-4">
-                <div className="space-y-2">
-                  <Label className="text-[15px]">Day</Label>
-                  <Select value={dayOfWeek} onValueChange={(v) => v && setDayOfWeek(v)}>
-                    <SelectTrigger className="h-11"><SelectValue /></SelectTrigger>
-                    <SelectContent>
-                      {DAYS_OF_WEEK.map((day, i) => (
-                        <SelectItem key={i} value={String(i)}>{day}</SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div className="space-y-2">
-                  <Label className="text-[15px]">Time</Label>
-                  <Input type="time" value={time} onChange={(e) => setTime(e.target.value)} className="h-11" />
-                </div>
-              </div>
-              <div className="space-y-2">
-                <Label className="text-[15px]">Venue</Label>
-                <Input value={venue} onChange={(e) => setVenue(e.target.value)} placeholder="e.g., Goals North Cheam" className="h-11" />
-              </div>
-              <div className="grid grid-cols-2 gap-4">
-                <div className="space-y-2">
-                  <Label className="text-[15px]">Format</Label>
-                  <Select value={format} onValueChange={(v) => v && setFormat(v as typeof format)}>
-                    <SelectTrigger className="h-11"><SelectValue /></SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="SEVEN_A_SIDE">7-a-side (14 players)</SelectItem>
-                      <SelectItem value="FIVE_A_SIDE">5-a-side (10 players)</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div className="space-y-2">
-                  <Label className="text-[15px]">Deadline (hours before)</Label>
-                  <Input type="number" value={deadlineHours} onChange={(e) => setDeadlineHours(e.target.value)} min="1" max="48" className="h-11" />
-                </div>
-              </div>
-              <div className="space-y-2">
-                <Label className="text-[15px]">Match Duration (minutes)</Label>
-                <Input type="number" value={matchDurationMins} onChange={(e) => setMatchDurationMins(e.target.value)} min="20" max="180" className="h-11" placeholder="60" />
-                <p className="text-xs text-muted-foreground">Rating emails are sent automatically when this time expires after match start</p>
-              </div>
-              <Button type="submit" className="w-full text-base py-5" size="lg">Create</Button>
-            </form>
-          </DialogContent>
-        </Dialog>
+        <h2 className="text-lg font-semibold text-slate-800">Activities</h2>
+        <button
+          onClick={() => setDialogOpen(true)}
+          className="inline-flex items-center gap-2 px-4 py-2.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-medium"
+        >
+          <Plus className="w-4 h-4" />
+          Create activity
+        </button>
       </div>
 
-      <div className="space-y-3">
-        {activities.map((activity) => (
-          <Card key={activity.id} className="shadow-sm">
-            <CardContent className="py-5 flex items-center justify-between gap-4">
-              <div className="space-y-1">
-                <div className="flex items-center gap-2.5">
-                  <p className="text-[15px] font-semibold">{activity.name}</p>
-                  <Badge variant={activity.isActive ? "default" : "secondary"}>
-                    {activity.isActive ? "Active" : "Inactive"}
-                  </Badge>
+      {activities.length === 0 ? (
+        <div className="bg-white rounded-xl border border-slate-200 p-10 text-center text-slate-400">
+          No activities yet. Create your first one.
+        </div>
+      ) : (
+        <div className="bg-white rounded-xl border border-slate-200 shadow-sm divide-y divide-slate-100">
+          {activities.map((a) => (
+            <div key={a.id} className="px-6 py-5 flex items-start justify-between gap-4">
+              <div>
+                <div className="flex items-center gap-2">
+                  <p className="font-semibold text-slate-800">{a.name}</p>
+                  <span
+                    className={`inline-flex px-2 py-0.5 rounded-full text-xs font-medium ${
+                      a.isActive ? "bg-green-100 text-green-700" : "bg-slate-100 text-slate-500"
+                    }`}
+                  >
+                    {a.isActive ? "Active" : "Inactive"}
+                  </span>
                 </div>
-                <p className="text-sm text-muted-foreground">
-                  {DAYS_OF_WEEK[activity.dayOfWeek]}s at {activity.time} &middot; {activity.venue}
+                <p className="text-sm text-slate-500 mt-1">
+                  {DAYS_OF_WEEK[a.dayOfWeek]}s at {a.time} · {a.venue}
                 </p>
-                <p className="text-sm text-muted-foreground">
-                  {activity.format === "SEVEN_A_SIDE" ? "7-a-side" : "5-a-side"} &middot; {activity.matchDurationMins}min &middot; Deadline: {activity.deadlineHours}h before
+                <p className="text-xs text-slate-400 mt-0.5">
+                  {a.format === "SEVEN_A_SIDE" ? "7-a-side" : "5-a-side"} · {a.matchDurationMins}
+                  min · Sign-ups close {a.deadlineHours}h before
                 </p>
               </div>
-              <div className="flex gap-2 shrink-0">
-                <Button variant="outline" onClick={() => handleGenerateMatch(activity.id)}>
-                  <Zap className="h-4 w-4 mr-1.5" />
-                  Generate Match
-                </Button>
-                <Button variant="ghost" onClick={() => handleToggleActive(activity)}>
-                  {activity.isActive ? "Deactivate" : "Activate"}
-                </Button>
+              <div className="flex items-center gap-2 shrink-0">
+                <button
+                  onClick={() => handleGenerateMatch(a.id)}
+                  className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 text-sm font-medium"
+                >
+                  <Zap className="w-3.5 h-3.5" />
+                  Generate match
+                </button>
+                <button
+                  onClick={() => handleToggleActive(a)}
+                  className="px-3 py-2 rounded-lg text-slate-500 hover:bg-slate-100 text-sm font-medium"
+                >
+                  {a.isActive ? "Deactivate" : "Activate"}
+                </button>
               </div>
-            </CardContent>
-          </Card>
-        ))}
-        {activities.length === 0 && (
-          <p className="text-muted-foreground text-center py-12 text-lg">No activities yet. Create your first one!</p>
-        )}
-      </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {dialogOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-6"
+          onClick={() => setDialogOpen(false)}
+        >
+          <div
+            className="bg-white rounded-xl shadow-xl max-w-md w-full"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100">
+              <h3 className="font-semibold text-slate-800">New activity</h3>
+              <button
+                onClick={() => setDialogOpen(false)}
+                className="text-slate-400 hover:text-slate-600"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <form onSubmit={handleCreate} className="p-6 space-y-4">
+              <Field label="Name">
+                <input
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  placeholder="e.g. Tuesday 7-a-side"
+                  required
+                  className="w-full h-11 px-3 rounded-lg border border-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+              </Field>
+              <div className="grid grid-cols-2 gap-3">
+                <Field label="Day">
+                  <select
+                    value={dayOfWeek}
+                    onChange={(e) => setDayOfWeek(e.target.value)}
+                    className="w-full h-11 px-3 rounded-lg border border-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  >
+                    {DAYS_OF_WEEK.map((d, i) => (
+                      <option key={i} value={i}>
+                        {d}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+                <Field label="Time">
+                  <input
+                    type="time"
+                    value={time}
+                    onChange={(e) => setTime(e.target.value)}
+                    className="w-full h-11 px-3 rounded-lg border border-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  />
+                </Field>
+              </div>
+              <Field label="Venue">
+                <input
+                  value={venue}
+                  onChange={(e) => setVenue(e.target.value)}
+                  placeholder="e.g. Goals North Cheam"
+                  required
+                  className="w-full h-11 px-3 rounded-lg border border-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+              </Field>
+              <div className="grid grid-cols-2 gap-3">
+                <Field label="Format">
+                  <select
+                    value={format}
+                    onChange={(e) => setFormat(e.target.value as typeof format)}
+                    className="w-full h-11 px-3 rounded-lg border border-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  >
+                    <option value="SEVEN_A_SIDE">7-a-side (14 players)</option>
+                    <option value="FIVE_A_SIDE">5-a-side (10 players)</option>
+                  </select>
+                </Field>
+                <Field label="Deadline (h before)">
+                  <input
+                    type="number"
+                    value={deadlineHours}
+                    onChange={(e) => setDeadlineHours(e.target.value)}
+                    min="1"
+                    max="48"
+                    className="w-full h-11 px-3 rounded-lg border border-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  />
+                </Field>
+              </div>
+              <Field label="Match duration (minutes)">
+                <input
+                  type="number"
+                  value={matchDurationMins}
+                  onChange={(e) => setMatchDurationMins(e.target.value)}
+                  min="20"
+                  max="180"
+                  className="w-full h-11 px-3 rounded-lg border border-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+                <p className="text-xs text-slate-400 mt-1">
+                  Rating emails are sent automatically when this time expires after match start.
+                </p>
+              </Field>
+              <button
+                type="submit"
+                className="w-full h-11 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-medium"
+              >
+                Create
+              </button>
+            </form>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Field({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div>
+      <label className="block text-sm font-medium text-slate-700 mb-1.5">{label}</label>
+      {children}
     </div>
   );
 }

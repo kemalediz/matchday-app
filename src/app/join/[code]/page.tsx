@@ -1,14 +1,6 @@
 import { db } from "@/lib/db";
 import { redirect } from "next/navigation";
 import { joinOrganisation } from "@/app/actions/org";
-import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
 
 export default async function JoinOrgPage({
   params,
@@ -24,18 +16,13 @@ export default async function JoinOrgPage({
 
   if (!org) {
     return (
-      <div className="flex min-h-screen items-center justify-center px-6 bg-gradient-to-b from-primary/5 to-background">
-        <Card className="w-full max-w-md shadow-lg">
-          <CardHeader className="text-center space-y-2">
-            <CardTitle className="text-2xl font-bold text-destructive">
-              Invalid invite link
-            </CardTitle>
-            <CardDescription className="text-base">
-              This invite link is invalid or has expired. Ask your organiser for
-              a new one.
-            </CardDescription>
-          </CardHeader>
-        </Card>
+      <div className="min-h-screen flex items-center justify-center px-6 bg-gradient-to-br from-slate-900 via-blue-900 to-slate-900">
+        <div className="bg-white rounded-2xl shadow-xl p-8 max-w-md w-full text-center">
+          <h1 className="text-2xl font-bold text-red-600">Invalid invite link</h1>
+          <p className="text-sm text-slate-500 mt-2">
+            This invite link is invalid or has expired. Ask your organiser for a new one.
+          </p>
+        </div>
       </div>
     );
   }
@@ -47,24 +34,23 @@ export default async function JoinOrgPage({
   }
 
   return (
-    <div className="flex min-h-screen items-center justify-center px-6 bg-gradient-to-b from-primary/5 to-background">
-      <Card className="w-full max-w-md shadow-lg">
-        <CardHeader className="text-center space-y-2">
-          <CardTitle className="text-2xl font-bold">
-            Join {org.name}
-          </CardTitle>
-          <CardDescription className="text-base">
+    <div className="min-h-screen flex items-center justify-center px-6 bg-gradient-to-br from-slate-900 via-blue-900 to-slate-900">
+      <div className="bg-white rounded-2xl shadow-xl p-8 max-w-md w-full">
+        <div className="text-center mb-6">
+          <h1 className="text-2xl font-bold text-slate-800">Join {org.name}</h1>
+          <p className="text-sm text-slate-500 mt-1">
             You&apos;ve been invited to join this organisation on MatchDay.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="pb-6">
-          <form action={handleJoin}>
-            <Button type="submit" size="lg" className="w-full h-11">
-              Join {org.name}
-            </Button>
-          </form>
-        </CardContent>
-      </Card>
+          </p>
+        </div>
+        <form action={handleJoin}>
+          <button
+            type="submit"
+            className="w-full h-11 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-medium"
+          >
+            Join {org.name}
+          </button>
+        </form>
+      </div>
     </div>
   );
 }

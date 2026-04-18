@@ -2,35 +2,33 @@
 
 import { useEffect, useState } from "react";
 import { useSession } from "next-auth/react";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
+import { toast } from "sonner";
+import { Pencil, Calendar, Star, Trophy, TrendingUp } from "lucide-react";
 import { updateProfile } from "@/app/actions/players";
 import { POSITION_LABELS } from "@/lib/constants";
-import { toast } from "sonner";
-import { Calendar, Star, Trophy, TrendingUp, Pencil } from "lucide-react";
 
 const POSITIONS = ["GK", "DEF", "MID", "FWD"] as const;
 
+type Profile = {
+  name: string;
+  email: string;
+  image: string | null;
+  phoneNumber: string | null;
+  positions: string[];
+  role: string;
+};
+
+type Stats = {
+  matchesPlayed: number;
+  avgRating: number | null;
+  momCount: number;
+  attendanceRate: number;
+};
+
 export default function ProfilePage() {
   const { data: session } = useSession();
-  const [profile, setProfile] = useState<{
-    name: string;
-    email: string;
-    image: string | null;
-    phoneNumber: string | null;
-    positions: string[];
-    role: string;
-  } | null>(null);
-  const [stats, setStats] = useState<{
-    matchesPlayed: number;
-    avgRating: number | null;
-    momCount: number;
-    attendanceRate: number;
-  } | null>(null);
+  const [profile, setProfile] = useState<Profile | null>(null);
+  const [stats, setStats] = useState<Stats | null>(null);
   const [editing, setEditing] = useState(false);
   const [name, setName] = useState("");
   const [phoneNumber, setPhoneNumber] = useState("");
@@ -51,126 +49,180 @@ export default function ProfilePage() {
 
   function togglePosition(pos: string) {
     setSelectedPositions((prev) =>
-      prev.includes(pos) ? prev.filter((p) => p !== pos) : [...prev, pos]
+      prev.includes(pos) ? prev.filter((p) => p !== pos) : [...prev, pos],
     );
   }
 
   async function handleSave() {
     try {
-      await updateProfile({ name, phoneNumber: phoneNumber.trim() || undefined, positions: selectedPositions });
+      await updateProfile({
+        name,
+        phoneNumber: phoneNumber.trim() || undefined,
+        positions: selectedPositions,
+      });
       toast.success("Profile updated!");
+      setProfile((prev) =>
+        prev
+          ? {
+              ...prev,
+              name,
+              phoneNumber: phoneNumber.trim() || null,
+              positions: selectedPositions,
+            }
+          : prev,
+      );
       setEditing(false);
-      setProfile((prev) => prev ? { ...prev, name, phoneNumber: phoneNumber.trim() || null, positions: selectedPositions } : prev);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed");
     }
   }
 
-  if (!profile || !stats) return <p className="mx-auto max-w-4xl px-6 py-10 text-muted-foreground text-lg">Loading...</p>;
+  if (!profile || !stats) {
+    return <div className="p-10 text-center text-slate-400">Loading…</div>;
+  }
 
   return (
-    <div className="mx-auto max-w-4xl px-6 py-10 space-y-8">
-      <Card className="shadow-sm">
-        <CardContent className="py-8 flex items-start gap-6">
-          <Avatar className="h-20 w-20 ring-4 ring-primary/10">
-            <AvatarImage src={profile.image ?? undefined} />
-            <AvatarFallback className="text-2xl bg-primary/10 text-primary font-bold">{profile.name?.charAt(0)}</AvatarFallback>
-          </Avatar>
-          <div className="flex-1">
+    <div className="p-6 sm:p-8 max-w-4xl mx-auto space-y-6">
+      <h1 className="text-2xl font-bold text-slate-800">Profile</h1>
+
+      <section className="bg-white rounded-xl border border-slate-200 shadow-sm p-6">
+        <div className="flex items-start gap-5">
+          <div className="w-20 h-20 rounded-full bg-blue-50 text-blue-700 flex items-center justify-center text-3xl font-bold ring-4 ring-blue-100 shrink-0">
+            {(profile.name ?? "?").charAt(0).toUpperCase()}
+          </div>
+          <div className="flex-1 min-w-0">
             {editing ? (
               <div className="space-y-4">
                 <div>
-                  <Label className="text-[15px]">Name</Label>
-                  <Input value={name} onChange={(e) => setName(e.target.value)} className="h-11 text-[15px] mt-1" />
+                  <label className="block text-sm font-medium text-slate-700 mb-1.5">
+                    Name
+                  </label>
+                  <input
+                    value={name}
+                    onChange={(e) => setName(e.target.value)}
+                    className="w-full h-11 px-3 rounded-lg border border-slate-200 text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  />
                 </div>
                 <div>
-                  <Label className="text-[15px]">Phone Number</Label>
-                  <Input type="tel" value={phoneNumber} onChange={(e) => setPhoneNumber(e.target.value)} placeholder="+44 7700 900000" className="h-11 text-[15px] mt-1" />
+                  <label className="block text-sm font-medium text-slate-700 mb-1.5">
+                    Phone number
+                  </label>
+                  <input
+                    type="tel"
+                    value={phoneNumber}
+                    onChange={(e) => setPhoneNumber(e.target.value)}
+                    placeholder="+44 7700 900000"
+                    className="w-full h-11 px-3 rounded-lg border border-slate-200 text-slate-800 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  />
                 </div>
                 <div>
-                  <Label className="text-[15px]">Positions</Label>
-                  <div className="flex gap-2 mt-2">
-                    {POSITIONS.map((pos) => (
-                      <Badge
-                        key={pos}
-                        variant={selectedPositions.includes(pos) ? "default" : "outline"}
-                        className="cursor-pointer text-sm px-3 py-1.5 hover:bg-primary/10 transition-colors"
-                        onClick={() => togglePosition(pos)}
-                      >
-                        {POSITION_LABELS[pos]}
-                      </Badge>
-                    ))}
+                  <label className="block text-sm font-medium text-slate-700 mb-1.5">
+                    Positions
+                  </label>
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                    {POSITIONS.map((pos) => {
+                      const on = selectedPositions.includes(pos);
+                      return (
+                        <button
+                          key={pos}
+                          type="button"
+                          onClick={() => togglePosition(pos)}
+                          className={`h-10 rounded-lg border-2 text-sm font-medium transition-colors ${
+                            on
+                              ? "bg-blue-600 text-white border-blue-600"
+                              : "bg-white text-slate-700 border-slate-200 hover:border-blue-300"
+                          }`}
+                        >
+                          {POSITION_LABELS[pos]}
+                        </button>
+                      );
+                    })}
                   </div>
                 </div>
-                <div className="flex gap-3">
-                  <Button onClick={handleSave}>Save Changes</Button>
-                  <Button variant="ghost" onClick={() => setEditing(false)}>Cancel</Button>
+                <div className="flex gap-3 pt-2">
+                  <button
+                    onClick={handleSave}
+                    className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-medium"
+                  >
+                    Save changes
+                  </button>
+                  <button
+                    onClick={() => setEditing(false)}
+                    className="px-4 py-2 rounded-lg text-slate-700 hover:bg-slate-100 font-medium"
+                  >
+                    Cancel
+                  </button>
                 </div>
               </div>
             ) : (
-              <>
-                <div className="flex items-start justify-between">
-                  <div>
-                    <h1 className="text-2xl sm:text-3xl">{profile.name}</h1>
-                    <p className="text-muted-foreground mt-1">{profile.email}</p>
-                    {profile.phoneNumber && <p className="text-muted-foreground text-sm mt-0.5">{profile.phoneNumber}</p>}
+              <div>
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="text-xl font-bold text-slate-800 truncate">{profile.name}</p>
+                    <p className="text-sm text-slate-500 truncate">{profile.email}</p>
+                    {profile.phoneNumber && (
+                      <p className="text-sm text-slate-500 mt-0.5">{profile.phoneNumber}</p>
+                    )}
                   </div>
-                  <Button size="sm" variant="outline" onClick={() => setEditing(true)}>
-                    <Pencil className="h-3.5 w-3.5 mr-1.5" />
+                  <button
+                    onClick={() => setEditing(true)}
+                    className="inline-flex items-center gap-1.5 text-sm text-slate-600 hover:text-slate-800 border border-slate-200 px-3 py-1.5 rounded-lg hover:bg-slate-50"
+                  >
+                    <Pencil className="w-3.5 h-3.5" />
                     Edit
-                  </Button>
+                  </button>
                 </div>
-                <div className="flex items-center gap-2 mt-3">
+                <div className="flex items-center gap-1.5 mt-3">
                   {profile.positions.map((pos) => (
-                    <Badge key={pos} variant="secondary" className="text-sm px-3 py-1">{pos}</Badge>
+                    <span
+                      key={pos}
+                      className="inline-flex px-2 py-1 rounded-md bg-slate-100 text-slate-700 text-xs font-semibold"
+                    >
+                      {pos}
+                    </span>
                   ))}
                 </div>
-              </>
+              </div>
             )}
           </div>
-        </CardContent>
-      </Card>
+        </div>
+      </section>
 
-      <div className="grid gap-5 sm:grid-cols-4">
-        <Card className="shadow-sm">
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground flex items-center gap-2">
-              <Calendar className="h-4 w-4" />
-              Matches
-            </CardTitle>
-          </CardHeader>
-          <CardContent><p className="text-4xl font-bold">{stats.matchesPlayed}</p></CardContent>
-        </Card>
-        <Card className="shadow-sm">
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground flex items-center gap-2">
-              <Star className="h-4 w-4" />
-              Avg Rating
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <p className="text-4xl font-bold">{stats.avgRating ? stats.avgRating.toFixed(1) : "N/A"}</p>
-          </CardContent>
-        </Card>
-        <Card className="shadow-sm">
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground flex items-center gap-2">
-              <Trophy className="h-4 w-4" />
-              MoM Awards
-            </CardTitle>
-          </CardHeader>
-          <CardContent><p className="text-4xl font-bold">{stats.momCount}</p></CardContent>
-        </Card>
-        <Card className="shadow-sm">
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground flex items-center gap-2">
-              <TrendingUp className="h-4 w-4" />
-              Attendance
-            </CardTitle>
-          </CardHeader>
-          <CardContent><p className="text-4xl font-bold">{stats.attendanceRate}%</p></CardContent>
-        </Card>
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+        <StatTile icon={<Calendar className="w-4 h-4" />} label="Matches" value={stats.matchesPlayed} color="blue" />
+        <StatTile icon={<Star className="w-4 h-4" />} label="Avg rating" value={stats.avgRating != null ? stats.avgRating.toFixed(1) : "—"} color="green" />
+        <StatTile icon={<Trophy className="w-4 h-4" />} label="MoM" value={stats.momCount} color="amber" />
+        <StatTile icon={<TrendingUp className="w-4 h-4" />} label="Attendance" value={`${stats.attendanceRate}%`} color="purple" />
       </div>
+    </div>
+  );
+}
+
+function StatTile({
+  icon,
+  label,
+  value,
+  color,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  value: string | number;
+  color: "blue" | "green" | "amber" | "purple";
+}) {
+  const cls = {
+    blue: "bg-blue-50 text-blue-700 border-blue-200",
+    green: "bg-green-50 text-green-700 border-green-200",
+    amber: "bg-amber-50 text-amber-700 border-amber-200",
+    purple: "bg-purple-50 text-purple-700 border-purple-200",
+  }[color];
+
+  return (
+    <div className={`p-5 rounded-xl border ${cls}`}>
+      <div className="flex items-center gap-2 opacity-75">
+        {icon}
+        <p className="text-xs font-medium uppercase tracking-wider">{label}</p>
+      </div>
+      <p className="text-3xl font-bold mt-2">{value}</p>
     </div>
   );
 }

@@ -1,14 +1,8 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Card, CardContent } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
-import { Input } from "@/components/ui/input";
-import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { updatePlayerRole, seedPlayerRating } from "@/app/actions/players";
 import { toast } from "sonner";
+import { updatePlayerRole, seedPlayerRating } from "@/app/actions/players";
 
 interface Player {
   id: string;
@@ -28,9 +22,7 @@ export default function PlayersPage() {
   const [orgId, setOrgId] = useState<string | null>(null);
 
   useEffect(() => {
-    fetch("/api/org/settings")
-      .then((r) => r.json())
-      .then((data) => setOrgId(data.id));
+    fetch("/api/org/settings").then((r) => r.json()).then((d) => setOrgId(d.id));
     loadPlayers();
   }, []);
 
@@ -51,10 +43,9 @@ export default function PlayersPage() {
     }
   }
 
-  async function handleSeedRating(userId: string, rating: string) {
-    const num = parseFloat(rating);
-    if (isNaN(num) || num < 1 || num > 10) return;
-    if (!orgId) return;
+  async function handleSeedRating(userId: string, value: string) {
+    const num = parseFloat(value);
+    if (isNaN(num) || num < 1 || num > 10 || !orgId) return;
     try {
       await seedPlayerRating(userId, orgId, num);
       toast.success("Rating updated");
@@ -64,52 +55,53 @@ export default function PlayersPage() {
     }
   }
 
-  if (loading) return <p className="text-muted-foreground text-lg">Loading...</p>;
+  if (loading) return <div className="p-10 text-center text-slate-400">Loading…</div>;
 
   return (
-    <div className="space-y-8">
-      <h2>Players ({players.length})</h2>
+    <div className="space-y-6">
+      <h2 className="text-lg font-semibold text-slate-800">Players ({players.length})</h2>
 
-      <div className="space-y-3">
-        {players.map((player) => (
-          <Card key={player.id} className="shadow-sm">
-            <CardContent className="py-4 flex items-center gap-4">
-              <Avatar className="h-10 w-10">
-                <AvatarImage src={player.image ?? undefined} />
-                <AvatarFallback className="bg-primary/10 text-primary font-semibold">{player.name?.charAt(0) ?? "?"}</AvatarFallback>
-              </Avatar>
-              <div className="flex-1 min-w-0">
-                <p className="text-[15px] font-semibold truncate">{player.name ?? player.email}</p>
-                <div className="flex items-center gap-2 text-sm text-muted-foreground mt-0.5">
-                  {player.positions.map((pos) => (
-                    <Badge key={pos} variant="outline" className="text-xs">{pos}</Badge>
-                  ))}
-                  <span>{player._count.attendances} matches</span>
-                </div>
+      <div className="bg-white rounded-xl border border-slate-200 shadow-sm divide-y divide-slate-100">
+        {players.map((p) => (
+          <div key={p.id} className="px-6 py-4 flex items-center gap-4">
+            <div className="w-10 h-10 rounded-full bg-blue-50 text-blue-700 flex items-center justify-center text-sm font-semibold shrink-0">
+              {(p.name ?? p.email).charAt(0).toUpperCase()}
+            </div>
+            <div className="flex-1 min-w-0">
+              <p className="font-semibold text-slate-800 truncate">{p.name ?? p.email}</p>
+              <div className="flex items-center gap-1.5 text-xs text-slate-500 mt-0.5">
+                {p.positions.map((pos) => (
+                  <span
+                    key={pos}
+                    className="inline-flex px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 font-semibold"
+                  >
+                    {pos}
+                  </span>
+                ))}
+                <span>· {p._count.attendances} matches</span>
               </div>
-              <div className="flex items-center gap-3 shrink-0">
-                <Input
-                  type="number"
-                  className="w-20 h-10"
-                  placeholder="Seed"
-                  defaultValue={player.seedRating ?? ""}
-                  min={1}
-                  max={10}
-                  step={0.5}
-                  onBlur={(e) => e.target.value && handleSeedRating(player.id, e.target.value)}
-                />
-                <Select value={player.role} onValueChange={(v) => v && handleRoleChange(player.id, v)}>
-                  <SelectTrigger className="w-28 h-10">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="PLAYER">Player</SelectItem>
-                    <SelectItem value="ADMIN">Admin</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-            </CardContent>
-          </Card>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              <input
+                type="number"
+                defaultValue={p.seedRating ?? ""}
+                min={1}
+                max={10}
+                step={0.5}
+                placeholder="Seed"
+                onBlur={(e) => e.target.value && handleSeedRating(p.id, e.target.value)}
+                className="w-20 h-10 px-2 rounded-lg border border-slate-200 text-sm text-center focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+              <select
+                value={p.role}
+                onChange={(e) => handleRoleChange(p.id, e.target.value)}
+                className="h-10 px-2 rounded-lg border border-slate-200 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+              >
+                <option value="PLAYER">Player</option>
+                <option value="ADMIN">Admin</option>
+              </select>
+            </div>
+          </div>
         ))}
       </div>
     </div>

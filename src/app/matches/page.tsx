@@ -3,19 +3,15 @@ import { db } from "@/lib/db";
 import { getUserOrg } from "@/lib/org";
 import { redirect } from "next/navigation";
 import Link from "next/link";
-import { Card, CardContent } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { FORMAT_CONFIG } from "@/lib/constants";
 import { format, formatDistanceToNow, isToday, isTomorrow } from "date-fns";
 import { Calendar, MapPin, Users } from "lucide-react";
-import { Progress } from "@/components/ui/progress";
+import { MatchesTabs } from "@/components/match/matches-tabs";
 
 function relativeLabel(date: Date): string {
   if (isToday(date)) return `Today at ${format(date, "HH:mm")}`;
   if (isTomorrow(date)) return `Tomorrow at ${format(date, "HH:mm")}`;
   const dist = formatDistanceToNow(date, { addSuffix: false });
-  // Only use relative for near-term dates
   if (dist.includes("day") && parseInt(dist) <= 7) {
     return `${format(date, "EEE 'at' HH:mm")} (in ${dist})`;
   }
@@ -47,7 +43,6 @@ export default async function MatchesPage() {
     include: { activity: true },
   });
 
-  // Get user's attendances
   const myAttendances = await db.attendance.findMany({
     where: {
       userId: session.user.id,
@@ -55,107 +50,110 @@ export default async function MatchesPage() {
       status: { not: "DROPPED" },
     },
   });
-  const myAttendanceMap = new Map(myAttendances.map((a) => [a.matchId, a]));
+  const myAttMap = new Map(myAttendances.map((a) => [a.matchId, a.status]));
+
+  const upcomingCards = upcomingMatches.map((m) => {
+    const confirmed = m.attendances.filter((a) => a.status === "CONFIRMED").length;
+    const bench = m.attendances.filter((a) => a.status === "BENCH").length;
+    const myStatus = myAttMap.get(m.id) ?? null;
+    const pct = Math.min(100, Math.round((confirmed / m.maxPlayers) * 100));
+    const barColor =
+      confirmed >= m.maxPlayers
+        ? "bg-green-500"
+        : confirmed >= m.maxPlayers * 0.75
+        ? "bg-blue-600"
+        : "bg-amber-500";
+
+    const borderColor =
+      myStatus === "CONFIRMED"
+        ? "border-l-green-500"
+        : myStatus === "BENCH"
+        ? "border-l-amber-500"
+        : "border-l-transparent";
+
+    const pill =
+      myStatus === "CONFIRMED"
+        ? { label: "In", cls: "bg-green-100 text-green-700" }
+        : myStatus === "BENCH"
+        ? { label: "Bench", cls: "bg-amber-100 text-amber-700" }
+        : { label: "Not signed up", cls: "bg-slate-100 text-slate-500" };
+
+    return (
+      <Link
+        key={m.id}
+        href={`/matches/${m.id}`}
+        className={`block bg-white rounded-xl border border-slate-200 border-l-4 ${borderColor} shadow-sm hover:shadow transition-all`}
+      >
+        <div className="p-5 space-y-3">
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <p className="font-semibold text-slate-800 truncate">{m.activity.name}</p>
+              <div className="flex flex-col sm:flex-row sm:items-center gap-1 sm:gap-4 text-sm text-slate-500 mt-1">
+                <span className="flex items-center gap-1.5">
+                  <Calendar className="w-3.5 h-3.5" />
+                  {relativeLabel(m.date)}
+                </span>
+                <span className="flex items-center gap-1.5">
+                  <MapPin className="w-3.5 h-3.5" />
+                  {m.activity.venue}
+                </span>
+              </div>
+            </div>
+            <span className={`shrink-0 inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium ${pill.cls}`}>
+              {pill.label}
+            </span>
+          </div>
+          <div className="space-y-1.5">
+            <div className="flex items-center justify-between text-sm">
+              <span className="flex items-center gap-1.5 text-slate-500">
+                <Users className="w-3.5 h-3.5" />
+                {confirmed}/{m.maxPlayers}
+                {bench > 0 && <span className="ml-2 text-slate-400">· {bench} bench</span>}
+              </span>
+              <span className="inline-flex px-2 py-0.5 rounded-md bg-slate-100 text-slate-600 text-xs font-medium">
+                {FORMAT_CONFIG[m.format].label}
+              </span>
+            </div>
+            <div className="h-1.5 bg-slate-100 rounded-full overflow-hidden">
+              <div className={`h-full ${barColor}`} style={{ width: `${pct}%` }} />
+            </div>
+          </div>
+        </div>
+      </Link>
+    );
+  });
+
+  const pastCards = pastMatches.map((m) => (
+    <Link
+      key={m.id}
+      href={`/matches/${m.id}`}
+      className="block bg-white rounded-xl border border-slate-200 shadow-sm hover:shadow transition-all"
+    >
+      <div className="p-5 flex items-center justify-between">
+        <div>
+          <p className="font-semibold text-slate-800">{m.activity.name}</p>
+          <p className="text-sm text-slate-500 mt-0.5">{format(m.date, "EEE, d MMM yyyy")}</p>
+        </div>
+        {m.redScore !== null && m.yellowScore !== null && (
+          <div className="flex items-center gap-3 text-lg font-mono font-bold">
+            <span className="text-red-500">{m.redScore}</span>
+            <span className="text-slate-300 text-base">-</span>
+            <span className="text-amber-500">{m.yellowScore}</span>
+          </div>
+        )}
+      </div>
+    </Link>
+  ));
 
   return (
-    <div className="mx-auto max-w-6xl px-6 py-10">
-      <h1 className="mb-8">Matches</h1>
-
-      <Tabs defaultValue="upcoming">
-        <TabsList className="mb-6">
-          <TabsTrigger value="upcoming" className="text-[15px] px-5">Upcoming ({upcomingMatches.length})</TabsTrigger>
-          <TabsTrigger value="past" className="text-[15px] px-5">Past ({pastMatches.length})</TabsTrigger>
-        </TabsList>
-
-        <TabsContent value="upcoming" className="space-y-3">
-          {upcomingMatches.length === 0 && (
-            <p className="text-muted-foreground py-12 text-center text-lg">No upcoming matches</p>
-          )}
-          {upcomingMatches.map((match) => {
-            const confirmed = match.attendances.filter((a) => a.status === "CONFIRMED").length;
-            const bench = match.attendances.filter((a) => a.status === "BENCH").length;
-            const myAtt = myAttendanceMap.get(match.id);
-
-            const statusColor = myAtt?.status === "CONFIRMED" ? "border-l-green-500" : myAtt?.status === "BENCH" ? "border-l-amber-500" : "border-l-transparent";
-
-            return (
-              <Link key={match.id} href={`/matches/${match.id}`}>
-                <Card className={`hover:bg-accent/50 transition-all hover:shadow-sm shadow-none border-l-4 ${statusColor}`}>
-                  <CardContent className="py-5 space-y-3">
-                    <div className="flex items-start justify-between gap-4">
-                      <div className="space-y-1.5">
-                        <p className="text-[15px] font-semibold">{match.activity.name}</p>
-                        <div className="flex flex-col sm:flex-row sm:items-center gap-1 sm:gap-4 text-sm text-muted-foreground">
-                          <span className="flex items-center gap-1.5">
-                            <Calendar className="h-3.5 w-3.5" />
-                            {relativeLabel(match.date)}
-                          </span>
-                          <span className="flex items-center gap-1.5">
-                            <MapPin className="h-3.5 w-3.5" />
-                            {match.activity.venue}
-                          </span>
-                        </div>
-                      </div>
-                      <div className="shrink-0">
-                        {myAtt?.status === "CONFIRMED" && <Badge className="text-sm px-3 py-1">In</Badge>}
-                        {myAtt?.status === "BENCH" && <Badge variant="outline" className="text-sm px-3 py-1">Bench</Badge>}
-                        {!myAtt && <Badge variant="outline" className="text-sm px-3 py-1">Not signed up</Badge>}
-                      </div>
-                    </div>
-                    <div className="space-y-1.5">
-                      <div className="flex items-center justify-between text-sm">
-                        <span className="flex items-center gap-1.5 text-muted-foreground">
-                          <Users className="h-3.5 w-3.5" />
-                          {confirmed}/{match.maxPlayers}
-                          {bench > 0 && <span className="ml-2">· {bench} bench</span>}
-                        </span>
-                        <Badge variant="secondary" className="text-xs">{FORMAT_CONFIG[match.format].label}</Badge>
-                      </div>
-                      <Progress
-                        value={confirmed}
-                        max={match.maxPlayers}
-                        className="h-1.5"
-                        indicatorClassName={
-                          confirmed >= match.maxPlayers
-                            ? "bg-green-500"
-                            : confirmed >= match.maxPlayers * 0.75
-                            ? "bg-primary"
-                            : "bg-amber-500"
-                        }
-                      />
-                    </div>
-                  </CardContent>
-                </Card>
-              </Link>
-            );
-          })}
-        </TabsContent>
-
-        <TabsContent value="past" className="space-y-3">
-          {pastMatches.length === 0 && (
-            <p className="text-muted-foreground py-12 text-center text-lg">No past matches</p>
-          )}
-          {pastMatches.map((match) => (
-            <Link key={match.id} href={`/matches/${match.id}`}>
-              <Card className="hover:bg-accent/50 transition-all hover:shadow-sm shadow-none">
-                <CardContent className="py-5 flex items-center justify-between">
-                  <div>
-                    <p className="text-[15px] font-semibold">{match.activity.name}</p>
-                    <p className="text-sm text-muted-foreground mt-0.5">{format(match.date, "EEE, d MMM yyyy")}</p>
-                  </div>
-                  {match.redScore !== null && match.yellowScore !== null && (
-                    <div className="flex items-center gap-3 text-lg font-mono font-bold">
-                      <span className="text-red-500">{match.redScore}</span>
-                      <span className="text-muted-foreground text-base">-</span>
-                      <span className="text-yellow-500">{match.yellowScore}</span>
-                    </div>
-                  )}
-                </CardContent>
-              </Card>
-            </Link>
-          ))}
-        </TabsContent>
-      </Tabs>
+    <div className="p-6 sm:p-8 max-w-6xl mx-auto">
+      <h1 className="text-2xl font-bold text-slate-800 mb-6">Matches</h1>
+      <MatchesTabs
+        upcomingCount={upcomingMatches.length}
+        pastCount={pastMatches.length}
+        upcoming={upcomingCards}
+        past={pastCards}
+      />
     </div>
   );
 }

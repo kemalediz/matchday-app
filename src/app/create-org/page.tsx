@@ -5,121 +5,91 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { toast } from "sonner";
 import { createOrganisation } from "@/app/actions/org";
-import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 
 function nameToSlug(name: string) {
-  return name
-    .toLowerCase()
-    .replace(/\s+/g, "-")
-    .replace(/[^a-z0-9-]/g, "");
+  return name.toLowerCase().replace(/\s+/g, "-").replace(/[^a-z0-9-]/g, "");
 }
 
 export default function CreateOrgPage() {
   const router = useRouter();
-
   const [name, setName] = useState("");
   const [slug, setSlug] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
-  function handleNameChange(value: string) {
-    setName(value);
-    setSlug(nameToSlug(value));
-  }
-
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setError("");
     setLoading(true);
-
     try {
       await createOrganisation({ name, slug });
       toast.success("Organisation created!");
       router.push("/admin/activities");
     } catch (err) {
-      const message =
-        err instanceof Error ? err.message : "Something went wrong.";
-      setError(message);
+      setError(err instanceof Error ? err.message : "Something went wrong.");
     } finally {
       setLoading(false);
     }
   }
 
   return (
-    <div className="flex min-h-screen items-center justify-center px-6 bg-gradient-to-b from-primary/5 to-background">
-      <Card className="w-full max-w-md shadow-lg">
-        <CardHeader className="text-center space-y-2 pb-2">
-          <CardTitle className="text-2xl font-bold">
-            Create your organisation
-          </CardTitle>
-          <CardDescription className="text-base">
-            Set up your club, team, or group
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="pt-4 pb-6">
-          <form onSubmit={handleSubmit} className="space-y-4">
-            <div className="space-y-2">
-              <Label htmlFor="org-name">Organisation name</Label>
-              <Input
-                id="org-name"
+    <div className="min-h-screen flex items-center justify-center px-6 bg-gradient-to-br from-slate-900 via-blue-900 to-slate-900">
+      <div className="bg-white rounded-2xl shadow-xl p-8 max-w-md w-full">
+        <div className="text-center mb-6">
+          <h1 className="text-2xl font-bold text-slate-800">Create your organisation</h1>
+          <p className="text-sm text-slate-500 mt-1">Set up your club, team, or group</p>
+        </div>
+
+        <form onSubmit={handleSubmit} className="space-y-4">
+          <div>
+            <label className="block text-sm font-medium text-slate-700 mb-1.5">
+              Organisation name
+            </label>
+            <input
+              type="text"
+              required
+              value={name}
+              onChange={(e) => {
+                setName(e.target.value);
+                setSlug(nameToSlug(e.target.value));
+              }}
+              placeholder="e.g. Sunday League FC"
+              className="w-full h-11 px-3 rounded-lg border border-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500"
+            />
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-slate-700 mb-1.5">URL</label>
+            <div className="flex items-center rounded-lg border border-slate-200 bg-slate-50 overflow-hidden">
+              <span className="px-3 text-sm text-slate-500">matchday.app/join/</span>
+              <input
                 type="text"
-                placeholder="e.g. Sunday League FC"
-                className="h-11"
-                value={name}
-                onChange={(e) => handleNameChange(e.target.value)}
-                required
+                value={slug}
+                readOnly
+                className="flex-1 h-11 bg-white border-l border-slate-200 px-3 text-slate-800"
               />
             </div>
-            <div className="space-y-2">
-              <Label htmlFor="slug">URL</Label>
-              <div className="flex items-center gap-0 rounded-lg border border-input bg-muted/50 overflow-hidden">
-                <span className="px-3 text-sm text-muted-foreground whitespace-nowrap select-none">
-                  matchday.app/join/
-                </span>
-                <Input
-                  id="slug"
-                  type="text"
-                  className="h-11 border-0 border-l rounded-none bg-background focus-visible:ring-0 focus-visible:border-ring"
-                  value={slug}
-                  readOnly
-                />
-              </div>
-            </div>
+          </div>
 
-            {error && (
-              <p className="text-sm text-destructive text-center">{error}</p>
-            )}
+          {error && (
+            <div className="p-3 bg-red-50 text-red-700 rounded-lg text-sm">{error}</div>
+          )}
 
-            <Button
-              type="submit"
-              size="lg"
-              className="w-full h-11"
-              disabled={loading || !name.trim()}
-            >
-              {loading ? "Creating..." : "Create organisation"}
-            </Button>
-          </form>
+          <button
+            type="submit"
+            disabled={loading || !name.trim()}
+            className="w-full h-11 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-medium transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
+          >
+            {loading ? "Creating…" : "Create organisation"}
+          </button>
+        </form>
 
-          <p className="mt-6 text-center text-sm text-muted-foreground">
-            Or{" "}
-            <Link
-              href="/"
-              className="font-medium text-primary hover:underline"
-            >
-              join an existing organisation
-            </Link>
-          </p>
-        </CardContent>
-      </Card>
+        <p className="mt-6 text-center text-sm text-slate-500">
+          Or{" "}
+          <Link href="/" className="font-medium text-blue-600 hover:text-blue-700">
+            join an existing organisation
+          </Link>
+        </p>
+      </div>
     </div>
   );
 }

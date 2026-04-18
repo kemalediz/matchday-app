@@ -1,13 +1,8 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Badge } from "@/components/ui/badge";
 import { toast } from "sonner";
-import { Copy, Link as LinkIcon } from "lucide-react";
+import { Copy, Link as LinkIcon, Users, Settings, MessageCircle } from "lucide-react";
 
 interface OrgData {
   id: string;
@@ -25,7 +20,7 @@ export default function SettingsPage() {
 
   useEffect(() => {
     fetch("/api/org/settings")
-      .then((r) => r.ok ? r.json() : null)
+      .then((r) => (r.ok ? r.json() : null))
       .then(setOrg)
       .finally(() => setLoading(false));
   }, []);
@@ -37,76 +32,105 @@ export default function SettingsPage() {
     toast.success("Invite link copied!");
   }
 
-  if (loading) return <p className="text-muted-foreground text-lg">Loading...</p>;
-  if (!org) return <p className="text-muted-foreground text-lg">Organisation not found</p>;
+  if (loading) return <div className="p-10 text-center text-slate-400">Loading…</div>;
+  if (!org) return <div className="p-10 text-center text-slate-400">Organisation not found.</div>;
 
   const inviteLink = `${typeof window !== "undefined" ? window.location.origin : ""}/join/${org.inviteCode}`;
 
   return (
-    <div className="space-y-8">
-      <h2>Organisation Settings</h2>
+    <div className="space-y-6">
+      {/* General */}
+      <section className="bg-white rounded-xl border border-slate-200 shadow-sm">
+        <div className="px-6 py-4 border-b border-slate-100 flex items-center gap-2">
+          <Settings className="w-4 h-4 text-slate-500" />
+          <h2 className="font-semibold text-slate-800">General</h2>
+        </div>
+        <div className="p-6 space-y-4">
+          <div>
+            <label className="block text-sm font-medium text-slate-700 mb-1.5">
+              Organisation name
+            </label>
+            <input
+              value={org.name}
+              disabled
+              className="w-full h-11 px-3 rounded-lg border border-slate-200 bg-slate-50 text-slate-700"
+            />
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-slate-700 mb-1.5">URL slug</label>
+            <input
+              value={org.slug}
+              disabled
+              className="w-full h-11 px-3 rounded-lg border border-slate-200 bg-slate-50 text-slate-700"
+            />
+          </div>
+          <div className="flex items-center gap-1.5 text-sm text-slate-500">
+            <Users className="w-4 h-4" />
+            {org.memberCount} members
+          </div>
+        </div>
+      </section>
 
-      <Card className="shadow-sm">
-        <CardHeader>
-          <CardTitle className="text-xl">General</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="space-y-2">
-            <Label className="text-[15px]">Organisation Name</Label>
-            <Input value={org.name} disabled className="h-11" />
-          </div>
-          <div className="space-y-2">
-            <Label className="text-[15px]">URL Slug</Label>
-            <Input value={org.slug} disabled className="h-11" />
-          </div>
-          <div className="flex items-center gap-3">
-            <Badge variant="secondary" className="text-sm px-3 py-1">
-              {org.memberCount} members
-            </Badge>
-          </div>
-        </CardContent>
-      </Card>
-
-      <Card className="shadow-sm">
-        <CardHeader>
-          <CardTitle className="text-xl flex items-center gap-2">
-            <LinkIcon className="h-5 w-5" />
-            Invite Link
-          </CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <p className="text-muted-foreground">Share this link with players to join your organisation.</p>
-          <div className="flex items-center gap-3">
-            <Input value={inviteLink} readOnly className="h-11 font-mono text-sm" />
-            <Button variant="outline" onClick={copyInviteLink}>
-              <Copy className="h-4 w-4 mr-2" />
+      {/* Invite */}
+      <section className="bg-white rounded-xl border border-slate-200 shadow-sm">
+        <div className="px-6 py-4 border-b border-slate-100 flex items-center gap-2">
+          <LinkIcon className="w-4 h-4 text-slate-500" />
+          <h2 className="font-semibold text-slate-800">Invite link</h2>
+        </div>
+        <div className="p-6 space-y-4">
+          <p className="text-sm text-slate-500">
+            Share this link with players to join your organisation.
+          </p>
+          <div className="flex items-center gap-2">
+            <input
+              value={inviteLink}
+              readOnly
+              className="flex-1 h-11 px-3 rounded-lg border border-slate-200 bg-slate-50 font-mono text-xs text-slate-700"
+            />
+            <button
+              onClick={copyInviteLink}
+              className="inline-flex items-center gap-2 px-4 h-11 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 font-medium"
+            >
+              <Copy className="w-4 h-4" />
               Copy
-            </Button>
+            </button>
           </div>
-        </CardContent>
-      </Card>
+        </div>
+      </section>
 
-      <Card className="shadow-sm">
-        <CardHeader>
-          <CardTitle className="text-xl">WhatsApp Bot</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="flex items-center gap-3">
-            <Badge variant={org.whatsappBotEnabled ? "default" : "secondary"}>
-              {org.whatsappBotEnabled ? "Enabled" : "Disabled"}
-            </Badge>
-          </div>
+      {/* WhatsApp */}
+      <section className="bg-white rounded-xl border border-slate-200 shadow-sm">
+        <div className="px-6 py-4 border-b border-slate-100 flex items-center gap-2">
+          <MessageCircle className="w-4 h-4 text-slate-500" />
+          <h2 className="font-semibold text-slate-800">WhatsApp bot</h2>
+        </div>
+        <div className="p-6 space-y-4">
+          <span
+            className={`inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium ${
+              org.whatsappBotEnabled
+                ? "bg-green-100 text-green-700"
+                : "bg-slate-100 text-slate-600"
+            }`}
+          >
+            {org.whatsappBotEnabled ? "Enabled" : "Disabled"}
+          </span>
           {org.whatsappGroupId && (
-            <div className="space-y-2">
-              <Label className="text-[15px]">WhatsApp Group ID</Label>
-              <Input value={org.whatsappGroupId} disabled className="h-11 font-mono text-sm" />
+            <div>
+              <label className="block text-sm font-medium text-slate-700 mb-1.5">
+                WhatsApp group ID
+              </label>
+              <input
+                value={org.whatsappGroupId}
+                disabled
+                className="w-full h-11 px-3 rounded-lg border border-slate-200 bg-slate-50 font-mono text-xs text-slate-700"
+              />
             </div>
           )}
-          <p className="text-sm text-muted-foreground">
-            WhatsApp bot configuration is managed via the server. Contact the administrator to enable or configure the bot for your organisation.
+          <p className="text-xs text-slate-500">
+            Bot configuration is managed server-side. Contact your administrator to enable or reconfigure.
           </p>
-        </CardContent>
-      </Card>
+        </div>
+      </section>
     </div>
   );
 }
