@@ -16,11 +16,21 @@ async function getPlayerRating(userId: string): Promise<number> {
     take: 60,
   });
 
+  // Scale Elo matchRating (1000 = average) onto the 1-10 scale the balancer
+  // expects: 1000 → 5.0, 1200 → 6.0, 1400 → 7.0, etc.
+  const eloScaled = user ? user.matchRating / 200 : 5.0;
+
   if (recentRatings.length >= 3) {
-    return recentRatings.reduce((sum, r) => sum + r.score, 0) / recentRatings.length;
+    const peerAvg = recentRatings.reduce((sum, r) => sum + r.score, 0) / recentRatings.length;
+    // Blend peer perception 50/50 with Elo (actual outcomes). Peer signal
+    // reflects "did this player feel impactful?", Elo reflects "did their
+    // team win?". Both matter.
+    return 0.5 * peerAvg + 0.5 * eloScaled;
   }
 
-  return user?.seedRating ?? 5.0;
+  // Early-days: bootstrap from seed rating, nudged by Elo as matches land.
+  const base = user?.seedRating ?? 5.0;
+  return 0.7 * base + 0.3 * eloScaled;
 }
 
 export async function generateTeams(matchId: string) {

@@ -4,6 +4,7 @@ import { PlayerWithRating } from "@/types";
 import { NextResponse } from "next/server";
 import { sendRatingEmails } from "@/lib/email";
 import { format } from "date-fns";
+import { computeEloDeltas } from "@/lib/elo";
 
 export async function GET(request: Request) {
   const authHeader = request.headers.get("authorization");
@@ -129,6 +130,32 @@ export async function GET(request: Request) {
       where: { id: match.id },
       data: { status: "COMPLETED" },
     });
+
+    // Auto-complete without a score = no Elo update yet. Admin enters the
+    // score manually via /admin/matches/[id]/teams, which triggers the Elo
+    // pass via updateMatchScore. If admin ALSO auto-fills, we'd apply Elo
+    // here — but for now, unscored matches stay neutral. This is by design:
+    // without knowing who won, there's no outcome signal to learn from.
+    if (match.redScore !== null && match.yellowScore !== null) {
+      try {
+        const teams = await db.teamAssignment.findMany({
+          where: { matchId: match.id },
+          include: { user: { select: { id: true, matchRating: true } } },
+        });
+        const deltas = computeEloDeltas(
+          teams.map((t) => ({ userId: t.userId, team: t.team, matchRating: t.user.matchRating })),
+          match.redScore,
+          match.yellowScore,
+        );
+        await db.$transaction(
+          deltas.map((d) =>
+            db.user.update({ where: { id: d.userId }, data: { matchRating: d.after } }),
+          ),
+        );
+      } catch (err) {
+        console.error("Cron Elo update failed:", err);
+      }
+    }
 
     const players = match.attendances.map((a) => ({
       email: a.user.email,

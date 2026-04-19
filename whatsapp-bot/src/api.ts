@@ -14,23 +14,86 @@ export async function postAttendance(phoneNumber: string, action: "IN" | "OUT", 
   return res.json();
 }
 
-export async function getStatus(groupId: string) {
-  const res = await fetch(`${config.apiUrl}/api/whatsapp/status?groupId=${groupId}`, {
-    headers,
-  });
-  return res.json();
-}
-
-export async function getTeams(groupId: string) {
-  const res = await fetch(`${config.apiUrl}/api/whatsapp/teams?groupId=${groupId}`, {
-    headers,
-  });
-  return res.json();
-}
-
 export async function getEnabledOrgs() {
-  const res = await fetch(`${config.apiUrl}/api/whatsapp/orgs`, {
-    headers,
-  });
+  const res = await fetch(`${config.apiUrl}/api/whatsapp/orgs`, { headers });
   return res.json();
+}
+
+// ─────────────────── Scheduler endpoints (new) ───────────────────────
+
+export type DueInstruction =
+  | { kind: "group-message"; key: string; text: string; matchId?: string }
+  | {
+      kind: "group-poll";
+      key: string;
+      question: string;
+      options: string[];
+      multi?: boolean;
+      matchId?: string;
+    }
+  | {
+      kind: "dm";
+      key: string;
+      phone: string;
+      text: string;
+      matchId?: string;
+      targetUser?: string;
+    }
+  | {
+      kind: "bench-prompt";
+      key: string;
+      phone: string;
+      text: string;
+      matchId: string;
+      userId: string;
+    };
+
+export async function getDuePosts(groupId: string): Promise<{
+  instructions: DueInstruction[];
+  waGroupId: string;
+  orgId: string;
+} | null> {
+  const res = await fetch(
+    `${config.apiUrl}/api/whatsapp/due-posts?groupId=${encodeURIComponent(groupId)}`,
+    { headers },
+  );
+  if (!res.ok) {
+    const body = await res.text();
+    console.error("due-posts request failed:", res.status, body);
+    return null;
+  }
+  return res.json();
+}
+
+export async function ackInstruction(ack: {
+  key: string;
+  kind: string;
+  matchId?: string;
+  targetUser?: string;
+  waMessageId?: string;
+  benchUserId?: string;
+}): Promise<void> {
+  const res = await fetch(`${config.apiUrl}/api/whatsapp/ack`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(ack),
+  });
+  if (!res.ok) {
+    console.error("ack failed:", res.status, await res.text());
+  }
+}
+
+export async function postReaction(params: {
+  waMessageId: string;
+  emoji: string;
+  fromPhone: string;
+}): Promise<void> {
+  const res = await fetch(`${config.apiUrl}/api/whatsapp/reaction`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(params),
+  });
+  if (!res.ok) {
+    console.error("reaction post failed:", res.status, await res.text());
+  }
 }

@@ -3,7 +3,7 @@ const { Client, LocalAuth } = pkg;
 import qrcode from "qrcode-terminal";
 import { handleMessage, setMonitoredGroups } from "./handlers.js";
 import { initScheduler, stopScheduler } from "./scheduler.js";
-import { getEnabledOrgs } from "./api.js";
+import { getEnabledOrgs, postReaction } from "./api.js";
 import { config } from "./config.js";
 
 async function main() {
@@ -27,10 +27,8 @@ async function main() {
   client.on("ready", async () => {
     console.log("\nWhatsApp bot is ready!");
 
-    // List every group this account is in — useful for first-time setup
-    // so the admin can copy the right ID into the Org's whatsappGroupId.
     try {
-      const chats = await (client as typeof pkg.Client.prototype).getChats();
+      const chats = await client.getChats();
       const groups = chats.filter((c) => c.isGroup);
       console.log(`\n=== Groups this account is a member of (${groups.length}) ===`);
       groups.forEach((g) => {
@@ -41,7 +39,6 @@ async function main() {
       console.error("Failed to enumerate groups:", err);
     }
 
-    // Fetch enabled orgs from MatchDay API
     try {
       const data = await getEnabledOrgs();
       const orgConfigs = (data.orgs || [])
@@ -51,32 +48,55 @@ async function main() {
           orgName: o.name,
         }));
 
-      const groupIds = orgConfigs.map((o: { groupId: string }) => o.groupId);
-      setMonitoredGroups(groupIds);
+      setMonitoredGroups(orgConfigs.map((o: { groupId: string }) => o.groupId));
 
       console.log(`Monitoring ${orgConfigs.length} group(s):`);
-      orgConfigs.forEach((o: { orgName: string; groupId: string }) => {
-        console.log(`  - ${o.orgName} (${o.groupId})`);
-      });
+      orgConfigs.forEach((o: { orgName: string; groupId: string }) =>
+        console.log(`  - ${o.orgName} (${o.groupId})`),
+      );
 
-      // Start periodic status updates
       initScheduler(client, orgConfigs);
     } catch (err) {
       console.error("Failed to fetch org configs:", err);
-      console.log("Bot will listen to all groups but won't post updates.");
     }
   });
 
-  client.on("message", async (msg: { body: string; from: string; author?: string }) => {
-    await handleMessage({
-      body: msg.body,
-      from: msg.from,
-      author: msg.author,
-      reply: async (text: string) => {
-        const chat = await (client as typeof pkg.Client.prototype).getChatById(msg.from);
-        await chat.sendMessage(text);
-      },
-    });
+  // Inbound group messages — IN/OUT detection.
+  client.on(
+    "message",
+    async (msg) => {
+      await handleMessage({
+        body: msg.body,
+        from: msg.from,
+        author: msg.author,
+        reply: async (text: string) => {
+          const chat = await client.getChatById(msg.from);
+          await chat.sendMessage(text);
+        },
+        react: async (emoji: string) => {
+          try {
+            await msg.react(emoji);
+          } catch (err) {
+            console.error("Failed to react:", err);
+          }
+        },
+      });
+    },
+  );
+
+  // Reactions on any tracked message (bench-prompt 👍/👎). Forward to server
+  // and let it decide the outcome.
+  client.on("message_reaction", async (reaction) => {
+    try {
+      const waMessageId = reaction.msgId?._serialized;
+      const fromId = reaction.senderId;
+      const emoji = reaction.reaction;
+      if (!waMessageId || !fromId || !emoji) return;
+      const phone = fromId.replace("@c.us", "").replace(/^\+/, "");
+      await postReaction({ waMessageId, emoji, fromPhone: phone });
+    } catch (err) {
+      console.error("Error forwarding reaction:", err);
+    }
   });
 
   client.on("disconnected", (reason: string) => {
@@ -84,7 +104,6 @@ async function main() {
     stopScheduler();
   });
 
-  // Graceful shutdown
   process.on("SIGINT", async () => {
     console.log("\nShutting down...");
     stopScheduler();

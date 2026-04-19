@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { Phone } from "lucide-react";
+import { Phone, Star } from "lucide-react";
 import { toast } from "sonner";
 import { updatePlayerRole, seedPlayerRating } from "@/app/actions/players";
 
@@ -66,16 +66,25 @@ export default function PlayersPage() {
     <div className="space-y-6">
       <div className="flex items-center justify-between gap-3">
         <h2 className="text-lg font-semibold text-slate-800">Players ({players.length})</h2>
-        <Link
-          href="/admin/players/phones"
-          className="inline-flex items-center gap-2 px-3 py-2 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 text-sm font-medium"
-        >
-          <Phone className="w-4 h-4" />
-          Bulk edit phones
-          <span className="inline-flex px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 text-[10px] font-semibold">
-            {withPhoneCount}/{players.length}
-          </span>
-        </Link>
+        <div className="flex items-center gap-2">
+          <Link
+            href="/admin/players/phones"
+            className="inline-flex items-center gap-2 px-3 py-2 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 text-sm font-medium"
+          >
+            <Phone className="w-4 h-4" />
+            Phones
+            <span className="inline-flex px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 text-[10px] font-semibold">
+              {withPhoneCount}/{players.length}
+            </span>
+          </Link>
+          <Link
+            href="/admin/players/ratings"
+            className="inline-flex items-center gap-2 px-3 py-2 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 text-sm font-medium"
+          >
+            <Star className="w-4 h-4" />
+            Seed ratings
+          </Link>
+        </div>
       </div>
 
       <p className="text-sm text-slate-500">
