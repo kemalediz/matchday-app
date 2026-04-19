@@ -29,7 +29,10 @@ const SECRET_ENV = "AUTH_SECRET";
 function getSecret(): string {
   const s = process.env[SECRET_ENV];
   if (!s) throw new Error(`${SECRET_ENV} not set — magic links disabled`);
-  return s;
+  // Defensive trim: a stray "\n" inherited from the Vercel dashboard
+  // once made sign/verify disagree across environments. Normalise both
+  // sides so they always hash the same bytes.
+  return s.trim();
 }
 
 function b64url(input: Buffer | string): string {
