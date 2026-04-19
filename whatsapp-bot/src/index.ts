@@ -4,6 +4,7 @@ import qrcode from "qrcode-terminal";
 import { handleMessage, setMonitoredGroups } from "./handlers.js";
 import { initScheduler, stopScheduler } from "./scheduler.js";
 import { getEnabledOrgs, postReaction } from "./api.js";
+import { backfillMessagesForGroups } from "./backfill.js";
 import { config } from "./config.js";
 
 async function main() {
@@ -54,6 +55,10 @@ async function main() {
       orgConfigs.forEach((o: { orgName: string; groupId: string }) =>
         console.log(`  - ${o.orgName} (${o.groupId})`),
       );
+
+      // Catch up on any IN/OUT messages posted while the bot was offline
+      // (or before it was enabled). Silent — no reactions, no replies.
+      await backfillMessagesForGroups(client, orgConfigs);
 
       initScheduler(client, orgConfigs);
     } catch (err) {

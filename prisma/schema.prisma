@@ -162,7 +162,7 @@ model Activity {
   isActive          Boolean      @default(true)
   deadlineHours     Int          @default(5)
   matchDurationMins Int          @default(60)
-  ratingWindowHours Int          @default(48)
+  ratingWindowHours Int          @default(120) // 5 days — aligns with MoM announcement & magic-link TTL
 
   matches           Match[]
   playerPositions   PlayerActivityPosition[]
