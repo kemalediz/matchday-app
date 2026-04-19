@@ -199,6 +199,10 @@ model Match {
   attendanceDeadline DateTime
   redScore           Int?
   yellowScore        Int?
+  /// When false, the bot skips match-end postings (payment poll, rating-link DMs,
+  /// MoM announcement, rating-reminder DMs) for this specific match. Useful for
+  /// the first match after launch while the rating UI is still maturing.
+  postMatchEndFlow   Boolean     @default(true)
 
   attendances            Attendance[]
   teamAssignments        TeamAssignment[]

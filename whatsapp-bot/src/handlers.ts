@@ -1,5 +1,21 @@
-import { postAttendance } from "./api.js";
+import { postAttendance, postScore } from "./api.js";
 import { unknownPlayerMessage, errorMessage } from "./messages.js";
+
+/**
+ * Score extractor — matches plain "7-3", "7:3", "7 - 3", "7 3" (with
+ * optional surrounding words). We accept values 0-99 each side.
+ */
+const SCORE_RE = /(?:^|\s)(\d{1,2})\s*[-:–—]\s*(\d{1,2})(?=\s|$)/;
+
+export function extractScore(text: string): { red: number; yellow: number } | null {
+  const m = text.match(SCORE_RE);
+  if (!m) return null;
+  const a = parseInt(m[1], 10);
+  const b = parseInt(m[2], 10);
+  if (!Number.isFinite(a) || !Number.isFinite(b)) return null;
+  if (a > 99 || b > 99) return null;
+  return { red: a, yellow: b };
+}
 
 /**
  * IN/OUT detection — wider than a strict exact-match so real chat messages
@@ -86,11 +102,51 @@ export async function handleMessage(msg: Message) {
   if (!msg.from.endsWith("@g.us")) return;
   if (!monitoredGroups.has(msg.from)) return;
 
-  const action = extract(msg.body);
-  if (!action) return;
-
   const authorId = msg.author || msg.from;
   const phone = "+" + authorId.replace("@c.us", "");
+
+  // 1) Score submission? E.g. "7-3", "Final 5:4".
+  //    Only try this if the message is short and explicitly looks like a
+  //    score (avoids accidentally interpreting dates or phone-number
+  //    digits as scores).
+  const trimmed = msg.body.trim();
+  if (trimmed.length <= 32) {
+    const scoreOnly = /^\s*\d{1,2}\s*[-:–—]\s*\d{1,2}\s*$/.test(trimmed);
+    if (scoreOnly) {
+      const parsed = extractScore(trimmed);
+      if (parsed) {
+        try {
+          const result = await postScore({
+            fromPhone: phone,
+            redScore: parsed.red,
+            yellowScore: parsed.yellow,
+            groupId: msg.from,
+          });
+          if (result.ok) {
+            if (msg.react) await msg.react("👍");
+            return;
+          }
+          // Known-failure cases — post a short reply.
+          if (result.error === "no_match") return; // silent; the prompt is stale
+          if (result.error === "forbidden") {
+            await msg.reply("Only players from that match or an admin can record the score.");
+            return;
+          }
+          if (result.error === "unknown_player") {
+            await msg.reply(unknownPlayerMessage(phone));
+            return;
+          }
+        } catch (err) {
+          console.error("Failed to post score:", err);
+        }
+        return;
+      }
+    }
+  }
+
+  // 2) Attendance — IN / OUT detection.
+  const action = extract(msg.body);
+  if (!action) return;
 
   try {
     const result = await postAttendance(phone, action, msg.from);

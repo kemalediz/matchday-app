@@ -14,6 +14,20 @@ export async function postAttendance(phoneNumber: string, action: "IN" | "OUT", 
   return res.json();
 }
 
+export async function postScore(params: {
+  fromPhone: string;
+  redScore: number;
+  yellowScore: number;
+  groupId: string;
+}) {
+  const res = await fetch(`${config.apiUrl}/api/whatsapp/score`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(params),
+  });
+  return res.json();
+}
+
 export async function getEnabledOrgs() {
   const res = await fetch(`${config.apiUrl}/api/whatsapp/orgs`, { headers });
   return res.json();

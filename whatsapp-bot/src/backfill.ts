@@ -5,10 +5,15 @@
  * just re-confirms the player. No reactions or group replies are posted
  * during backfill (silent).
  *
- * Scope: messages since the Monday 00:00 London of the current week (or
- * `backfillDays` earlier if specified). Most recent 500 messages fetched
- * and filtered — whatsapp-web.js's fetchMessages returns newest first, so
- * we reverse before processing to preserve chronological attendance order.
+ * Scope: messages since the Monday 00:00 London of the current week.
+ *
+ * Robustness:
+ *   - Waits briefly after client ready for the WhatsApp Web page to
+ *     hydrate the chat's message store — otherwise fetchMessages can fail
+ *     with a puppeteer eval error.
+ *   - Starts with a small limit and grows if needed so we don't OOM
+ *     puppeteer on chats with many thousands of messages.
+ *   - Retries once on transient failure.
  */
 import pkg from "whatsapp-web.js";
 import { extract } from "./handlers.js";
@@ -22,47 +27,79 @@ interface GroupConfig {
 }
 
 function startOfThisMondayUTC(): Date {
-  // Compute Monday 00:00 Europe/London for the current week, in UTC.
-  const now = new Date();
-  // Work out the UK weekday of `now` using Intl.
-  const ukDow = parseInt(
-    new Intl.DateTimeFormat("en-GB", {
-      timeZone: "Europe/London",
-      weekday: "narrow", // we don't use this — we use getDay() on the local view
-    }).format(now),
-    10,
-  );
-  // Simpler: compute locale string, derive date, subtract days.
   const londonNow = new Date(
-    now.toLocaleString("en-US", { timeZone: "Europe/London" }),
+    new Date().toLocaleString("en-US", { timeZone: "Europe/London" }),
   );
   const dow = londonNow.getDay(); // 0=Sun..6=Sat
-  const daysSinceMonday = (dow + 6) % 7; // Sun=6, Mon=0, Tue=1, ..., Sat=5
+  const daysSinceMonday = (dow + 6) % 7;
   londonNow.setHours(0, 0, 0, 0);
   londonNow.setDate(londonNow.getDate() - daysSinceMonday);
-  void ukDow; // quiet the unused-var warning
   return londonNow;
+}
+
+async function wait(ms: number) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+async function fetchWithRetry(
+  chat: { fetchMessages: (opts: { limit: number }) => Promise<unknown[]> },
+  limit: number,
+): Promise<unknown[] | null> {
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      return (await chat.fetchMessages({ limit })) as unknown[];
+    } catch (err) {
+      console.error(`  fetchMessages attempt ${attempt}/3 (limit ${limit}) failed:`, (err as Error)?.message ?? err);
+      if (attempt < 3) await wait(3000 * attempt);
+    }
+  }
+  return null;
 }
 
 export async function backfillMessagesForGroups(
   client: Client,
   groups: GroupConfig[],
-  maxMessages = 500,
+  limit = 60,
 ): Promise<void> {
   const since = startOfThisMondayUTC();
   console.log(`Backfilling IN/OUT since ${since.toISOString()} across ${groups.length} group(s)…`);
 
+  // WhatsApp Web hydrates chat stores lazily. Wait longer so the message
+  // store is populated before we call fetchMessages — without this pause,
+  // wweb.js's injected JS throws a puppeteer eval error.
+  await wait(30_000);
+
   for (const g of groups) {
     try {
       const chat = await client.getChatById(g.groupId);
-      const messages = await chat.fetchMessages({ limit: maxMessages });
-      // newest-first → chronological (oldest first)
+
+      // Touch lastMessage to nudge the Store, then wait again.
+      void (chat as { lastMessage?: unknown }).lastMessage;
+      await wait(3000);
+
+      const messages = await fetchWithRetry(
+        chat as unknown as { fetchMessages: (opts: { limit: number }) => Promise<unknown[]> },
+        limit,
+      );
+      if (!messages) {
+        console.log(`  [${g.orgName}] backfill skipped (fetchMessages failed after retries). Admin can replay manually via scripts/manual-backfill.ts.`);
+        continue;
+      }
+      // newest-first → chronological
       messages.reverse();
 
       let processed = 0;
       let matched = 0;
-      for (const m of messages) {
+      for (const raw of messages) {
+        const m = raw as {
+          body?: string;
+          timestamp?: number;
+          author?: string;
+          from?: string;
+          fromMe?: boolean;
+        };
         if (!m.body) continue;
+        if (m.fromMe) continue; // our own bot messages
         const ts = new Date((m.timestamp ?? 0) * 1000);
         if (ts < since) continue;
 
@@ -78,8 +115,7 @@ export async function backfillMessagesForGroups(
           processed++;
           if (!result.error) matched++;
         } catch (err) {
-          // Keep going — one failure shouldn't block the whole backfill.
-          console.error(`backfill: ${phone} ${action} failed:`, err);
+          console.error(`  backfill: ${phone} ${action} failed:`, err);
         }
       }
       console.log(`  [${g.orgName}] scanned ${messages.length}, tried ${processed}, recorded ${matched} attendance upserts`);

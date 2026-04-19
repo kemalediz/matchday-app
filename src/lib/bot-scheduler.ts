@@ -354,8 +354,36 @@ async function computeForMatch(
     }
   }
 
+  // ── 5b. Ask for the score 1h after the match ends ────────────────────
+  //       Fires whether status is already COMPLETED (auto-completed by
+  //       cron) or still TEAMS_PUBLISHED. We rely on Match.maxPlayers and
+  //       activity.matchDurationMins to compute the "ended" timestamp.
+  {
+    const key = `${matchId}:ask-score`;
+    const endedAt = new Date(m.date.getTime() + activity.matchDurationMins * 60 * 1000);
+    const askAt = new Date(endedAt.getTime() + 60 * 60 * 1000); // +1h
+    const alreadyScored = m.redScore !== null && m.yellowScore !== null;
+    if (
+      !sentKeys.has(key) &&
+      !alreadyScored &&
+      now >= askAt &&
+      now.getTime() < askAt.getTime() + 24 * 60 * 60 * 1000 // only within 24h window
+    ) {
+      out.push({
+        kind: "group-message",
+        key,
+        matchId,
+        text:
+          `🏁 *${activity.name}* — what was the final score?\n\n` +
+          `Reply with just the numbers, e.g. *7-3* (${sport.teamLabels?.[0] ?? "Red"} – ${sport.teamLabels?.[1] ?? "Yellow"}).`,
+      });
+    }
+  }
+
   // ── 6. Match-end: payment poll + magic-link DMs + promo message ──────
-  if (m.status === "COMPLETED") {
+  //       Gated by postMatchEndFlow. For the first match after launch
+  //       we set this false because the rating UI is still being built.
+  if (m.status === "COMPLETED" && m.postMatchEndFlow !== false) {
     // 6a. Payment poll
     {
       const key = `${matchId}:payment-poll`;
