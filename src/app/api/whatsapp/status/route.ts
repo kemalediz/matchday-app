@@ -10,15 +10,11 @@ export async function GET(request: Request) {
 
   const { searchParams } = new URL(request.url);
   const groupId = searchParams.get("groupId");
-
   if (!groupId) {
     return NextResponse.json({ error: "groupId required" }, { status: 400 });
   }
 
-  const org = await db.organisation.findFirst({
-    where: { whatsappGroupId: groupId },
-  });
-
+  const org = await db.organisation.findFirst({ where: { whatsappGroupId: groupId } });
   if (!org) {
     return NextResponse.json({ error: "Organisation not found for this group" }, { status: 404 });
   }
@@ -30,7 +26,7 @@ export async function GET(request: Request) {
       date: { gt: now },
     },
     include: {
-      activity: true,
+      activity: { include: { sport: true } },
       attendances: {
         where: { status: { in: ["CONFIRMED", "BENCH"] } },
         include: { user: { select: { name: true } } },
@@ -51,9 +47,9 @@ export async function GET(request: Request) {
     match: {
       id: nextMatch.id,
       name: nextMatch.activity.name,
+      sport: nextMatch.activity.sport.name,
       date: format(nextMatch.date, "EEEE d MMMM 'at' HH:mm"),
       venue: nextMatch.activity.venue,
-      format: nextMatch.format,
       status: nextMatch.status,
       confirmed: confirmed.length,
       max: nextMatch.maxPlayers,

@@ -1,9 +1,7 @@
-import { Position } from "@/generated/prisma/client";
-
 export interface PlayerWithRating {
   id: string;
   name: string;
-  positions: Position[];
+  positions: string[]; // from PlayerActivityPosition (sport-specific labels)
   rating: number;
   image?: string | null;
 }

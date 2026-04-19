@@ -3,7 +3,6 @@ import { db } from "@/lib/db";
 import { getUserOrg } from "@/lib/org";
 import { redirect } from "next/navigation";
 import Link from "next/link";
-import { FORMAT_CONFIG } from "@/lib/constants";
 import { format, formatDistanceToNow, isToday, isTomorrow } from "date-fns";
 import { Calendar, MapPin, Users } from "lucide-react";
 import { MatchesTabs } from "@/components/match/matches-tabs";
@@ -31,7 +30,7 @@ export default async function MatchesPage() {
     where: { activity: { orgId }, date: { gte: new Date() } },
     orderBy: { date: "asc" },
     include: {
-      activity: true,
+      activity: { include: { sport: true } },
       attendances: { where: { status: { in: ["CONFIRMED", "BENCH"] } } },
     },
   });
@@ -40,7 +39,7 @@ export default async function MatchesPage() {
     where: { activity: { orgId }, status: "COMPLETED" },
     orderBy: { date: "desc" },
     take: 20,
-    include: { activity: true },
+    include: { activity: { include: { sport: true } } },
   });
 
   const myAttendances = await db.attendance.findMany({
@@ -111,7 +110,7 @@ export default async function MatchesPage() {
                 {bench > 0 && <span className="ml-2 text-slate-400">· {bench} bench</span>}
               </span>
               <span className="inline-flex px-2 py-0.5 rounded-md bg-slate-100 text-slate-600 text-xs font-medium">
-                {FORMAT_CONFIG[m.format].label}
+                {m.activity.sport.name}
               </span>
             </div>
             <div className="h-1.5 bg-slate-100 rounded-full overflow-hidden">

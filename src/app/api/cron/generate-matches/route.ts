@@ -1,5 +1,4 @@
 import { db } from "@/lib/db";
-import { FORMAT_CONFIG } from "@/lib/constants";
 import { NextResponse } from "next/server";
 
 export async function GET(request: Request) {
@@ -8,11 +7,13 @@ export async function GET(request: Request) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const activities = await db.activity.findMany({ where: { isActive: true } });
+  const activities = await db.activity.findMany({
+    where: { isActive: true },
+    include: { sport: true },
+  });
   let created = 0;
 
   for (const activity of activities) {
-    // Find next occurrence of this day of week
     const now = new Date();
     const currentDay = now.getDay();
     let daysUntil = activity.dayOfWeek - currentDay;
@@ -23,7 +24,6 @@ export async function GET(request: Request) {
     const [hours, minutes] = activity.time.split(":").map(Number);
     matchDate.setHours(hours, minutes, 0, 0);
 
-    // Check if match already exists
     const startOfDay = new Date(matchDate);
     startOfDay.setHours(0, 0, 0, 0);
     const endOfDay = new Date(matchDate);
@@ -35,14 +35,11 @@ export async function GET(request: Request) {
 
     if (!existing) {
       const deadline = new Date(matchDate.getTime() - activity.deadlineHours * 60 * 60 * 1000);
-      const config = FORMAT_CONFIG[activity.format];
-
       await db.match.create({
         data: {
           activityId: activity.id,
           date: matchDate,
-          format: activity.format,
-          maxPlayers: config.maxPlayers,
+          maxPlayers: activity.sport.playersPerTeam * 2,
           attendanceDeadline: deadline,
         },
       });

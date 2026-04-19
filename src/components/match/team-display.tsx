@@ -7,10 +7,12 @@ interface Player {
 
 function TeamCard({
   color,
+  label,
   players,
   score,
 }: {
   color: "red" | "yellow";
+  label: string;
   players: Player[];
   score?: number | null;
 }) {
@@ -21,14 +23,12 @@ function TeamCard({
           border: "border-red-200",
           scoreText: "text-red-600",
           initialsBg: "bg-red-50 text-red-700",
-          label: "Red team",
         }
       : {
           dot: "bg-amber-400",
           border: "border-amber-200",
           scoreText: "text-amber-600",
           initialsBg: "bg-amber-50 text-amber-700",
-          label: "Yellow team",
         };
 
   return (
@@ -36,7 +36,7 @@ function TeamCard({
       <div className="px-5 py-4 border-b border-slate-100 flex items-center justify-between">
         <div className="flex items-center gap-2.5">
           <span className={`h-3 w-3 rounded-full ${palette.dot}`} />
-          <h3 className="font-semibold text-slate-800">{palette.label}</h3>
+          <h3 className="font-semibold text-slate-800">{label}</h3>
         </div>
         {score != null && <span className={`text-2xl font-bold ${palette.scoreText}`}>{score}</span>}
       </div>
@@ -64,16 +64,20 @@ export function TeamDisplay({
   yellowTeam,
   redScore,
   yellowScore,
+  redLabel = "Red team",
+  yellowLabel = "Yellow team",
 }: {
   redTeam: Player[];
   yellowTeam: Player[];
   redScore?: number | null;
   yellowScore?: number | null;
+  redLabel?: string;
+  yellowLabel?: string;
 }) {
   return (
     <div className="grid gap-5 sm:grid-cols-2">
-      <TeamCard color="red" players={redTeam} score={redScore} />
-      <TeamCard color="yellow" players={yellowTeam} score={yellowScore} />
+      <TeamCard color="red" label={redLabel} players={redTeam} score={redScore} />
+      <TeamCard color="yellow" label={yellowLabel} players={yellowTeam} score={yellowScore} />
     </div>
   );
 }

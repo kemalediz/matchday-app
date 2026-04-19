@@ -62,12 +62,7 @@ export default async function StatsPage() {
               <div className="flex-1 min-w-0">
                 <p className="font-semibold text-slate-800 truncate">{player.name}</p>
                 <div className="flex items-center gap-1.5 mt-0.5 text-xs text-slate-500">
-                  {player.positions.slice(0, 2).map((pos) => (
-                    <span key={pos} className="inline-flex px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 font-semibold">
-                      {pos}
-                    </span>
-                  ))}
-                  <span>· {player.matchesPlayed} matches</span>
+                  <span>{player.matchesPlayed} matches</span>
                 </div>
               </div>
               <div className="text-right">

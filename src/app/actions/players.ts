@@ -2,14 +2,13 @@
 
 import { auth } from "@/lib/auth";
 import { db } from "@/lib/db";
-import { onboardingSchema } from "@/lib/validations";
+import { onboardingSchema, playerPositionsSchema } from "@/lib/validations";
 import { requireOrgAdmin } from "@/lib/org";
 import { normalisePhone } from "@/lib/phone";
-import { Position } from "@/generated/prisma/client";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 
-export async function completeOnboarding(formData: { name: string; phoneNumber?: string; positions: string[] }) {
+export async function completeOnboarding(formData: { name: string; phoneNumber?: string }) {
   const session = await auth();
   if (!session?.user?.id) throw new Error("Not authenticated");
 
@@ -20,7 +19,6 @@ export async function completeOnboarding(formData: { name: string; phoneNumber?:
     data: {
       name: parsed.name,
       phoneNumber: parsed.phoneNumber || null,
-      positions: parsed.positions as Position[],
       onboarded: true,
     },
   });
@@ -28,7 +26,7 @@ export async function completeOnboarding(formData: { name: string; phoneNumber?:
   redirect("/");
 }
 
-export async function updateProfile(formData: { name: string; phoneNumber?: string; positions: string[] }) {
+export async function updateProfile(formData: { name: string; phoneNumber?: string }) {
   const session = await auth();
   if (!session?.user?.id) throw new Error("Not authenticated");
 
@@ -39,11 +37,83 @@ export async function updateProfile(formData: { name: string; phoneNumber?: stri
     data: {
       name: parsed.name,
       phoneNumber: parsed.phoneNumber || null,
-      positions: parsed.positions as Position[],
     },
   });
 
   revalidatePath("/profile");
+}
+
+/**
+ * Set the signed-in user's positions for a specific activity. A row is
+ * created on first call per (user, activity).
+ */
+export async function setMyPositions(formData: { activityId: string; positions: string[] }) {
+  const session = await auth();
+  if (!session?.user?.id) throw new Error("Not authenticated");
+
+  const parsed = playerPositionsSchema.parse(formData);
+
+  // Verify the user is a member of the org owning this activity.
+  const activity = await db.activity.findUnique({
+    where: { id: parsed.activityId },
+    select: { orgId: true, sport: { select: { positions: true } } },
+  });
+  if (!activity) throw new Error("Activity not found");
+  const membership = await db.membership.findUnique({
+    where: { userId_orgId: { userId: session.user.id, orgId: activity.orgId } },
+  });
+  if (!membership) throw new Error("Not a member of this organisation");
+
+  // Validate picks against the activity's sport's position list.
+  const valid = new Set(activity.sport.positions);
+  const cleaned = parsed.positions.filter((p) => valid.has(p));
+  if (cleaned.length === 0) throw new Error("No valid positions picked");
+
+  await db.playerActivityPosition.upsert({
+    where: { userId_activityId: { userId: session.user.id, activityId: parsed.activityId } },
+    create: { userId: session.user.id, activityId: parsed.activityId, positions: cleaned },
+    update: { positions: cleaned },
+  });
+
+  revalidatePath("/profile");
+  revalidatePath(`/matches`);
+  return { positions: cleaned };
+}
+
+/** Admin: set a player's positions for a specific activity in this org. */
+export async function setPlayerPositions(
+  userId: string,
+  activityId: string,
+  positions: string[],
+) {
+  const session = await auth();
+  if (!session?.user?.id) throw new Error("Not authenticated");
+
+  const activity = await db.activity.findUnique({
+    where: { id: activityId },
+    select: { orgId: true, sport: { select: { positions: true } } },
+  });
+  if (!activity) throw new Error("Activity not found");
+
+  await requireOrgAdmin(session.user.id, activity.orgId);
+
+  const targetMembership = await db.membership.findUnique({
+    where: { userId_orgId: { userId, orgId: activity.orgId } },
+  });
+  if (!targetMembership) throw new Error("Player is not a member of this organisation");
+
+  const valid = new Set(activity.sport.positions);
+  const cleaned = positions.filter((p) => valid.has(p));
+  if (cleaned.length === 0) throw new Error("No valid positions picked");
+
+  await db.playerActivityPosition.upsert({
+    where: { userId_activityId: { userId, activityId } },
+    create: { userId, activityId, positions: cleaned },
+    update: { positions: cleaned },
+  });
+
+  revalidatePath("/admin/players");
+  return { positions: cleaned };
 }
 
 export async function updatePlayerRole(userId: string, orgId: string, role: "ADMIN" | "PLAYER") {
@@ -82,7 +152,6 @@ export async function updatePlayerPhone(userId: string, orgId: string, phone: st
 
   await requireOrgAdmin(session.user.id, orgId);
 
-  // Verify the target user is actually a member of this org (stops cross-org writes).
   const membership = await db.membership.findUnique({
     where: { userId_orgId: { userId, orgId } },
     select: { userId: true },
@@ -92,12 +161,8 @@ export async function updatePlayerPhone(userId: string, orgId: string, phone: st
   const normalised = normalisePhone(phone);
 
   try {
-    await db.user.update({
-      where: { id: userId },
-      data: { phoneNumber: normalised },
-    });
+    await db.user.update({ where: { id: userId }, data: { phoneNumber: normalised } });
   } catch (err: unknown) {
-    // Prisma P2002 = unique constraint (phoneNumber is @unique)
     if (typeof err === "object" && err !== null && "code" in err && (err as { code: string }).code === "P2002") {
       throw new Error(`Phone number ${normalised} is already assigned to another player`);
     }

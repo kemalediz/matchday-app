@@ -10,23 +10,10 @@ export async function GET() {
   const membership = await getUserOrg(session.user.id);
   if (!membership) return NextResponse.json({ error: "No organisation" }, { status: 404 });
 
-  const activities = await db.activity.findMany({
+  const sports = await db.sport.findMany({
     where: { orgId: membership.orgId },
-    orderBy: { dayOfWeek: "asc" },
-    include: {
-      sport: {
-        select: {
-          id: true,
-          name: true,
-          positions: true,
-          teamLabels: true,
-          mvpLabel: true,
-          playersPerTeam: true,
-          balancingStrategy: true,
-        },
-      },
-    },
+    orderBy: { name: "asc" },
   });
 
-  return NextResponse.json(activities);
+  return NextResponse.json(sports);
 }

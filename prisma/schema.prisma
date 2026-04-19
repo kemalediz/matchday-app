@@ -7,18 +7,6 @@ datasource db {
   provider = "postgresql"
 }
 
-enum Position {
-  GK
-  DEF
-  MID
-  FWD
-}
-
-enum MatchFormat {
-  FIVE_A_SIDE
-  SEVEN_A_SIDE
-}
-
 enum MatchStatus {
   UPCOMING
   TEAMS_GENERATED
@@ -89,7 +77,6 @@ model User {
   image         String?
   password      String?
   phoneNumber   String?   @unique
-  positions     Position[]
   seedRating    Float?
   isActive      Boolean   @default(true)
   onboarded     Boolean   @default(false)
@@ -103,6 +90,7 @@ model User {
   momVotesGiven     MoMVote[]        @relation("MoMVotesGiven")
   momVotesReceived  MoMVote[]        @relation("MoMVotesReceived")
   teamAssignments   TeamAssignment[]
+  activityPositions PlayerActivityPosition[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -119,9 +107,31 @@ model Organisation {
 
   memberships Membership[]
   activities  Activity[]
+  sports      Sport[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+}
+
+model Sport {
+  id                  String   @id @default(cuid())
+  orgId               String
+  org                 Organisation @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  name                String               // "Football 7-a-side"
+  preset              String?              // "football-7aside" | "basketball-5v5" | null for custom
+  playersPerTeam      Int
+  positions           String[]             // ["GK","DEF","MID","FWD"]
+  teamLabels          String[]             // ["Red","Yellow"]
+  mvpLabel            String   @default("Man of the Match")
+  balancingStrategy   String   @default("position-aware") // "position-aware" | "rating-only"
+  positionComposition Json?                // { GK: 1, DEF: 2, MID: 2, FWD: 2 } — per-team target
+
+  activities Activity[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([orgId])
 }
 
 model Membership {
@@ -142,22 +152,40 @@ model Activity {
   id                String       @id @default(cuid())
   orgId             String
   org               Organisation @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  sportId           String
+  sport             Sport        @relation(fields: [sportId], references: [id])
   name              String
   dayOfWeek         Int          // 0=Sun..6=Sat
   time              String       // "21:30"
   venue             String
-  format            MatchFormat  @default(SEVEN_A_SIDE)
   isActive          Boolean      @default(true)
   deadlineHours     Int          @default(5)
   matchDurationMins Int          @default(60)
   ratingWindowHours Int          @default(48)
 
-  matches Match[]
+  matches           Match[]
+  playerPositions   PlayerActivityPosition[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   @@index([orgId])
+  @@index([sportId])
+}
+
+model PlayerActivityPosition {
+  id         String   @id @default(cuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  activityId String
+  activity   Activity @relation(fields: [activityId], references: [id], onDelete: Cascade)
+  positions  String[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId, activityId])
+  @@index([activityId])
 }
 
 model Match {
@@ -165,7 +193,6 @@ model Match {
   activityId         String
   activity           Activity    @relation(fields: [activityId], references: [id])
   date               DateTime
-  format             MatchFormat
   maxPlayers         Int
   status             MatchStatus @default(UPCOMING)
   attendanceDeadline DateTime

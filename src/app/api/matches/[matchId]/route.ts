@@ -13,28 +13,61 @@ export async function GET(
   const match = await db.match.findUnique({
     where: { id: matchId },
     include: {
-      activity: true,
+      activity: { include: { sport: true } },
       attendances: {
         where: { status: { in: ["CONFIRMED", "BENCH"] } },
-        include: { user: { select: { id: true, name: true, image: true, positions: true } } },
+        include: {
+          user: {
+            select: {
+              id: true, name: true, image: true,
+              activityPositions: true, // filtered by activityId in the flatten step
+            },
+          },
+        },
         orderBy: { position: "asc" },
       },
       teamAssignments: {
-        include: { user: { select: { id: true, name: true, image: true, positions: true } } },
+        include: {
+          user: {
+            select: {
+              id: true, name: true, image: true,
+              activityPositions: true,
+            },
+          },
+        },
       },
     },
   });
 
   if (!match) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
-  // Get existing ratings by this user
+  // Flatten: project each user's positions for THIS match's activity.
+  const flatten = (u: {
+    id: string; name: string | null; image: string | null;
+    activityPositions: { activityId: string; positions: string[] }[];
+  }) => {
+    const pap = u.activityPositions.find((p) => p.activityId === match.activityId);
+    return {
+      id: u.id, name: u.name, image: u.image,
+      positions: pap?.positions ?? [],
+    };
+  };
+
+  const flatAttendances = match.attendances.map((a) => ({ ...a, user: flatten(a.user) }));
+  const flatTeamAssignments = match.teamAssignments.map((t) => ({ ...t, user: flatten(t.user) }));
+
   const existingRatings = await db.rating.findMany({
     where: { matchId, raterId: session.user.id },
   });
-
   const existingMoMVote = await db.moMVote.findUnique({
     where: { matchId_voterId: { matchId, voterId: session.user.id } },
   });
 
-  return NextResponse.json({ ...match, existingRatings, existingMoMVote });
+  return NextResponse.json({
+    ...match,
+    attendances: flatAttendances,
+    teamAssignments: flatTeamAssignments,
+    existingRatings,
+    existingMoMVote,
+  });
 }

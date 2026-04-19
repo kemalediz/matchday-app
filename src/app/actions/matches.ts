@@ -3,9 +3,7 @@
 import { auth } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { matchScoreSchema } from "@/lib/validations";
-import { FORMAT_CONFIG } from "@/lib/constants";
 import { requireOrgAdmin } from "@/lib/org";
-import { MatchFormat } from "@/generated/prisma/client";
 import { revalidatePath } from "next/cache";
 import { sendRatingEmails } from "@/lib/email";
 import { format } from "date-fns";
@@ -40,7 +38,6 @@ export async function updateMatchScore(matchId: string, formData: { redScore: nu
     },
   });
 
-  // Send rating notification emails to all confirmed players
   const players = updated.attendances.map((a) => ({
     email: a.user.email,
     name: a.user.name,
@@ -52,45 +49,6 @@ export async function updateMatchScore(matchId: string, formData: { redScore: nu
     format(updated.date, "EEEE, d MMMM yyyy"),
     players
   ).catch((err) => console.error("Failed to send rating emails:", err));
-
-  revalidatePath(`/matches/${matchId}`);
-  revalidatePath("/matches");
-}
-
-export async function switchMatchFormat(matchId: string, format: MatchFormat) {
-  const session = await auth();
-  if (!session?.user?.id) throw new Error("Not authenticated");
-
-  const match = await db.match.findUnique({
-    where: { id: matchId },
-    include: { activity: true },
-  });
-  if (!match) throw new Error("Match not found");
-
-  await requireOrgAdmin(session.user.id, match.activity.orgId);
-
-  const config = FORMAT_CONFIG[format];
-
-  await db.match.update({
-    where: { id: matchId },
-    data: { format, maxPlayers: config.maxPlayers },
-  });
-
-  // Recompute attendance statuses
-  const attendances = await db.attendance.findMany({
-    where: { matchId, status: { in: ["CONFIRMED", "BENCH"] } },
-    orderBy: { position: "asc" },
-  });
-
-  for (let i = 0; i < attendances.length; i++) {
-    const newStatus = i < config.maxPlayers ? "CONFIRMED" : "BENCH";
-    if (attendances[i].status !== newStatus) {
-      await db.attendance.update({
-        where: { id: attendances[i].id },
-        data: { status: newStatus as "CONFIRMED" | "BENCH" },
-      });
-    }
-  }
 
   revalidatePath(`/matches/${matchId}`);
   revalidatePath("/matches");

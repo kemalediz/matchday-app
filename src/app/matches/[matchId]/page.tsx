@@ -5,7 +5,6 @@ import Link from "next/link";
 import { AttendButton } from "@/components/match/attend-button";
 import { AttendanceList } from "@/components/match/attendance-list";
 import { TeamDisplay } from "@/components/match/team-display";
-import { FORMAT_CONFIG } from "@/lib/constants";
 import { isOrgAdmin } from "@/lib/org";
 import { format } from "date-fns";
 import { Calendar, MapPin, Clock, Star, ChevronRight } from "lucide-react";
@@ -22,17 +21,34 @@ export default async function MatchDetailPage({
   const match = await db.match.findUnique({
     where: { id: matchId },
     include: {
-      activity: true,
+      activity: { include: { sport: true } },
       attendances: {
         where: { status: { in: ["CONFIRMED", "BENCH"] } },
-        include: { user: true },
+        include: {
+          user: {
+            include: { activityPositions: true },
+          },
+        },
         orderBy: { position: "asc" },
       },
-      teamAssignments: { include: { user: true } },
+      teamAssignments: {
+        include: {
+          user: {
+            include: { activityPositions: true },
+          },
+        },
+      },
       momVotes: true,
     },
   });
   if (!match) redirect("/matches");
+
+  const sport = match.activity.sport;
+  const [redLabel, yellowLabel] = sport.teamLabels as [string, string];
+
+  // Per-activity positions for the players in this match
+  const positionsFor = (u: { activityPositions: { activityId: string; positions: string[] }[] }) =>
+    u.activityPositions.find((p) => p.activityId === match.activityId)?.positions ?? [];
 
   const myAttendance = await db.attendance.findUnique({
     where: { matchId_userId: { matchId, userId: session.user.id } },
@@ -42,8 +58,12 @@ export default async function MatchDetailPage({
   const isPastDeadline = new Date() > match.attendanceDeadline;
   const hasTeams = match.teamAssignments.length > 0;
 
-  const redTeam = match.teamAssignments.filter((a) => a.team === "RED").map((a) => a.user);
-  const yellowTeam = match.teamAssignments.filter((a) => a.team === "YELLOW").map((a) => a.user);
+  const redTeam = match.teamAssignments
+    .filter((a) => a.team === "RED")
+    .map((a) => ({ ...a.user, positions: positionsFor(a.user) }));
+  const yellowTeam = match.teamAssignments
+    .filter((a) => a.team === "YELLOW")
+    .map((a) => ({ ...a.user, positions: positionsFor(a.user) }));
 
   const ratingWindowEnd = new Date(
     match.date.getTime() + match.activity.ratingWindowHours * 60 * 60 * 1000,
@@ -100,7 +120,7 @@ export default async function MatchDetailPage({
         </div>
         <div className="flex items-center gap-2">
           <span className="inline-flex px-2.5 py-1 rounded-md bg-slate-100 text-slate-600 text-xs font-medium">
-            {FORMAT_CONFIG[match.format].label}
+            {sport.name}
           </span>
           <span className={`inline-flex px-2.5 py-1 rounded-full text-xs font-medium capitalize ${statusPill}`}>
             {statusLabel}
@@ -119,7 +139,7 @@ export default async function MatchDetailPage({
           {momWinnerUser && (
             <p className="mt-4 text-sm text-slate-500 flex items-center justify-center gap-1.5">
               <Star className="w-4 h-4 text-amber-500 fill-amber-500" />
-              Man of the Match:{" "}
+              {sport.mvpLabel}:{" "}
               <span className="font-semibold text-slate-800">{momWinnerUser.name}</span>
               <span className="text-slate-400">({momWinner!._count.playerId} votes)</span>
             </p>
@@ -153,6 +173,8 @@ export default async function MatchDetailPage({
             yellowTeam={yellowTeam}
             redScore={match.redScore}
             yellowScore={match.yellowScore}
+            redLabel={redLabel}
+            yellowLabel={yellowLabel}
           />
         </section>
       )}
@@ -166,7 +188,7 @@ export default async function MatchDetailPage({
           <AttendanceList
             attendances={match.attendances.map((a) => ({
               ...a,
-              user: { ...a.user, positions: a.user.positions as string[] },
+              user: { ...a.user, positions: positionsFor(a.user) },
             }))}
             maxPlayers={match.maxPlayers}
           />

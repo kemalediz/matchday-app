@@ -32,6 +32,7 @@ export default function RatePlayersPage() {
   const [players, setPlayers] = useState<Player[]>([]);
   const [ratings, setRatings] = useState<Record<string, number>>({});
   const [momPick, setMomPick] = useState<string | null>(null);
+  const [mvpLabel, setMvpLabel] = useState<string>("Man of the Match");
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
 
@@ -44,6 +45,7 @@ export default function RatePlayersPage() {
         .filter((a: { userId: string; status: string }) => a.status === "CONFIRMED" && a.userId !== session?.user?.id)
         .map((a: { user: Player }) => a.user);
       setPlayers(others);
+      if (data.activity?.sport?.mvpLabel) setMvpLabel(data.activity.sport.mvpLabel);
 
       const defaults: Record<string, number> = {};
       others.forEach((p: Player) => {
@@ -86,7 +88,7 @@ export default function RatePlayersPage() {
       <div className="text-center">
         <h1 className="text-2xl font-bold text-slate-800">Rate players</h1>
         <p className="text-sm text-slate-500 mt-1">
-          Tap a score for each player, then pick Man of the Match.
+          Tap a score for each player, then pick {mvpLabel}.
         </p>
       </div>
 
@@ -136,7 +138,7 @@ export default function RatePlayersPage() {
       <div className="bg-white rounded-xl border-2 border-amber-200 shadow-sm p-4">
         <div className="flex items-center gap-2 mb-3">
           <Trophy className="w-5 h-5 text-amber-500" />
-          <h2 className="font-semibold text-slate-800">Man of the Match</h2>
+          <h2 className="font-semibold text-slate-800">{mvpLabel}</h2>
         </div>
         <div className="grid grid-cols-2 gap-2">
           {players.map((p) => {

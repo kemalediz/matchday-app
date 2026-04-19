@@ -3,7 +3,6 @@ import { db } from "@/lib/db";
 import { getUserOrg } from "@/lib/org";
 import { redirect } from "next/navigation";
 import Link from "next/link";
-import { FORMAT_CONFIG } from "@/lib/constants";
 import { format, formatDistanceToNow, isBefore } from "date-fns";
 import {
   Calendar,
@@ -42,6 +41,23 @@ export default async function DashboardPage() {
 
   const orgId = membership.orgId;
 
+  // Positions summary — pulled from the primary active activity for this org.
+  const primaryActivity = await db.activity.findFirst({
+    where: { orgId, isActive: true },
+    orderBy: { createdAt: "asc" },
+    select: { id: true },
+  });
+  const myPositions = primaryActivity
+    ? (
+        await db.playerActivityPosition.findUnique({
+          where: {
+            userId_activityId: { userId: session.user.id, activityId: primaryActivity.id },
+          },
+          select: { positions: true },
+        })
+      )?.positions ?? []
+    : [];
+
   const nextMatch = await db.match.findFirst({
     where: {
       activity: { orgId },
@@ -50,7 +66,7 @@ export default async function DashboardPage() {
     },
     orderBy: { date: "asc" },
     include: {
-      activity: true,
+      activity: { include: { sport: true } },
       attendances: { where: { status: { in: ["CONFIRMED", "BENCH"] } } },
     },
   });
@@ -133,10 +149,10 @@ export default async function DashboardPage() {
             <p className="text-xs font-medium uppercase tracking-wider">Positions</p>
           </div>
           <div className="flex gap-1.5 flex-wrap mt-2">
-            {user.positions.length === 0 ? (
+            {myPositions.length === 0 ? (
               <span className="text-sm opacity-60">—</span>
             ) : (
-              user.positions.map((p) => (
+              myPositions.map((p) => (
                 <span key={p} className="inline-flex px-2 py-0.5 rounded-md bg-white/70 text-xs font-semibold">
                   {p}
                 </span>
@@ -211,7 +227,7 @@ export default async function DashboardPage() {
 
             <div className="flex items-center gap-2">
               <span className="inline-flex px-2.5 py-1 rounded-md bg-slate-100 text-slate-700 text-xs font-medium">
-                {FORMAT_CONFIG[nextMatch.format].label}
+                {nextMatch.activity.sport.name}
               </span>
             </div>
 

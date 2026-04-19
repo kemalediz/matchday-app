@@ -1,20 +1,39 @@
 import { z } from "zod";
 
+/**
+ * Onboarding no longer collects positions (positions are now per-activity,
+ * set when the user first attends a match for that activity).
+ */
 export const onboardingSchema = z.object({
   name: z.string().min(2, "Name must be at least 2 characters"),
   phoneNumber: z.string().optional(),
-  positions: z.array(z.enum(["GK", "DEF", "MID", "FWD"])).min(1, "Select at least one position"),
 });
 
 export const activitySchema = z.object({
   name: z.string().min(2),
+  sportId: z.string().min(1, "Pick a sport"),
   dayOfWeek: z.number().min(0).max(6),
   time: z.string().regex(/^\d{2}:\d{2}$/, "Time must be HH:mm format"),
   venue: z.string().min(2),
-  format: z.enum(["FIVE_A_SIDE", "SEVEN_A_SIDE"]),
   deadlineHours: z.number().min(1).max(48).default(5),
   matchDurationMins: z.number().min(20).max(180).default(60),
   ratingWindowHours: z.number().min(1).max(168).default(48),
+});
+
+export const sportSchema = z.object({
+  name: z.string().min(2),
+  playersPerTeam: z.number().min(1).max(20),
+  positions: z.array(z.string().min(1)).min(1, "At least one position"),
+  teamLabels: z.tuple([z.string().min(1), z.string().min(1)]),
+  mvpLabel: z.string().min(1),
+  balancingStrategy: z.enum(["position-aware", "rating-only", "role-quota"]).default("position-aware"),
+  positionComposition: z.record(z.string(), z.number().min(0)).optional(),
+  preset: z.string().optional(),
+});
+
+export const playerPositionsSchema = z.object({
+  activityId: z.string(),
+  positions: z.array(z.string().min(1)).min(1, "Select at least one position"),
 });
 
 export const ratingSchema = z.object({

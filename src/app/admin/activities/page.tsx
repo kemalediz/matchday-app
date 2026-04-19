@@ -10,13 +10,24 @@ import {
 } from "@/app/actions/activities";
 import { DAYS_OF_WEEK } from "@/lib/constants";
 
+interface Sport {
+  id: string;
+  name: string;
+  positions: string[];
+  teamLabels: string[];
+  playersPerTeam: number;
+  mvpLabel: string;
+  balancingStrategy: string;
+}
+
 interface Activity {
   id: string;
   name: string;
+  sportId: string;
+  sport: Sport;
   dayOfWeek: number;
   time: string;
   venue: string;
-  format: string;
   isActive: boolean;
   deadlineHours: number;
   matchDurationMins: number;
@@ -25,20 +36,27 @@ interface Activity {
 
 export default function ActivitiesPage() {
   const [activities, setActivities] = useState<Activity[]>([]);
+  const [sports, setSports] = useState<Sport[]>([]);
   const [loading, setLoading] = useState(true);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [orgId, setOrgId] = useState<string | null>(null);
 
   const [name, setName] = useState("");
+  const [sportId, setSportId] = useState("");
   const [dayOfWeek, setDayOfWeek] = useState("2");
   const [time, setTime] = useState("21:30");
   const [venue, setVenue] = useState("");
-  const [format, setFormat] = useState<"FIVE_A_SIDE" | "SEVEN_A_SIDE">("SEVEN_A_SIDE");
   const [deadlineHours, setDeadlineHours] = useState("5");
   const [matchDurationMins, setMatchDurationMins] = useState("60");
 
   useEffect(() => {
     fetch("/api/org/settings").then((r) => r.json()).then((d) => setOrgId(d.id));
+    fetch("/api/sports").then((r) => (r.ok ? r.json() : [])).then((s: Sport[]) => {
+      setSports(s);
+      // Default the picker to Football 7-a-side if present, else first sport.
+      const def = s.find((x) => x.name.toLowerCase().includes("football 7")) ?? s[0];
+      if (def) setSportId(def.id);
+    });
     loadActivities();
   }, []);
 
@@ -51,14 +69,15 @@ export default function ActivitiesPage() {
   async function handleCreate(e: React.FormEvent) {
     e.preventDefault();
     if (!orgId) return;
+    if (!sportId) return toast.error("Pick a sport");
     try {
       await createActivity({
         orgId,
+        sportId,
         name,
         dayOfWeek: parseInt(dayOfWeek),
         time,
         venue,
-        format,
         deadlineHours: parseInt(deadlineHours),
         matchDurationMins: parseInt(matchDurationMins),
       });
@@ -92,6 +111,8 @@ export default function ActivitiesPage() {
   }
 
   if (loading) return <div className="p-10 text-center text-slate-400">Loading…</div>;
+
+  const selectedSport = sports.find((s) => s.id === sportId);
 
   return (
     <div className="space-y-6">
@@ -129,8 +150,7 @@ export default function ActivitiesPage() {
                   {DAYS_OF_WEEK[a.dayOfWeek]}s at {a.time} · {a.venue}
                 </p>
                 <p className="text-xs text-slate-400 mt-0.5">
-                  {a.format === "SEVEN_A_SIDE" ? "7-a-side" : "5-a-side"} · {a.matchDurationMins}
-                  min · Sign-ups close {a.deadlineHours}h before
+                  {a.sport.name} · {a.matchDurationMins}min · Sign-ups close {a.deadlineHours}h before
                 </p>
               </div>
               <div className="flex items-center gap-2 shrink-0">
@@ -181,6 +201,24 @@ export default function ActivitiesPage() {
                   className="w-full h-11 px-3 rounded-lg border border-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500"
                 />
               </Field>
+              <Field label="Sport">
+                <select
+                  value={sportId}
+                  onChange={(e) => setSportId(e.target.value)}
+                  className="w-full h-11 px-3 rounded-lg border border-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                >
+                  {sports.map((s) => (
+                    <option key={s.id} value={s.id}>
+                      {s.name} · {s.playersPerTeam}-a-side
+                    </option>
+                  ))}
+                </select>
+                {selectedSport && (
+                  <p className="text-xs text-slate-400 mt-1">
+                    Positions: {selectedSport.positions.join(", ")} · Balancing: {selectedSport.balancingStrategy}
+                  </p>
+                )}
+              </Field>
               <div className="grid grid-cols-2 gap-3">
                 <Field label="Day">
                   <select
@@ -189,9 +227,7 @@ export default function ActivitiesPage() {
                     className="w-full h-11 px-3 rounded-lg border border-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500"
                   >
                     {DAYS_OF_WEEK.map((d, i) => (
-                      <option key={i} value={i}>
-                        {d}
-                      </option>
+                      <option key={i} value={i}>{d}</option>
                     ))}
                   </select>
                 </Field>
@@ -214,16 +250,6 @@ export default function ActivitiesPage() {
                 />
               </Field>
               <div className="grid grid-cols-2 gap-3">
-                <Field label="Format">
-                  <select
-                    value={format}
-                    onChange={(e) => setFormat(e.target.value as typeof format)}
-                    className="w-full h-11 px-3 rounded-lg border border-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  >
-                    <option value="SEVEN_A_SIDE">7-a-side (14 players)</option>
-                    <option value="FIVE_A_SIDE">5-a-side (10 players)</option>
-                  </select>
-                </Field>
                 <Field label="Deadline (h before)">
                   <input
                     type="number"
@@ -234,20 +260,17 @@ export default function ActivitiesPage() {
                     className="w-full h-11 px-3 rounded-lg border border-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500"
                   />
                 </Field>
+                <Field label="Match duration (min)">
+                  <input
+                    type="number"
+                    value={matchDurationMins}
+                    onChange={(e) => setMatchDurationMins(e.target.value)}
+                    min="20"
+                    max="180"
+                    className="w-full h-11 px-3 rounded-lg border border-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  />
+                </Field>
               </div>
-              <Field label="Match duration (minutes)">
-                <input
-                  type="number"
-                  value={matchDurationMins}
-                  onChange={(e) => setMatchDurationMins(e.target.value)}
-                  min="20"
-                  max="180"
-                  className="w-full h-11 px-3 rounded-lg border border-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                />
-                <p className="text-xs text-slate-400 mt-1">
-                  Rating emails are sent automatically when this time expires after match start.
-                </p>
-              </Field>
               <button
                 type="submit"
                 className="w-full h-11 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-medium"

@@ -2,8 +2,7 @@
 
 import { auth } from "@/lib/auth";
 import { db } from "@/lib/db";
-import { balanceTeams } from "@/lib/team-balancer";
-import { FORMAT_CONFIG } from "@/lib/constants";
+import { balanceTeams, type BalancingStrategy } from "@/lib/team-balancer";
 import { requireOrgAdmin } from "@/lib/org";
 import { PlayerWithRating } from "@/types";
 import { revalidatePath } from "next/cache";
@@ -11,11 +10,10 @@ import { revalidatePath } from "next/cache";
 async function getPlayerRating(userId: string): Promise<number> {
   const user = await db.user.findUnique({ where: { id: userId } });
 
-  // Get recent peer ratings
   const recentRatings = await db.rating.findMany({
     where: { playerId: userId },
     orderBy: { createdAt: "desc" },
-    take: 60, // ~20 matches * 3 ratings each
+    take: 60,
   });
 
   if (recentRatings.length >= 3) {
@@ -32,42 +30,59 @@ export async function generateTeams(matchId: string) {
   const match = await db.match.findUnique({
     where: { id: matchId },
     include: {
-      activity: true,
-      attendances: { where: { status: "CONFIRMED" }, include: { user: true } },
+      activity: { include: { sport: true } },
+      attendances: {
+        where: { status: "CONFIRMED" },
+        include: {
+          user: {
+            include: {
+              activityPositions: true, // we filter by activityId in code
+            },
+          },
+        },
+      },
     },
   });
   if (!match) throw new Error("Match not found");
 
   await requireOrgAdmin(session.user.id, match.activity.orgId);
 
-  const perTeam = FORMAT_CONFIG[match.format].perTeam;
+  const sport = match.activity.sport;
+  const perTeam = sport.playersPerTeam;
   const confirmedPlayers = match.attendances;
 
   if (confirmedPlayers.length < perTeam * 2) {
     throw new Error(`Need ${perTeam * 2} players, only ${confirmedPlayers.length} confirmed`);
   }
 
-  // Build player ratings
   const players: PlayerWithRating[] = await Promise.all(
-    confirmedPlayers.map(async (a) => ({
-      id: a.userId,
-      name: a.user.name ?? "Unknown",
-      positions: a.user.positions,
-      rating: await getPlayerRating(a.userId),
-      image: a.user.image,
-    }))
+    confirmedPlayers.map(async (a) => {
+      const pap = a.user.activityPositions.find((p) => p.activityId === match.activityId);
+      return {
+        id: a.userId,
+        name: a.user.name ?? "Unknown",
+        positions: pap?.positions ?? [],
+        rating: await getPlayerRating(a.userId),
+        image: a.user.image,
+      };
+    })
   );
 
-  const result = balanceTeams(players, perTeam);
+  const composition = sport.positionComposition as Record<string, number> | null;
 
-  // Clear existing assignments and create new ones
+  const result = balanceTeams({
+    players,
+    perTeam,
+    strategy: sport.balancingStrategy as BalancingStrategy,
+    composition: composition ?? undefined,
+  });
+
   await db.teamAssignment.deleteMany({ where: { matchId } });
 
   const assignments = [
     ...result.red.map((p) => ({ matchId, userId: p.id, team: "RED" as const })),
     ...result.yellow.map((p) => ({ matchId, userId: p.id, team: "YELLOW" as const })),
   ];
-
   await db.teamAssignment.createMany({ data: assignments });
 
   await db.match.update({

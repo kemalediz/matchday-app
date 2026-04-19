@@ -10,15 +10,11 @@ export async function GET(request: Request) {
 
   const { searchParams } = new URL(request.url);
   const groupId = searchParams.get("groupId");
-
   if (!groupId) {
     return NextResponse.json({ error: "groupId required" }, { status: 400 });
   }
 
-  const org = await db.organisation.findFirst({
-    where: { whatsappGroupId: groupId },
-  });
-
+  const org = await db.organisation.findFirst({ where: { whatsappGroupId: groupId } });
   if (!org) {
     return NextResponse.json({ error: "Organisation not found" }, { status: 404 });
   }
@@ -29,9 +25,13 @@ export async function GET(request: Request) {
       status: { in: ["TEAMS_PUBLISHED", "COMPLETED"] },
     },
     include: {
-      activity: true,
+      activity: { include: { sport: true } },
       teamAssignments: {
-        include: { user: { select: { name: true, positions: true } } },
+        include: {
+          user: {
+            select: { name: true, activityPositions: true },
+          },
+        },
       },
     },
     orderBy: { date: "desc" },
@@ -41,18 +41,31 @@ export async function GET(request: Request) {
     return NextResponse.json({ teams: null, message: "No teams published yet" });
   }
 
+  const positionFor = (u: { activityPositions: { activityId: string; positions: string[] }[] }) => {
+    const pap = u.activityPositions.find((p) => p.activityId === match.activityId);
+    return pap?.positions[0] ?? null;
+  };
+
   const red = match.teamAssignments
     .filter((a) => a.team === "RED")
-    .map((a) => ({ name: a.user.name, position: a.user.positions[0] }));
+    .map((a) => ({ name: a.user.name, position: positionFor(a.user) }));
   const yellow = match.teamAssignments
     .filter((a) => a.team === "YELLOW")
-    .map((a) => ({ name: a.user.name, position: a.user.positions[0] }));
+    .map((a) => ({ name: a.user.name, position: positionFor(a.user) }));
+
+  const [redLabel, yellowLabel] = match.activity.sport.teamLabels;
 
   return NextResponse.json({
     match: {
       name: match.activity.name,
       date: format(match.date, "EEEE d MMMM 'at' HH:mm"),
     },
-    teams: { red, yellow },
+    teams: {
+      [redLabel.toLowerCase()]: red,
+      [yellowLabel.toLowerCase()]: yellow,
+      // Also expose with fixed keys for bot backward-compat:
+      red,
+      yellow,
+    },
   });
 }

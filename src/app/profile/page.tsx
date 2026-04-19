@@ -4,18 +4,19 @@ import { useEffect, useState } from "react";
 import { useSession } from "next-auth/react";
 import { toast } from "sonner";
 import { Pencil, Calendar, Star, Trophy, TrendingUp } from "lucide-react";
-import { updateProfile } from "@/app/actions/players";
-import { POSITION_LABELS } from "@/lib/constants";
+import { updateProfile, setMyPositions } from "@/app/actions/players";
 
-const POSITIONS = ["GK", "DEF", "MID", "FWD"] as const;
+type ActivityPositions = {
+  positions: string[];
+  activity: { id: string; name: string; sportId: string; isActive: boolean };
+};
 
 type Profile = {
   name: string;
   email: string;
   image: string | null;
   phoneNumber: string | null;
-  positions: string[];
-  role: string;
+  activityPositions: ActivityPositions[];
 };
 
 type Stats = {
@@ -32,7 +33,11 @@ export default function ProfilePage() {
   const [editing, setEditing] = useState(false);
   const [name, setName] = useState("");
   const [phoneNumber, setPhoneNumber] = useState("");
-  const [selectedPositions, setSelectedPositions] = useState<string[]>([]);
+
+  // Sport positions per activity (loaded alongside profile)
+  const [activitySports, setActivitySports] = useState<
+    Record<string, { positions: string[]; sportName: string }>
+  >({});
 
   useEffect(() => {
     if (!session?.user?.id) return;
@@ -43,35 +48,50 @@ export default function ProfilePage() {
         setStats(data.stats);
         setName(data.player.name);
         setPhoneNumber(data.player.phoneNumber ?? "");
-        setSelectedPositions(data.player.positions);
       });
-  }, [session?.user?.id]);
 
-  function togglePosition(pos: string) {
-    setSelectedPositions((prev) =>
-      prev.includes(pos) ? prev.filter((p) => p !== pos) : [...prev, pos],
-    );
-  }
+    // Load the user's activities to know which positions are valid per activity
+    fetch("/api/activities").then((r) => r.json()).then((activities) => {
+      const map: Record<string, { positions: string[]; sportName: string }> = {};
+      for (const a of activities) {
+        map[a.id] = { positions: a.sport.positions, sportName: a.sport.name };
+      }
+      setActivitySports(map);
+    });
+  }, [session?.user?.id]);
 
   async function handleSave() {
     try {
-      await updateProfile({
-        name,
-        phoneNumber: phoneNumber.trim() || undefined,
-        positions: selectedPositions,
-      });
+      await updateProfile({ name, phoneNumber: phoneNumber.trim() || undefined });
       toast.success("Profile updated!");
+      setProfile((prev) =>
+        prev ? { ...prev, name, phoneNumber: phoneNumber.trim() || null } : prev,
+      );
+      setEditing(false);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed");
+    }
+  }
+
+  async function togglePosition(activityId: string, pos: string, current: string[]) {
+    const next = current.includes(pos) ? current.filter((p) => p !== pos) : [...current, pos];
+    if (next.length === 0) {
+      toast.error("Pick at least one position");
+      return;
+    }
+    try {
+      await setMyPositions({ activityId, positions: next });
+      toast.success("Positions updated");
       setProfile((prev) =>
         prev
           ? {
               ...prev,
-              name,
-              phoneNumber: phoneNumber.trim() || null,
-              positions: selectedPositions,
+              activityPositions: prev.activityPositions.map((ap) =>
+                ap.activity.id === activityId ? { ...ap, positions: next } : ap,
+              ),
             }
           : prev,
       );
-      setEditing(false);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed");
     }
@@ -80,6 +100,8 @@ export default function ProfilePage() {
   if (!profile || !stats) {
     return <div className="p-10 text-center text-slate-400">Loading…</div>;
   }
+
+  const activeAPs = profile.activityPositions.filter((ap) => ap.activity.isActive);
 
   return (
     <div className="p-6 sm:p-8 max-w-4xl mx-auto space-y-6">
@@ -94,9 +116,7 @@ export default function ProfilePage() {
             {editing ? (
               <div className="space-y-4">
                 <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1.5">
-                    Name
-                  </label>
+                  <label className="block text-sm font-medium text-slate-700 mb-1.5">Name</label>
                   <input
                     value={name}
                     onChange={(e) => setName(e.target.value)}
@@ -104,9 +124,7 @@ export default function ProfilePage() {
                   />
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1.5">
-                    Phone number
-                  </label>
+                  <label className="block text-sm font-medium text-slate-700 mb-1.5">Phone number</label>
                   <input
                     type="tel"
                     value={phoneNumber}
@@ -115,41 +133,11 @@ export default function ProfilePage() {
                     className="w-full h-11 px-3 rounded-lg border border-slate-200 text-slate-800 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500"
                   />
                 </div>
-                <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1.5">
-                    Positions
-                  </label>
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                    {POSITIONS.map((pos) => {
-                      const on = selectedPositions.includes(pos);
-                      return (
-                        <button
-                          key={pos}
-                          type="button"
-                          onClick={() => togglePosition(pos)}
-                          className={`h-10 rounded-lg border-2 text-sm font-medium transition-colors ${
-                            on
-                              ? "bg-blue-600 text-white border-blue-600"
-                              : "bg-white text-slate-700 border-slate-200 hover:border-blue-300"
-                          }`}
-                        >
-                          {POSITION_LABELS[pos]}
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
                 <div className="flex gap-3 pt-2">
-                  <button
-                    onClick={handleSave}
-                    className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-medium"
-                  >
+                  <button onClick={handleSave} className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-medium">
                     Save changes
                   </button>
-                  <button
-                    onClick={() => setEditing(false)}
-                    className="px-4 py-2 rounded-lg text-slate-700 hover:bg-slate-100 font-medium"
-                  >
+                  <button onClick={() => setEditing(false)} className="px-4 py-2 rounded-lg text-slate-700 hover:bg-slate-100 font-medium">
                     Cancel
                   </button>
                 </div>
@@ -172,21 +160,51 @@ export default function ProfilePage() {
                     Edit
                   </button>
                 </div>
-                <div className="flex items-center gap-1.5 mt-3">
-                  {profile.positions.map((pos) => (
-                    <span
-                      key={pos}
-                      className="inline-flex px-2 py-1 rounded-md bg-slate-100 text-slate-700 text-xs font-semibold"
-                    >
-                      {pos}
-                    </span>
-                  ))}
-                </div>
               </div>
             )}
           </div>
         </div>
       </section>
+
+      {/* Positions per activity */}
+      {activeAPs.length > 0 && (
+        <section className="bg-white rounded-xl border border-slate-200 shadow-sm p-6">
+          <h2 className="text-lg font-semibold text-slate-800 mb-1">Your positions</h2>
+          <p className="text-sm text-slate-500 mb-4">
+            Positions are per activity — set the roles you&apos;re willing to play for each.
+          </p>
+          <div className="space-y-4">
+            {activeAPs.map((ap) => {
+              const allPositions = activitySports[ap.activity.id]?.positions ?? [];
+              const sportName = activitySports[ap.activity.id]?.sportName ?? "";
+              return (
+                <div key={ap.activity.id} className="border-t border-slate-100 pt-4 first:border-t-0 first:pt-0">
+                  <p className="font-medium text-slate-800">{ap.activity.name}</p>
+                  {sportName && <p className="text-xs text-slate-500 mb-2">{sportName}</p>}
+                  <div className="flex flex-wrap gap-2 mt-2">
+                    {allPositions.map((pos) => {
+                      const selected = ap.positions.includes(pos);
+                      return (
+                        <button
+                          key={pos}
+                          onClick={() => togglePosition(ap.activity.id, pos, ap.positions)}
+                          className={`px-3 h-9 rounded-lg border-2 text-sm font-medium transition-colors ${
+                            selected
+                              ? "bg-blue-600 text-white border-blue-600"
+                              : "bg-white text-slate-700 border-slate-200 hover:border-blue-300 hover:bg-blue-50"
+                          }`}
+                        >
+                          {pos}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </section>
+      )}
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         <StatTile icon={<Calendar className="w-4 h-4" />} label="Matches" value={stats.matchesPlayed} color="blue" />
@@ -199,10 +217,7 @@ export default function ProfilePage() {
 }
 
 function StatTile({
-  icon,
-  label,
-  value,
-  color,
+  icon, label, value, color,
 }: {
   icon: React.ReactNode;
   label: string;
