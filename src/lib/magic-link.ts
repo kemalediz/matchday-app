@@ -1,0 +1,98 @@
+/**
+ * Magic-link tokens — signed short-lived URLs that let a player sign in
+ * without a password.
+ *
+ * Primary use: after a match, the WhatsApp bot DMs each confirmed player a
+ * link like `https://matchday.app/r/<token>`. The token encodes
+ * `{ userId, matchId?, purpose, exp }` and is signed with AUTH_SECRET using
+ * HS256. Landing on `/r/[token]` verifies, creates a NextAuth session, and
+ * forwards the user to the appropriate page (e.g. the rating UI for that
+ * match).
+ *
+ * Uses Node's `crypto` HMAC for a zero-dependency JWT-like compact format:
+ *   base64url(payload).base64url(hmac)
+ * Short, URL-safe, stateless, no extra lib.
+ */
+import { createHmac, timingSafeEqual } from "node:crypto";
+
+export type MagicLinkPurpose = "rate-match" | "sign-in";
+
+export interface MagicLinkPayload {
+  userId: string;
+  purpose: MagicLinkPurpose;
+  matchId?: string; // required for purpose "rate-match"
+  exp: number;     // Unix seconds
+}
+
+const SECRET_ENV = "AUTH_SECRET";
+
+function getSecret(): string {
+  const s = process.env[SECRET_ENV];
+  if (!s) throw new Error(`${SECRET_ENV} not set — magic links disabled`);
+  return s;
+}
+
+function b64url(input: Buffer | string): string {
+  return Buffer.from(input)
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+}
+
+function b64urlDecode(input: string): Buffer {
+  const padded = input.replace(/-/g, "+").replace(/_/g, "/");
+  const padLen = (4 - (padded.length % 4)) % 4;
+  return Buffer.from(padded + "=".repeat(padLen), "base64");
+}
+
+export function signMagicLinkToken(payload: Omit<MagicLinkPayload, "exp"> & { ttlSeconds: number }): string {
+  const { ttlSeconds, ...rest } = payload;
+  const fullPayload: MagicLinkPayload = {
+    ...rest,
+    exp: Math.floor(Date.now() / 1000) + ttlSeconds,
+  };
+  const body = b64url(JSON.stringify(fullPayload));
+  const sig = b64url(
+    createHmac("sha256", getSecret()).update(body).digest(),
+  );
+  return `${body}.${sig}`;
+}
+
+export async function verifyMagicLinkToken(token: string): Promise<MagicLinkPayload | null> {
+  try {
+    const [body, sig] = token.split(".");
+    if (!body || !sig) return null;
+
+    const expectedSig = b64url(
+      createHmac("sha256", getSecret()).update(body).digest(),
+    );
+    const a = Buffer.from(sig);
+    const b = Buffer.from(expectedSig);
+    if (a.length !== b.length || !timingSafeEqual(a, b)) return null;
+
+    const payload = JSON.parse(b64urlDecode(body).toString("utf8")) as MagicLinkPayload;
+    if (payload.exp < Math.floor(Date.now() / 1000)) return null;
+
+    return payload;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Build a full magic-link URL. Uses the canonical production host in prod,
+ * or `NEXTAUTH_URL` if set (dev override).
+ */
+export function buildMagicLinkUrl(token: string): string {
+  const base =
+    process.env.NEXTAUTH_URL?.replace(/\/$/, "") ??
+    "https://matchday-nine-zeta.vercel.app";
+  return `${base}/r/${token}`;
+}
+
+/** TTL presets in seconds. */
+export const MAGIC_LINK_TTL = {
+  rateMatch: 5 * 24 * 60 * 60, // 5 days — matches MoM announcement window
+  signIn: 60 * 60,            // 1 hour for ad-hoc sign-in links
+};

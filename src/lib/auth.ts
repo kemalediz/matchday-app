@@ -4,6 +4,7 @@ import Credentials from "next-auth/providers/credentials";
 import { PrismaAdapter } from "@auth/prisma-adapter";
 import { db } from "./db";
 import bcrypt from "bcryptjs";
+import { verifyMagicLinkToken } from "./magic-link";
 
 export const { handlers, auth, signIn, signOut } = NextAuth({
   adapter: PrismaAdapter(db),
@@ -34,6 +35,30 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
           user.password
         );
         if (!valid) return null;
+
+        return {
+          id: user.id,
+          email: user.email,
+          name: user.name,
+          image: user.image,
+        };
+      },
+    }),
+    // Magic-link provider — players sign in by opening a signed URL we
+    // DM'd them on WhatsApp. No password needed. Used for the rating flow.
+    Credentials({
+      id: "magic-link",
+      name: "Magic Link",
+      credentials: { token: { label: "Token", type: "text" } },
+      async authorize(credentials) {
+        const token = credentials?.token;
+        if (!token || typeof token !== "string") return null;
+
+        const payload = await verifyMagicLinkToken(token);
+        if (!payload) return null;
+
+        const user = await db.user.findUnique({ where: { id: payload.userId } });
+        if (!user) return null;
 
         return {
           id: user.id,

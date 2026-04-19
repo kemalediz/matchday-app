@@ -78,6 +78,7 @@ model User {
   password      String?
   phoneNumber   String?   @unique
   seedRating    Float?
+  matchRating   Int       @default(1000) // Elo-style; updated after each completed match with a score
   isActive      Boolean   @default(true)
   onboarded     Boolean   @default(false)
 
@@ -199,16 +200,63 @@ model Match {
   redScore           Int?
   yellowScore        Int?
 
-  attendances     Attendance[]
-  teamAssignments TeamAssignment[]
-  ratings         Rating[]
-  momVotes        MoMVote[]
+  attendances            Attendance[]
+  teamAssignments        TeamAssignment[]
+  ratings                Rating[]
+  momVotes               MoMVote[]
+  sentNotifications      SentNotification[]
+  benchConfirmations     PendingBenchConfirmation[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   @@index([date])
   @@index([status])
+}
+
+/**
+ * Every WhatsApp-bot message the scheduler asks the bot to send is logged
+ * here with a stable key so it doesn't fire twice. Keys look like
+ * "<matchId>:<kind>" (group-wide events) or "<matchId>:<kind>:<userId>"
+ * (per-user DMs / reminders).
+ */
+model SentNotification {
+  id         String   @id @default(cuid())
+  key        String   @unique
+  kind       String                    // e.g. "announce-match", "daily-in-list", "match-teams", ...
+  matchId    String?
+  match      Match?   @relation(fields: [matchId], references: [id], onDelete: Cascade)
+  targetUser String?                   // userId when it's a per-user DM
+  waMessageId String?                  // WhatsApp message id for reaction tracking
+  createdAt  DateTime @default(now())
+
+  @@index([matchId])
+  @@index([kind])
+}
+
+/**
+ * When someone drops from a confirmed slot, the bot DMs the first bench
+ * player and asks them to 👍 (confirm) or 👎 (pass) within 2h. One row
+ * per (match, user) attempt. Resolved when a reaction arrives OR when
+ * `expiresAt` passes — at which point the server flags this user as
+ * dropped and the scheduler posts a new prompt for the next bencher.
+ */
+model PendingBenchConfirmation {
+  id          String    @id @default(cuid())
+  matchId     String
+  match       Match     @relation(fields: [matchId], references: [id], onDelete: Cascade)
+  userId      String
+  waMessageId String?                // the bot's prompt message id; filled in by /ack
+  expiresAt   DateTime
+  resolvedAt  DateTime?
+  outcome     String?                // "confirmed" | "declined" | "expired"
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([matchId, userId])
+  @@index([matchId])
+  @@index([resolvedAt])
 }
 
 model Attendance {

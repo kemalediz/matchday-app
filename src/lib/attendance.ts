@@ -1,4 +1,5 @@
 import { db } from "./db";
+import { requestBenchConfirmationOnDrop } from "./bot-scheduler";
 
 export async function registerAttendance(userId: string, matchId: string) {
   const match = await db.match.findUnique({ where: { id: matchId } });
@@ -22,20 +23,16 @@ export async function registerAttendance(userId: string, matchId: string) {
 
   const attendance = await db.attendance.upsert({
     where: { matchId_userId: { matchId, userId } },
-    create: {
-      matchId,
-      userId,
-      status,
-      position: nextPosition,
-    },
-    update: {
-      status,
-      position: nextPosition,
-      respondedAt: new Date(),
-    },
+    create: { matchId, userId, status, position: nextPosition },
+    update: { status, position: nextPosition, respondedAt: new Date() },
   });
 
-  return { status: attendance.status, position: attendance.position, confirmedCount: confirmedCount + (status === "CONFIRMED" ? 1 : 0), maxPlayers: match.maxPlayers };
+  return {
+    status: attendance.status,
+    position: attendance.position,
+    confirmedCount: confirmedCount + (status === "CONFIRMED" ? 1 : 0),
+    maxPlayers: match.maxPlayers,
+  };
 }
 
 export async function cancelAttendance(userId: string, matchId: string) {
@@ -59,18 +56,13 @@ export async function cancelAttendance(userId: string, matchId: string) {
     data: { status: "DROPPED" },
   });
 
+  // If someone in the confirmed 14 dropped, we DON'T auto-promote any more.
+  // Instead we ask the first bench player via WhatsApp 👍/👎 first (they
+  // may have mentally checked out). The bot-scheduler creates a
+  // PendingBenchConfirmation; subsequent /due-posts cycles post the prompt
+  // and handle confirmation/timeout.
   if (wasConfirmed) {
-    const firstBench = await db.attendance.findFirst({
-      where: { matchId, status: "BENCH" },
-      orderBy: { position: "asc" },
-    });
-
-    if (firstBench) {
-      await db.attendance.update({
-        where: { id: firstBench.id },
-        data: { status: "CONFIRMED" },
-      });
-    }
+    await requestBenchConfirmationOnDrop(matchId);
   }
 
   return { status: "DROPPED" as const };
