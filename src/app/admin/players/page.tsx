@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { Phone, Star } from "lucide-react";
+import { Phone, Star, Shield } from "lucide-react";
 import { toast } from "sonner";
 import { updatePlayerRole, seedPlayerRating } from "@/app/actions/players";
 
@@ -31,7 +31,11 @@ export default function PlayersPage() {
 
   async function loadPlayers() {
     const res = await fetch("/api/players");
-    if (res.ok) setPlayers(await res.json());
+    if (res.ok) {
+      const data = await res.json();
+      // /api/players now returns { players, activityId } — extract players.
+      setPlayers(Array.isArray(data) ? data : data.players ?? []);
+    }
     setLoading(false);
   }
 
@@ -76,6 +80,13 @@ export default function PlayersPage() {
             <span className="inline-flex px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 text-[10px] font-semibold">
               {withPhoneCount}/{players.length}
             </span>
+          </Link>
+          <Link
+            href="/admin/players/positions"
+            className="inline-flex items-center gap-2 px-3 py-2 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 text-sm font-medium"
+          >
+            <Shield className="w-4 h-4" />
+            Positions
           </Link>
           <Link
             href="/admin/players/ratings"

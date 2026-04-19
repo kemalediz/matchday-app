@@ -38,9 +38,9 @@ export default function BulkPhonesPage() {
   async function load() {
     const res = await fetch("/api/players");
     if (res.ok) {
-      const data: Player[] = await res.json();
+      const raw = await res.json();
+      const data: Player[] = Array.isArray(raw) ? raw : raw.players ?? [];
       setPlayers(data);
-      // Prefill inputs from server values.
       const vs: Record<string, string> = {};
       data.forEach((p) => (vs[p.id] = p.phoneNumber ?? ""));
       setValues(vs);
