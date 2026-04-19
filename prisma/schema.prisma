@@ -80,6 +80,7 @@ model User {
   phoneNumber   String?   @unique
   seedRating    Float?
   matchRating   Int       @default(1000) // Elo-style; updated after each completed match with a score
+  isSuperadmin  Boolean   @default(false) // platform-level operator; see all orgs
   isActive      Boolean   @default(true)
   onboarded     Boolean   @default(false)
 
@@ -144,10 +145,18 @@ model Membership {
   org    Organisation @relation(fields: [orgId], references: [id], onDelete: Cascade)
   role   MemberRole @default(PLAYER)
 
+  /// Non-null when the user has been detected as leaving the org's
+  /// WhatsApp group (bot `group_leave` event) or been manually removed
+  /// by an admin. We keep the membership row for history (so past
+  /// attendances/ratings stay attributable) — just exclude "left" rows
+  /// from roster queries. A `group_join` later will null this back out.
+  leftAt DateTime?
+
   createdAt DateTime @default(now())
 
   @@unique([userId, orgId])
   @@index([orgId])
+  @@index([leftAt])
 }
 
 model Activity {

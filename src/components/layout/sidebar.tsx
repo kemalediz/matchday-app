@@ -5,6 +5,7 @@ import { usePathname } from "next/navigation";
 import { useSession, signOut } from "next-auth/react";
 import { useState } from "react";
 import { Home, CalendarDays, User, Shield, Menu, X, LogOut, LogIn } from "lucide-react";
+import { OrgSwitcher } from "./org-switcher";
 
 type NavItem = {
   label: string;
@@ -63,11 +64,16 @@ export function Sidebar() {
   const sidebarContent = (
     <>
       {/* Logo / brand */}
-      <div className="px-5 py-5 border-b border-slate-700">
+      <div className="px-5 pt-5 pb-3 border-b border-slate-700">
         <h1 className="text-lg font-bold tracking-tight text-white">MatchDay</h1>
         <p className="text-[11px] text-slate-400 mt-0.5 tracking-wide uppercase">
           Sports Management
         </p>
+        {user && (
+          <div className="mt-3 -mx-2">
+            <OrgSwitcher />
+          </div>
+        )}
       </div>
 
       {/* Nav */}

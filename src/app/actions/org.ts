@@ -66,11 +66,21 @@ export async function switchOrg(orgId: string) {
   const session = await auth();
   if (!session?.user?.id) throw new Error("Not authenticated");
 
-  const membership = await db.membership.findUnique({
-    where: { userId_orgId: { userId: session.user.id, orgId } },
-  });
+  // Superadmins can switch to any org (even ones they're not a member of).
+  const { isSuperadmin } = await import("@/lib/org");
+  const superuser = await isSuperadmin(session.user.id);
 
-  if (!membership) throw new Error("Not a member of this organisation");
+  if (!superuser) {
+    const membership = await db.membership.findUnique({
+      where: { userId_orgId: { userId: session.user.id, orgId } },
+    });
+    if (!membership || membership.leftAt !== null) {
+      throw new Error("Not a member of this organisation");
+    }
+  } else {
+    const org = await db.organisation.findUnique({ where: { id: orgId } });
+    if (!org) throw new Error("Organisation not found");
+  }
 
   await setCurrentOrgId(orgId);
   revalidatePath("/");
