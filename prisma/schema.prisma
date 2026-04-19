@@ -12,6 +12,7 @@ enum MatchStatus {
   TEAMS_GENERATED
   TEAMS_PUBLISHED
   COMPLETED
+  CANCELLED
 }
 
 enum AttendanceStatus {

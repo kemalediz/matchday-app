@@ -110,11 +110,27 @@ export default function TeamManagementPage() {
 
   return (
     <div className="p-6 sm:p-8 max-w-6xl mx-auto space-y-6">
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between gap-3 flex-wrap">
         <h1 className="text-2xl font-bold text-slate-800">Team management</h1>
-        <span className="inline-flex px-2.5 py-1 rounded-full text-xs font-medium bg-slate-100 text-slate-600 capitalize">
-          {match.status.replace(/_/g, " ").toLowerCase()}
-        </span>
+        <div className="flex items-center gap-2">
+          <a
+            href={`/admin/matches/${matchId}/switch-format`}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 text-sm font-medium"
+          >
+            Switch format
+          </a>
+          {match.status !== "COMPLETED" && match.status !== "CANCELLED" && (
+            <a
+              href={`/admin/matches/${matchId}/cancel`}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-red-200 bg-white hover:bg-red-50 text-red-700 text-sm font-medium"
+            >
+              Cancel match
+            </a>
+          )}
+          <span className="inline-flex px-2.5 py-1 rounded-full text-xs font-medium bg-slate-100 text-slate-600 capitalize">
+            {match.status.replace(/_/g, " ").toLowerCase()}
+          </span>
+        </div>
       </div>
 
       {!hasTeams && (

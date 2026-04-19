@@ -18,6 +18,65 @@ import { db } from "./db";
 import { buildMagicLinkUrl, signMagicLinkToken, MAGIC_LINK_TTL } from "./magic-link";
 import { format } from "date-fns";
 
+// ───────── Same-sport helpers for switch/cancel-format nudges ────────
+
+/** Find the activity with the smallest playersPerTeam in the same sport
+ *  family (e.g. "Football") and smaller than `currentPpt`. Used to offer
+ *  a 7-a-side → 5-a-side switch when the squad is short. */
+async function findSmallerSameSportActivity(
+  orgId: string,
+  currentSportId: string,
+  currentPpt: number,
+) {
+  const currentSport = await db.sport.findUnique({
+    where: { id: currentSportId },
+    select: { name: true },
+  });
+  if (!currentSport) return null;
+  const family = currentSport.name.split(" ")[0];
+  const acts = await db.activity.findMany({
+    where: { orgId },
+    include: { sport: true },
+  });
+  return (
+    acts
+      .filter((a) => a.sport.name.split(" ")[0] === family && a.sport.playersPerTeam < currentPpt)
+      .sort((a, b) => a.sport.playersPerTeam - b.sport.playersPerTeam)[0] ?? null
+  );
+}
+
+/** Smallest `playersPerTeam` for any activity in this org with the same
+ *  sport family as the current activity. Used to decide the cancellation
+ *  threshold — e.g. if Football 5-a-side exists, the min viable roster is
+ *  10; if only 7-a-side exists, it's 14. */
+async function findSmallestSameSportPpt(
+  orgId: string,
+  currentSportId: string,
+  currentPpt: number,
+): Promise<number> {
+  const currentSport = await db.sport.findUnique({
+    where: { id: currentSportId },
+    select: { name: true },
+  });
+  if (!currentSport) return currentPpt;
+  const family = currentSport.name.split(" ")[0];
+  const acts = await db.activity.findMany({
+    where: { orgId },
+    include: { sport: { select: { name: true, playersPerTeam: true } } },
+  });
+  const matching = acts.filter((a) => a.sport.name.split(" ")[0] === family);
+  if (matching.length === 0) return currentPpt;
+  return Math.min(...matching.map((a) => a.sport.playersPerTeam));
+}
+
+async function findOrgOwner(orgId: string) {
+  const membership = await db.membership.findFirst({
+    where: { orgId, role: "OWNER" },
+    include: { user: { select: { id: true, name: true, phoneNumber: true } } },
+  });
+  return membership?.user ?? null;
+}
+
 // ────────────────────────────── Instructions ──────────────────────────────
 
 export type DueInstruction =
@@ -231,6 +290,9 @@ async function computeForMatch(
   const hoursUntilMatch = hoursBetween(now, m.date);
   const hoursSinceMatch = -hoursUntilMatch;
 
+  // Cancelled matches never trigger anything further. Short-circuit.
+  if (m.status === "CANCELLED") return;
+
   const confirmed = m.attendances
     .filter((a) => a.status === "CONFIRMED")
     .sort((a, b) => a.position - b.position);
@@ -333,6 +395,97 @@ async function computeForMatch(
           `*${yellowLabel}*:\n${listFor(yellow)}\n\n` +
           `Objections? Reply \`swap X Y\` — admin will confirm.`,
       });
+    }
+  }
+
+  // ── 4b. Day-before DM nudges to the org OWNER ────────────────────────
+  //       Two triggers, both on the day before the match in London time:
+  //         10:00 — switch-format nudge if squad is short
+  //         18:00 — cancel nudge if numbers are below min-viable
+  //       Both produce DMs (not group messages). Admin clicks the link
+  //       and confirms on the portal. If admin misses both, the match
+  //       still plays out with whatever numbers we have — these are
+  //       nudges, not gates.
+  {
+    const hour = londonHour(now);
+    const isDayBefore = hoursUntilMatch >= 12 && hoursUntilMatch <= 36;
+
+    // 10:00 — switch-to-smaller-format nudge
+    const switchKey = `${matchId}:switch-nudge`;
+    if (
+      !sentKeys.has(switchKey) &&
+      isDayBefore &&
+      hour >= 10 &&
+      hour < 11 &&
+      m.status === "UPCOMING" &&
+      confirmed.length < maxPlayers
+    ) {
+      const candidate = await findSmallerSameSportActivity(
+        activity.orgId,
+        activity.sportId,
+        sport.playersPerTeam,
+      );
+      const owner = await findOrgOwner(activity.orgId);
+      if (candidate && owner?.phoneNumber) {
+        const token = signMagicLinkToken({
+          userId: owner.id,
+          purpose: "sign-in",
+          ttlSeconds: MAGIC_LINK_TTL.signIn,
+        });
+        const signInUrl = buildMagicLinkUrl(token);
+        out.push({
+          kind: "dm",
+          key: switchKey,
+          matchId,
+          targetUser: owner.id,
+          phone: owner.phoneNumber.replace(/^\+/, ""),
+          text:
+            `⚠️ *Low numbers* — ${confirmed.length}/${maxPlayers} confirmed for *${activity.name}* tomorrow.\n\n` +
+            `Switch to *${candidate.sport.name}* (${candidate.sport.playersPerTeam * 2} players) before the deadline?\n\n` +
+            `Tap to open the admin panel (auto signs you in):\n${signInUrl}\n\n` +
+            `Or navigate manually: /admin/matches/${matchId}/switch-format`,
+        });
+      }
+    }
+
+    // 18:00 — cancel nudge if even the smallest format can't fill
+    const cancelKey = `${matchId}:cancel-nudge`;
+    if (
+      !sentKeys.has(cancelKey) &&
+      isDayBefore &&
+      hour >= 18 &&
+      hour < 19 &&
+      m.status === "UPCOMING"
+    ) {
+      const smallestPpt = await findSmallestSameSportPpt(
+        activity.orgId,
+        activity.sportId,
+        sport.playersPerTeam,
+      );
+      const minViable = smallestPpt * 2;
+      if (confirmed.length < minViable) {
+        const owner = await findOrgOwner(activity.orgId);
+        if (owner?.phoneNumber) {
+          const token = signMagicLinkToken({
+            userId: owner.id,
+            purpose: "sign-in",
+            ttlSeconds: MAGIC_LINK_TTL.signIn,
+          });
+          const signInUrl = buildMagicLinkUrl(token);
+          out.push({
+            kind: "dm",
+            key: cancelKey,
+            matchId,
+            targetUser: owner.id,
+            phone: owner.phoneNumber.replace(/^\+/, ""),
+            text:
+              `🚨 *Match in trouble* — only *${confirmed.length}* confirmed for *${activity.name}* tomorrow, below the minimum to play (${minViable}).\n\n` +
+              `Cancel and refund the booking?\n\n` +
+              `Tap to open the cancel page:\n${signInUrl}\n\n` +
+              `Or navigate manually: /admin/matches/${matchId}/cancel`,
+          });
+        }
+      }
     }
   }
 
