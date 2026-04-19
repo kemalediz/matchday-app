@@ -103,12 +103,17 @@ export async function handleMessage(msg: Message) {
   if (!monitoredGroups.has(msg.from)) return;
 
   const authorId = msg.author || msg.from;
+
+  // WhatsApp now sends participant ids in two formats depending on
+  // privacy settings: the classic `<phone>@c.us` and the newer
+  // `<opaque>@lid` (Linked ID). `@lid` ids are NOT phone numbers —
+  // they're opaque identifiers that hide the user's real phone. We
+  // can't map them to our User.phoneNumber lookup, so bail silently.
+  if (!authorId.endsWith("@c.us")) return;
+
   const phone = "+" + authorId.replace("@c.us", "");
 
   // 1) Score submission? E.g. "7-3", "Final 5:4".
-  //    Only try this if the message is short and explicitly looks like a
-  //    score (avoids accidentally interpreting dates or phone-number
-  //    digits as scores).
   const trimmed = msg.body.trim();
   if (trimmed.length <= 32) {
     const scoreOnly = /^\s*\d{1,2}\s*[-:–—]\s*\d{1,2}\s*$/.test(trimmed);
@@ -126,16 +131,12 @@ export async function handleMessage(msg: Message) {
             if (msg.react) await msg.react("👍");
             return;
           }
-          // Known-failure cases — post a short reply.
-          if (result.error === "no_match") return; // silent; the prompt is stale
+          if (result.error === "no_match") return;
           if (result.error === "forbidden") {
             await msg.reply("Only players from that match or an admin can record the score.");
             return;
           }
-          if (result.error === "unknown_player") {
-            await msg.reply(unknownPlayerMessage(phone));
-            return;
-          }
+          if (result.error === "unknown_player") return; // silent
         } catch (err) {
           console.error("Failed to post score:", err);
         }
@@ -151,23 +152,23 @@ export async function handleMessage(msg: Message) {
   try {
     const result = await postAttendance(phone, action, msg.from);
 
+    // Silent-on-unknown: if the sender isn't registered, stay quiet.
+    // Admin can add them via /admin/players/phones when they notice.
     if (result.error === "unknown_player") {
-      await msg.reply(unknownPlayerMessage(phone));
+      console.log(`unknown_player ${phone} — silent drop`);
       return;
     }
 
     if (result.error) {
-      await msg.reply(result.message || result.error);
+      console.log(`attendance error ${phone}: ${result.error}`);
       return;
     }
 
-    // Silent success — just react with 👍 instead of replying. Keeps the
-    // group chat quiet. The user sees the reaction on their own message.
     if (msg.react) {
       await msg.react(action === "IN" ? "👍" : "👋");
     }
   } catch (err) {
     console.error("Error handling message:", err);
-    await msg.reply(errorMessage());
+    // Quiet on unexpected errors too.
   }
 }
