@@ -80,7 +80,16 @@ export async function setMyPositions(formData: { activityId: string; positions: 
   return { positions: cleaned };
 }
 
-/** Admin: set a player's positions for a specific activity in this org. */
+/**
+ * Admin: set a player's positions for a specific activity in this org.
+ *
+ * Under the hood we propagate the positions to EVERY activity in the same
+ * org that shares the same sport. Rationale: "I play goalkeeper when I
+ * play football here" is a property of (player, org, sport), not
+ * (player, activity). If you set GK on Tuesday 7-a-side, Tuesday 5-a-side
+ * gets it too because it's the same sport. You can still diverge by
+ * passing different positions for a different-sport activity.
+ */
 export async function setPlayerPositions(
   userId: string,
   activityId: string,
@@ -91,7 +100,7 @@ export async function setPlayerPositions(
 
   const activity = await db.activity.findUnique({
     where: { id: activityId },
-    select: { orgId: true, sport: { select: { positions: true } } },
+    select: { orgId: true, sportId: true, sport: { select: { positions: true } } },
   });
   if (!activity) throw new Error("Activity not found");
 
@@ -106,13 +115,25 @@ export async function setPlayerPositions(
   const cleaned = positions.filter((p) => valid.has(p));
   if (cleaned.length === 0) throw new Error("No valid positions picked");
 
-  await db.playerActivityPosition.upsert({
-    where: { userId_activityId: { userId, activityId } },
-    create: { userId, activityId, positions: cleaned },
-    update: { positions: cleaned },
+  // Find every activity in this org with the same sport — positions apply
+  // to all of them, not just the one the admin clicked on.
+  const sameSportActivities = await db.activity.findMany({
+    where: { orgId: activity.orgId, sportId: activity.sportId },
+    select: { id: true },
   });
 
+  await db.$transaction(
+    sameSportActivities.map((a) =>
+      db.playerActivityPosition.upsert({
+        where: { userId_activityId: { userId, activityId: a.id } },
+        create: { userId, activityId: a.id, positions: cleaned },
+        update: { positions: cleaned },
+      }),
+    ),
+  );
+
   revalidatePath("/admin/players");
+  revalidatePath("/admin/players/positions");
   return { positions: cleaned };
 }
 

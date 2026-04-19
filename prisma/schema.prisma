@@ -235,6 +235,25 @@ model SentNotification {
 }
 
 /**
+ * Ad-hoc queue for bot work the scheduler should dispatch on its next
+ * tick. Used for one-off admin actions (e.g. "send a test DM to Kemal")
+ * that don't map onto the regular match-lifecycle triggers. Scheduler
+ * picks up rows with `sentAt == null`, emits matching instructions, and
+ * marks `sentAt` on ACK so they don't repeat.
+ */
+model BotJob {
+  id       String   @id @default(cuid())
+  orgId    String
+  kind     String                   // "dm" | "group"
+  phone    String?                  // for DM jobs, E.164 without the + prefix
+  text     String   @db.Text
+  sentAt   DateTime?
+  createdAt DateTime @default(now())
+
+  @@index([orgId, sentAt])
+}
+
+/**
  * When someone drops from a confirmed slot, the bot DMs the first bench
  * player and asks them to 👍 (confirm) or 👎 (pass) within 2h. One row
  * per (match, user) attempt. Resolved when a reaction arrives OR when

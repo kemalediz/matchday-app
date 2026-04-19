@@ -154,6 +154,36 @@ export async function computeDuePosts(groupId: string): Promise<DuePostsResult |
     }
   }
 
+  // ── Ad-hoc admin-queued BotJobs (test DMs, one-off messages) ────────
+  // Any unsent row is emitted as a matching instruction; idempotency key
+  // is `botjob-${id}` so ACK marks sentAt via the existing flow + our
+  // separate BotJob update below (see /api/whatsapp/ack).
+  {
+    const jobs = await db.botJob.findMany({
+      where: { orgId: org.id, sentAt: null },
+      orderBy: { createdAt: "asc" },
+      take: 20,
+    });
+    for (const job of jobs) {
+      const key = `botjob-${job.id}`;
+      if (sentKeys.has(key)) continue;
+      if (job.kind === "dm" && job.phone) {
+        out.push({
+          kind: "dm",
+          key,
+          phone: job.phone,
+          text: job.text,
+        });
+      } else if (job.kind === "group") {
+        out.push({
+          kind: "group-message",
+          key,
+          text: job.text,
+        });
+      }
+    }
+  }
+
   // Load all matches we care about: upcoming + anything still within 5 days
   // of completion (MoM announcement window).
   const windowStart = new Date(now.getTime() - 6 * 24 * 60 * 60 * 1000);

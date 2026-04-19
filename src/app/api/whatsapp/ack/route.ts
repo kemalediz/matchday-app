@@ -41,5 +41,15 @@ export async function POST(request: Request) {
     });
   }
 
+  // BotJob keys look like `botjob-<id>`; close them out so they don't
+  // re-enqueue on the next poll.
+  if (key.startsWith("botjob-")) {
+    const botJobId = key.slice("botjob-".length);
+    await db.botJob.update({
+      where: { id: botJobId },
+      data: { sentAt: new Date() },
+    }).catch(() => {}); // tolerate already-sent or deleted rows
+  }
+
   return NextResponse.json({ ok: true });
 }
