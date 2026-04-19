@@ -36,7 +36,7 @@ export default function SignupPage() {
       <div className="bg-white rounded-2xl shadow-xl p-8 max-w-sm w-full">
         <div className="text-center mb-6">
           <h1 className="text-2xl font-bold text-slate-800">Create your account</h1>
-          <p className="text-sm text-slate-500 mt-1">Get started with MatchDay</p>
+          <p className="text-sm text-slate-500 mt-1">Get started with MatchTime</p>
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-4">

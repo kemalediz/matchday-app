@@ -72,9 +72,9 @@ export function teamsMessage(matchName: string, red: TeamPlayer[], yellow: TeamP
 }
 
 export function unknownPlayerMessage(phone: string): string {
-  return `Phone number ${phone} is not registered in MatchDay. Please sign up at the app and add your phone number to your profile.`;
+  return `Phone number ${phone} is not registered in MatchTime. Please sign up at the app and add your phone number to your profile.`;
 }
 
 export function errorMessage(): string {
-  return "Something went wrong. Please try again or use the MatchDay app directly.";
+  return "Something went wrong. Please try again or use the MatchTime app directly.";
 }

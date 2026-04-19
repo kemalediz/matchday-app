@@ -141,7 +141,7 @@ function hoursBetween(a: Date, b: Date): number {
 /** One-time introductory message posted on the org's first active activity. */
 function botIntroMessage(): string {
   return [
-    `👋 Hi all — MatchDay bot is live for this group.`,
+    `👋 Hi all — MatchTime bot is live for this group.`,
     ``,
     `Here's what I do:`,
     ``,
@@ -188,7 +188,7 @@ export async function computeDuePosts(groupId: string): Promise<DuePostsResult |
 
   // ── Org-level: one-time bot introduction ─────────────────────────────
   // Fires once per org, the first time the org has at least one active
-  // activity AND the bot is enabled. Explains what MatchDay is and how
+  // activity AND the bot is enabled. Explains what MatchTime is and how
   // the flow works so group members aren't confused by bot posts.
   {
     const introKey = `org-${org.id}:bot-intro`;

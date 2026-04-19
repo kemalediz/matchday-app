@@ -80,7 +80,7 @@ export async function POST(request: Request) {
       // `email` is required + unique on User. Placeholder unique value the
       // admin can overwrite when they fill in name/email. Using the phone
       // guarantees uniqueness and makes the source obvious in the DB.
-      const placeholderEmail = `wa-${normalised.replace(/^\+/, "")}@placeholder.matchday`;
+      const placeholderEmail = `wa-${normalised.replace(/^\+/, "")}@placeholder.matchtime`;
       user = await db.user.create({
         data: {
           name: null,

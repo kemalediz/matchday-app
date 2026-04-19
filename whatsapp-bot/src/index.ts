@@ -14,7 +14,7 @@ import { backfillMessagesForGroups } from "./backfill.js";
 import { config } from "./config.js";
 
 async function main() {
-  console.log("MatchDay WhatsApp Bot starting...");
+  console.log("MatchTime WhatsApp Bot starting...");
   console.log(`API URL: ${config.apiUrl}`);
 
   const client = new Client({

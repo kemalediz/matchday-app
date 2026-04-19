@@ -15,7 +15,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "MatchDay",
+  title: "MatchTime",
   description: "Organise matches, balance teams, rate players",
 };
 

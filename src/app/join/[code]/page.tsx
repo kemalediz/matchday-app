@@ -39,7 +39,7 @@ export default async function JoinOrgPage({
         <div className="text-center mb-6">
           <h1 className="text-2xl font-bold text-slate-800">Join {org.name}</h1>
           <p className="text-sm text-slate-500 mt-1">
-            You&apos;ve been invited to join this organisation on MatchDay.
+            You&apos;ve been invited to join this organisation on MatchTime.
           </p>
         </div>
         <form action={handleJoin}>

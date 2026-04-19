@@ -89,7 +89,7 @@ export default function MagicLinkLandingPage() {
   return (
     <div className="min-h-screen flex items-center justify-center px-6 bg-gradient-to-br from-slate-900 via-blue-900 to-slate-900">
       <div className="bg-white rounded-2xl shadow-xl p-8 max-w-sm w-full text-center">
-        <h1 className="text-2xl font-bold text-slate-800">MatchDay</h1>
+        <h1 className="text-2xl font-bold text-slate-800">MatchTime</h1>
 
         {state === "verifying" && (
           <div className="mt-6">

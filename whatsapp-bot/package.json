@@ -1,7 +1,7 @@
 {
   "name": "matchday-whatsapp-bot",
   "version": "1.0.0",
-  "description": "WhatsApp bot for MatchDay attendance tracking",
+  "description": "WhatsApp bot for MatchTime attendance tracking",
   "type": "module",
   "scripts": {
     "start": "node --env-file=.env --import tsx src/index.ts",

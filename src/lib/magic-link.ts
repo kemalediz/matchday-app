@@ -86,8 +86,7 @@ export async function verifyMagicLinkToken(token: string): Promise<MagicLinkPayl
  */
 export function buildMagicLinkUrl(token: string): string {
   const base =
-    process.env.NEXTAUTH_URL?.replace(/\/$/, "") ??
-    "https://matchday-nine-zeta.vercel.app";
+    process.env.NEXTAUTH_URL?.replace(/\/$/, "") ?? "https://matchtime.ai";
   return `${base}/r/${token}`;
 }
 

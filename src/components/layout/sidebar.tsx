@@ -65,7 +65,7 @@ export function Sidebar() {
     <>
       {/* Logo / brand */}
       <div className="px-5 pt-5 pb-3 border-b border-slate-700">
-        <h1 className="text-lg font-bold tracking-tight text-white">MatchDay</h1>
+        <h1 className="text-lg font-bold tracking-tight text-white">MatchTime</h1>
         <p className="text-[11px] text-slate-400 mt-0.5 tracking-wide uppercase">
           Sports Management
         </p>
@@ -158,7 +158,7 @@ export function Sidebar() {
         >
           {mobileOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
         </button>
-        <span className="font-semibold tracking-tight">MatchDay</span>
+        <span className="font-semibold tracking-tight">MatchTime</span>
         <div className="w-9" />
       </div>
 

@@ -4,8 +4,8 @@ function getResend() {
   return new Resend(process.env.RESEND_API_KEY);
 }
 
-const FROM_EMAIL = process.env.EMAIL_FROM || "MatchDay <noreply@resend.dev>";
-const APP_URL = process.env.NEXTAUTH_URL || "https://matchday-nine-zeta.vercel.app";
+const FROM_EMAIL = process.env.EMAIL_FROM || "MatchTime <noreply@resend.dev>";
+const APP_URL = process.env.NEXTAUTH_URL || "https://matchtime.ai";
 
 export async function sendVerificationEmail(
   email: string,
@@ -20,7 +20,7 @@ export async function sendVerificationEmail(
   await getResend().emails.send({
     from: FROM_EMAIL,
     to: email,
-    subject: `Your MatchDay verification code: ${code}`,
+    subject: `Your MatchTime verification code: ${code}`,
     html: `
 <!DOCTYPE html>
 <html>
@@ -31,7 +31,7 @@ export async function sendVerificationEmail(
 <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background-color: #f5f5f5; margin: 0; padding: 0;">
   <div style="max-width: 520px; margin: 40px auto; background: white; border-radius: 12px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.1);">
     <div style="background: linear-gradient(135deg, #16a34a, #15803d); padding: 32px; text-align: center;">
-      <h1 style="color: white; margin: 0; font-size: 24px; font-weight: 700;">MatchDay</h1>
+      <h1 style="color: white; margin: 0; font-size: 24px; font-weight: 700;">MatchTime</h1>
     </div>
     <div style="padding: 32px; text-align: center;">
       <p style="font-size: 16px; color: #333; margin: 0 0 8px;">Hi ${name || "there"},</p>
@@ -46,7 +46,7 @@ export async function sendVerificationEmail(
       </p>
     </div>
     <div style="padding: 16px 32px; background: #fafafa; border-top: 1px solid #eee; text-align: center;">
-      <p style="font-size: 12px; color: #999; margin: 0;">Sent by MatchDay</p>
+      <p style="font-size: 12px; color: #999; margin: 0;">Sent by MatchTime</p>
     </div>
   </div>
 </body>
@@ -84,7 +84,7 @@ export async function sendRatingEmails(
 <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background-color: #f5f5f5; margin: 0; padding: 0;">
   <div style="max-width: 520px; margin: 40px auto; background: white; border-radius: 12px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.1);">
     <div style="background: linear-gradient(135deg, #16a34a, #15803d); padding: 32px; text-align: center;">
-      <h1 style="color: white; margin: 0; font-size: 24px; font-weight: 700;">MatchDay</h1>
+      <h1 style="color: white; margin: 0; font-size: 24px; font-weight: 700;">MatchTime</h1>
     </div>
     <div style="padding: 32px;">
       <p style="font-size: 16px; color: #333; margin: 0 0 8px;">Hi ${player.name || "there"},</p>
@@ -103,7 +103,7 @@ export async function sendRatingEmails(
       </p>
     </div>
     <div style="padding: 16px 32px; background: #fafafa; border-top: 1px solid #eee; text-align: center;">
-      <p style="font-size: 12px; color: #999; margin: 0;">Sent by MatchDay</p>
+      <p style="font-size: 12px; color: #999; margin: 0;">Sent by MatchTime</p>
     </div>
   </div>
 </body>

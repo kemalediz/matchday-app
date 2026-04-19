@@ -34,7 +34,7 @@ export async function POST(request: Request) {
   if (!user) {
     return NextResponse.json({
       error: "unknown_player",
-      message: `No player found with phone number ${normalized}. Ask them to add their phone number in the MatchDay app.`,
+      message: `No player found with phone number ${normalized}. Ask them to add their phone number in the MatchTime app.`,
     }, { status: 404 });
   }
 
