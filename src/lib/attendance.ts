@@ -18,6 +18,9 @@ export async function registerAttendance(userId: string, matchId: string) {
   const confirmedCount = await db.attendance.count({
     where: { matchId, status: "CONFIRMED" },
   });
+  const benchCount = await db.attendance.count({
+    where: { matchId, status: "BENCH" },
+  });
 
   const status = confirmedCount < match.maxPlayers ? "CONFIRMED" : "BENCH";
 
@@ -27,9 +30,17 @@ export async function registerAttendance(userId: string, matchId: string) {
     update: { status, position: nextPosition, respondedAt: new Date() },
   });
 
+  // Friendly "slot" the bot uses for its reaction emoji. If the player
+  // made the squad, their slot is their 1-indexed place in the squad
+  // (equals the new confirmed count). If they landed on the bench, it's
+  // their 1-indexed bench slot.
+  const slot =
+    status === "CONFIRMED" ? confirmedCount + 1 : benchCount + 1;
+
   return {
     status: attendance.status,
     position: attendance.position,
+    slot,
     confirmedCount: confirmedCount + (status === "CONFIRMED" ? 1 : 0),
     maxPlayers: match.maxPlayers,
   };

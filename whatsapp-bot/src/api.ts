@@ -5,11 +5,16 @@ const headers = {
   "x-api-key": config.apiKey,
 };
 
-export async function postAttendance(phoneNumber: string, action: "IN" | "OUT", groupId: string) {
+export async function postAttendance(
+  phoneNumber: string,
+  action: "IN" | "OUT",
+  groupId: string,
+  displayName?: string,
+) {
   const res = await fetch(`${config.apiUrl}/api/whatsapp/attendance`, {
     method: "POST",
     headers,
-    body: JSON.stringify({ phoneNumber, action, groupId }),
+    body: JSON.stringify({ phoneNumber, action, groupId, displayName }),
   });
   return res.json();
 }

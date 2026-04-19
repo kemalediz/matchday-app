@@ -2,6 +2,31 @@ import { postAttendance, postScore } from "./api.js";
 import { unknownPlayerMessage, errorMessage } from "./messages.js";
 
 /**
+ * Map a confirmed-squad slot number (1-indexed) to a keycap emoji. Slots
+ * 1-9 use Unicode keycap sequences, 10 uses the 🔟 emoji. For 11+ we
+ * fall back to a ⚽ — WhatsApp reactions only support a single emoji,
+ * and keycap sequences stop at 10, so there's no clean native way to
+ * show "13" as one reaction.
+ */
+const KEYCAP: Record<number, string> = {
+  1: "1️⃣",
+  2: "2️⃣",
+  3: "3️⃣",
+  4: "4️⃣",
+  5: "5️⃣",
+  6: "6️⃣",
+  7: "7️⃣",
+  8: "8️⃣",
+  9: "9️⃣",
+  10: "🔟",
+};
+
+function slotEmoji(status: "CONFIRMED" | "BENCH", slot: number): string {
+  if (status === "BENCH") return "🪑"; // seat = bench
+  return KEYCAP[slot] ?? "⚽"; // confirmed, in the squad
+}
+
+/**
  * Score extractor — matches plain "7-3", "7:3", "7 - 3", "7 3" (with
  * optional surrounding words). We accept values 0-99 each side.
  */
@@ -88,6 +113,11 @@ interface Message {
   body: string;
   from: string;           // group JID: xxx@g.us
   author?: string;        // participant in group: 447xxx@c.us
+  /** WhatsApp "pushname" of the sender — their self-set profile name.
+   *  Used to seed a brand-new auto-enrolled User row so unknown senders
+   *  arrive on the attendance list with a real display name instead of
+   *  "(unnamed)". Optional because some wweb.js events don't expose it. */
+  authorName?: string;
   reply: (text: string) => Promise<void>;
   react?: (emoji: string) => Promise<void>;
 }
@@ -154,10 +184,10 @@ export async function handleMessage(msg: Message) {
   if (!action) return;
 
   try {
-    const result = await postAttendance(phone, action, msg.from);
+    const result = await postAttendance(phone, action, msg.from, msg.authorName);
 
-    // Silent-on-unknown: if the sender isn't registered, stay quiet.
-    // Admin can add them via /admin/players/phones when they notice.
+    // OUT from an unknown phone still silently drops; we don't enrol
+    // someone whose first action is to leave.
     if (result.error === "unknown_player") {
       console.log(`unknown_player ${phone} — silent drop`);
       return;
@@ -169,7 +199,14 @@ export async function handleMessage(msg: Message) {
     }
 
     if (msg.react) {
-      await msg.react(action === "IN" ? "👍" : "👋");
+      if (action === "IN") {
+        const status: "CONFIRMED" | "BENCH" =
+          result.status === "BENCH" ? "BENCH" : "CONFIRMED";
+        const slot = typeof result.slot === "number" ? result.slot : 0;
+        await msg.react(slotEmoji(status, slot));
+      } else {
+        await msg.react("👋");
+      }
     }
   } catch (err) {
     console.error("Error handling message:", err);

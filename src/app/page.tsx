@@ -14,6 +14,7 @@ import {
   Timer,
   Shield,
 } from "lucide-react";
+import { LandingPage } from "@/components/landing/landing-page";
 
 function getGreeting(hour: number): string {
   if (hour < 5) return "Good night";
@@ -31,7 +32,9 @@ const TILE = {
 
 export default async function DashboardPage() {
   const session = await auth();
-  if (!session?.user?.id) redirect("/login");
+  // Signed-out visitors see the marketing landing page instead of being
+  // bounced to /login. They can Sign in / Sign up from there.
+  if (!session?.user?.id) return <LandingPage />;
 
   const user = await db.user.findUnique({ where: { id: session.user.id } });
   if (!user?.onboarded) redirect("/onboarding");

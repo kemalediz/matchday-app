@@ -49,10 +49,9 @@ export function Sidebar() {
   const { data: session } = useSession();
   const [mobileOpen, setMobileOpen] = useState(false);
 
-  // Don't render on auth routes
-  if (pathname?.startsWith("/login") || pathname?.startsWith("/signup") || pathname?.startsWith("/verify-email")) {
-    return null;
-  }
+  // Auth-route / marketing hiding is handled centrally by AppShell; this
+  // component only renders when AppShell decides the app chrome should
+  // show. No pathname gating needed here.
 
   const user = session?.user;
   // Admin is visible to everyone; admin layout itself enforces access.

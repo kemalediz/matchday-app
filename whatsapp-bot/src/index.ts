@@ -76,10 +76,30 @@ async function main() {
   client.on(
     "message",
     async (msg) => {
+      // WhatsApp pushname — the sender's self-set profile name. Useful
+      // for auto-enrolment when someone new types IN. wweb.js stashes it
+      // on `_data.notifyName`; fall back to the Contact resource if the
+      // raw field isn't populated (some platforms omit it on groups).
+      let authorName: string | undefined;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const rawNotify = (msg as any)._data?.notifyName;
+      if (typeof rawNotify === "string" && rawNotify.trim()) {
+        authorName = rawNotify.trim();
+      } else {
+        try {
+          const contact = await msg.getContact();
+          const pn = contact.pushname || contact.name;
+          if (pn && pn.trim()) authorName = pn.trim();
+        } catch {
+          /* ignore — missing name just means server falls back to phone */
+        }
+      }
+
       await handleMessage({
         body: msg.body,
         from: msg.from,
         author: msg.author,
+        authorName,
         reply: async (text: string) => {
           const chat = await client.getChatById(msg.from);
           await chat.sendMessage(text);
