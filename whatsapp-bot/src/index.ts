@@ -3,7 +3,7 @@ const { Client, LocalAuth } = pkg;
 import qrcode from "qrcode-terminal";
 import { handleMessage, setMonitoredGroups } from "./handlers.js";
 import { initScheduler, stopScheduler } from "./scheduler.js";
-import { getEnabledOrgs, postReaction } from "./api.js";
+import { getEnabledOrgs, postReaction, postPollVote } from "./api.js";
 import { backfillMessagesForGroups } from "./backfill.js";
 import { config } from "./config.js";
 
@@ -103,6 +103,30 @@ async function main() {
       console.error("Error forwarding reaction:", err);
     }
   });
+
+  // Poll votes — forwarded to the server so MoM polls can merge with app
+  // votes. The wweb.js event delivers a PollVote object with the voter
+  // and the selected option names.
+  client.on(
+    "vote_update" as Parameters<typeof client.on>[0],
+    async (vote: {
+      parentMessage?: { id?: { _serialized?: string } };
+      voter?: string;
+      selectedOptions?: Array<{ name?: string; localId?: number }>;
+    }) => {
+      try {
+        const waMessageId = vote.parentMessage?.id?._serialized;
+        const voterId = vote.voter;
+        if (!waMessageId || !voterId) return;
+        const phone = voterId.replace("@c.us", "").replace(/^\+/, "");
+        // selectedOptions can be empty (un-vote).
+        const picked = vote.selectedOptions?.[0]?.name ?? null;
+        await postPollVote({ waMessageId, voterPhone: phone, optionName: picked });
+      } catch (err) {
+        console.error("Error forwarding poll vote:", err);
+      }
+    },
+  );
 
   client.on("disconnected", (reason: string) => {
     console.log("Client disconnected:", reason);

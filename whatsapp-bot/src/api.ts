@@ -111,3 +111,18 @@ export async function postReaction(params: {
     console.error("reaction post failed:", res.status, await res.text());
   }
 }
+
+export async function postPollVote(params: {
+  waMessageId: string;
+  voterPhone: string;
+  optionName: string | null;
+}): Promise<void> {
+  const res = await fetch(`${config.apiUrl}/api/whatsapp/poll-vote`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(params),
+  });
+  if (!res.ok) {
+    console.error("poll-vote post failed:", res.status, await res.text());
+  }
+}
