@@ -69,12 +69,17 @@ async function findSmallestSameSportPpt(
   return Math.min(...matching.map((a) => a.sport.playersPerTeam));
 }
 
-async function findOrgOwner(orgId: string) {
-  const membership = await db.membership.findFirst({
-    where: { orgId, role: "OWNER" },
+/** All OWNER + ADMIN members with a phone number on record. Used for
+ *  day-before DM nudges so every admin gets notified. */
+async function findOrgAdminsWithPhone(orgId: string) {
+  const memberships = await db.membership.findMany({
+    where: { orgId, role: { in: ["OWNER", "ADMIN"] } },
     include: { user: { select: { id: true, name: true, phoneNumber: true } } },
+    orderBy: { role: "asc" }, // OWNER sorts before PLAYER; ADMIN in between
   });
-  return membership?.user ?? null;
+  return memberships
+    .map((m) => m.user)
+    .filter((u): u is { id: string; name: string | null; phoneNumber: string } => !!u.phoneNumber);
 }
 
 // ────────────────────────────── Instructions ──────────────────────────────
@@ -411,9 +416,10 @@ async function computeForMatch(
     const isDayBefore = hoursUntilMatch >= 12 && hoursUntilMatch <= 36;
 
     // 10:00 — switch-to-smaller-format nudge
-    const switchKey = `${matchId}:switch-nudge`;
+    //         One DM per admin so each has their own magic link. Idempotency
+    //         is keyed per-admin (":userId" suffix) — first admin to act
+    //         resolves the situation; other admins can ignore their DM.
     if (
-      !sentKeys.has(switchKey) &&
       isDayBefore &&
       hour >= 10 &&
       hour < 11 &&
@@ -425,33 +431,36 @@ async function computeForMatch(
         activity.sportId,
         sport.playersPerTeam,
       );
-      const owner = await findOrgOwner(activity.orgId);
-      if (candidate && owner?.phoneNumber) {
-        const token = signMagicLinkToken({
-          userId: owner.id,
-          purpose: "sign-in",
-          ttlSeconds: MAGIC_LINK_TTL.signIn,
-        });
-        const signInUrl = buildMagicLinkUrl(token);
-        out.push({
-          kind: "dm",
-          key: switchKey,
-          matchId,
-          targetUser: owner.id,
-          phone: owner.phoneNumber.replace(/^\+/, ""),
-          text:
-            `⚠️ *Low numbers* — ${confirmed.length}/${maxPlayers} confirmed for *${activity.name}* tomorrow.\n\n` +
-            `Switch to *${candidate.sport.name}* (${candidate.sport.playersPerTeam * 2} players) before the deadline?\n\n` +
-            `Tap to open the admin panel (auto signs you in):\n${signInUrl}\n\n` +
-            `Or navigate manually: /admin/matches/${matchId}/switch-format`,
-        });
+      if (candidate) {
+        const admins = await findOrgAdminsWithPhone(activity.orgId);
+        for (const admin of admins) {
+          const key = `${matchId}:switch-nudge:${admin.id}`;
+          if (sentKeys.has(key)) continue;
+          const token = signMagicLinkToken({
+            userId: admin.id,
+            purpose: "sign-in",
+            ttlSeconds: MAGIC_LINK_TTL.signIn,
+          });
+          const signInUrl = buildMagicLinkUrl(token);
+          out.push({
+            kind: "dm",
+            key,
+            matchId,
+            targetUser: admin.id,
+            phone: admin.phoneNumber.replace(/^\+/, ""),
+            text:
+              `⚠️ *Low numbers* — ${confirmed.length}/${maxPlayers} confirmed for *${activity.name}* tomorrow.\n\n` +
+              `Switch to *${candidate.sport.name}* (${candidate.sport.playersPerTeam * 2} players) before the deadline?\n\n` +
+              `Tap to open the admin panel (auto signs you in):\n${signInUrl}\n\n` +
+              `Or navigate manually: /admin/matches/${matchId}/switch-format`,
+          });
+        }
       }
     }
 
-    // 18:00 — cancel nudge if even the smallest format can't fill
-    const cancelKey = `${matchId}:cancel-nudge`;
+    // 18:00 — cancel nudge if even the smallest format can't fill.
+    //         Again one DM per admin.
     if (
-      !sentKeys.has(cancelKey) &&
       isDayBefore &&
       hour >= 18 &&
       hour < 19 &&
@@ -464,20 +473,22 @@ async function computeForMatch(
       );
       const minViable = smallestPpt * 2;
       if (confirmed.length < minViable) {
-        const owner = await findOrgOwner(activity.orgId);
-        if (owner?.phoneNumber) {
+        const admins = await findOrgAdminsWithPhone(activity.orgId);
+        for (const admin of admins) {
+          const key = `${matchId}:cancel-nudge:${admin.id}`;
+          if (sentKeys.has(key)) continue;
           const token = signMagicLinkToken({
-            userId: owner.id,
+            userId: admin.id,
             purpose: "sign-in",
             ttlSeconds: MAGIC_LINK_TTL.signIn,
           });
           const signInUrl = buildMagicLinkUrl(token);
           out.push({
             kind: "dm",
-            key: cancelKey,
+            key,
             matchId,
-            targetUser: owner.id,
-            phone: owner.phoneNumber.replace(/^\+/, ""),
+            targetUser: admin.id,
+            phone: admin.phoneNumber.replace(/^\+/, ""),
             text:
               `🚨 *Match in trouble* — only *${confirmed.length}* confirmed for *${activity.name}* tomorrow, below the minimum to play (${minViable}).\n\n` +
               `Cancel and refund the booking?\n\n` +
