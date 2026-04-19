@@ -86,6 +86,29 @@ function hoursBetween(a: Date, b: Date): number {
   return (b.getTime() - a.getTime()) / (1000 * 60 * 60);
 }
 
+/** One-time introductory message posted on the org's first active activity. */
+function botIntroMessage(): string {
+  return [
+    `👋 Hi all — MatchDay bot is live for this group.`,
+    ``,
+    `Here's what I do:`,
+    ``,
+    `🗓  *Attendance* — Say "IN" / "OUT" here (or on the app) and I log you in/out. I react with 👍 to confirm — no extra messages from me.`,
+    ``,
+    `🗒  *Daily reminders* — Every day at 5pm while the squad isn't full, I'll repost the IN list so we all see how many we need.`,
+    ``,
+    `🔁  *Bench promotion* — If someone drops, I tag the first bencher and ask them to 👍 confirm. 2h window; if no answer, I move to the next.`,
+    ``,
+    `⚽  *Teams* — On match day morning I post the auto-balanced teams. Objections? Reply \`swap X Y\` — admin will apply it.`,
+    ``,
+    `🏆  *Ratings & MoM* — After each match, I DM everyone a rating link (no sign-up, just tap). Vote MoM in-app or in the poll I post — same count either way. MoM announced 5 days after the match.`,
+    ``,
+    `💳  *Payments* — I auto-post "paid?" polls right after each match.`,
+    ``,
+    `Questions? Ask @Kemal. Let's go.`,
+  ].join("\n");
+}
+
 // ─────────────────────────── Main entry point ─────────────────────────────
 
 export async function computeDuePosts(groupId: string): Promise<DuePostsResult | null> {
@@ -97,13 +120,39 @@ export async function computeDuePosts(groupId: string): Promise<DuePostsResult |
   const now = new Date();
   const out: DueInstruction[] = [];
 
-  // Pull every already-sent notification for this org's matches so we can
-  // cheaply check keys in-memory.
+  // Pull every already-sent notification we might care about: those linked
+  // to this org's matches, plus any org-wide notifications (matchId=null)
+  // keyed by orgId.
   const sent = await db.sentNotification.findMany({
-    where: { match: { activity: { orgId: org.id } } },
+    where: {
+      OR: [
+        { match: { activity: { orgId: org.id } } },
+        { key: { startsWith: `org-${org.id}:` } },
+      ],
+    },
     select: { key: true },
   });
   const sentKeys = new Set(sent.map((s) => s.key));
+
+  // ── Org-level: one-time bot introduction ─────────────────────────────
+  // Fires once per org, the first time the org has at least one active
+  // activity AND the bot is enabled. Explains what MatchDay is and how
+  // the flow works so group members aren't confused by bot posts.
+  {
+    const introKey = `org-${org.id}:bot-intro`;
+    if (!sentKeys.has(introKey)) {
+      const hasActiveActivity = await db.activity.count({
+        where: { orgId: org.id, isActive: true },
+      });
+      if (hasActiveActivity > 0) {
+        out.push({
+          kind: "group-message",
+          key: introKey,
+          text: botIntroMessage(),
+        });
+      }
+    }
+  }
 
   // Load all matches we care about: upcoming + anything still within 5 days
   // of completion (MoM announcement window).
