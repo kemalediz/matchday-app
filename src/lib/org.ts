@@ -110,3 +110,23 @@ export async function requireOrgAdmin(userId: string, orgId: string) {
   const admin = await isOrgAdmin(userId, orgId);
   if (!admin) throw new Error("Admin access required");
 }
+
+/**
+ * Every OWNER + ADMIN of this org who has a phone number set. Used for
+ * WhatsApp DM nudges (switch/cancel day-before, group_join/leave
+ * auto-notifications, …). Excludes members whose `leftAt` is set — a
+ * former admin shouldn't get op-notifications just because they're
+ * still a membership row for history purposes.
+ */
+export async function findOrgAdminsWithPhone(
+  orgId: string,
+): Promise<Array<{ id: string; name: string | null; phoneNumber: string }>> {
+  const memberships = await db.membership.findMany({
+    where: { orgId, leftAt: null, role: { in: ["OWNER", "ADMIN"] } },
+    include: { user: { select: { id: true, name: true, phoneNumber: true } } },
+    orderBy: { role: "asc" },
+  });
+  return memberships
+    .map((m) => m.user)
+    .filter((u): u is { id: string; name: string | null; phoneNumber: string } => !!u.phoneNumber);
+}

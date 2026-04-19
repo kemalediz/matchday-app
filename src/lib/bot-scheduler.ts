@@ -16,6 +16,7 @@
  */
 import { db } from "./db";
 import { buildMagicLinkUrl, signMagicLinkToken, MAGIC_LINK_TTL } from "./magic-link";
+import { findOrgAdminsWithPhone } from "./org";
 import { format } from "date-fns";
 
 // ───────── Same-sport helpers for switch/cancel-format nudges ────────
@@ -67,19 +68,6 @@ async function findSmallestSameSportPpt(
   const matching = acts.filter((a) => a.sport.name.split(" ")[0] === family);
   if (matching.length === 0) return currentPpt;
   return Math.min(...matching.map((a) => a.sport.playersPerTeam));
-}
-
-/** All OWNER + ADMIN members with a phone number on record. Used for
- *  day-before DM nudges so every admin gets notified. */
-async function findOrgAdminsWithPhone(orgId: string) {
-  const memberships = await db.membership.findMany({
-    where: { orgId, role: { in: ["OWNER", "ADMIN"] } },
-    include: { user: { select: { id: true, name: true, phoneNumber: true } } },
-    orderBy: { role: "asc" }, // OWNER sorts before PLAYER; ADMIN in between
-  });
-  return memberships
-    .map((m) => m.user)
-    .filter((u): u is { id: string; name: string | null; phoneNumber: string } => !!u.phoneNumber);
 }
 
 // ────────────────────────────── Instructions ──────────────────────────────

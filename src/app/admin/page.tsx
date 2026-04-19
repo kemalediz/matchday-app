@@ -22,7 +22,7 @@ export default async function AdminDashboardPage() {
   const orgId = membership.orgId;
 
   const [playerCount, activeActivities, upcomingMatches, completedMatches] = await Promise.all([
-    db.membership.count({ where: { orgId } }),
+    db.membership.count({ where: { orgId, leftAt: null } }),
     db.activity.count({ where: { orgId, isActive: true } }),
     db.match.count({
       where: {

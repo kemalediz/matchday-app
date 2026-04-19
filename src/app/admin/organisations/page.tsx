@@ -29,7 +29,7 @@ export default async function OrganisationsPage() {
           createdAt: true,
           _count: {
             select: {
-              memberships: true,
+              memberships: { where: { leftAt: null } },
               activities: true,
             },
           },

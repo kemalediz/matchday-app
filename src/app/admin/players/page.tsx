@@ -16,6 +16,7 @@ interface Player {
   seedRating: number | null;
   phoneNumber: string | null;
   isActive: boolean;
+  leftAt: string | null;
   _count: { attendances: number };
 }
 
@@ -23,17 +24,22 @@ export default function PlayersPage() {
   const [players, setPlayers] = useState<Player[]>([]);
   const [loading, setLoading] = useState(true);
   const [orgId, setOrgId] = useState<string | null>(null);
+  const [includeFormer, setIncludeFormer] = useState(false);
 
   useEffect(() => {
     fetch("/api/org/settings").then((r) => r.json()).then((d) => setOrgId(d.id));
-    loadPlayers();
   }, []);
 
-  async function loadPlayers() {
-    const res = await fetch("/api/players");
+  useEffect(() => {
+    loadPlayers(includeFormer);
+  }, [includeFormer]);
+
+  async function loadPlayers(withFormer: boolean) {
+    setLoading(true);
+    const qs = withFormer ? "?includeFormer=1" : "";
+    const res = await fetch(`/api/players${qs}`);
     if (res.ok) {
       const data = await res.json();
-      // /api/players now returns { players, activityId } — extract players.
       setPlayers(Array.isArray(data) ? data : data.players ?? []);
     }
     setLoading(false);
@@ -44,7 +50,7 @@ export default function PlayersPage() {
     try {
       await updatePlayerRole(userId, orgId, role as "ADMIN" | "PLAYER");
       toast.success("Role updated");
-      loadPlayers();
+      loadPlayers(includeFormer);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed");
     }
@@ -56,7 +62,7 @@ export default function PlayersPage() {
     try {
       await seedPlayerRating(userId, orgId, num);
       toast.success("Rating updated");
-      loadPlayers();
+      loadPlayers(includeFormer);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed");
     }
@@ -65,11 +71,28 @@ export default function PlayersPage() {
   if (loading) return <div className="p-10 text-center text-slate-400">Loading…</div>;
 
   const withPhoneCount = players.filter((p) => p.phoneNumber).length;
+  const leftCount = players.filter((p) => p.leftAt).length;
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between gap-3">
-        <h2 className="text-lg font-semibold text-slate-800">Players ({players.length})</h2>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex items-center gap-3">
+          <h2 className="text-lg font-semibold text-slate-800">Players ({players.length})</h2>
+          <label className="inline-flex items-center gap-2 text-xs text-slate-600 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={includeFormer}
+              onChange={(e) => setIncludeFormer(e.target.checked)}
+              className="w-4 h-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
+            />
+            <span>
+              Include former members
+              {includeFormer && leftCount > 0 ? (
+                <span className="ml-1 text-slate-400">({leftCount} left)</span>
+              ) : null}
+            </span>
+          </label>
+        </div>
         <div className="flex items-center gap-2">
           <Link
             href="/admin/players/phones"
@@ -114,14 +137,23 @@ export default function PlayersPage() {
           {players.map((p) => (
             <div
               key={p.id}
-              className="grid grid-cols-[1fr_auto_auto] gap-4 px-6 py-4 items-center"
+              className={`grid grid-cols-[1fr_auto_auto] gap-4 px-6 py-4 items-center ${
+                p.leftAt ? "bg-slate-50/70 opacity-70" : ""
+              }`}
             >
               <div className="flex items-center gap-3 min-w-0">
                 <div className="w-10 h-10 rounded-full bg-blue-50 text-blue-700 flex items-center justify-center text-sm font-semibold shrink-0">
                   {(p.name ?? p.email).charAt(0).toUpperCase()}
                 </div>
                 <div className="min-w-0">
-                  <p className="font-semibold text-slate-800 truncate">{p.name ?? p.email}</p>
+                  <div className="flex items-center gap-2 min-w-0">
+                    <p className="font-semibold text-slate-800 truncate">{p.name ?? p.email}</p>
+                    {p.leftAt && (
+                      <span className="inline-flex shrink-0 px-1.5 py-0.5 rounded bg-slate-200 text-slate-600 text-[10px] font-semibold uppercase tracking-wider">
+                        Left
+                      </span>
+                    )}
+                  </div>
                   <div className="flex items-center gap-1.5 text-xs text-slate-500 mt-0.5">
                     {p.positions.map((pos) => (
                       <span

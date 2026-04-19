@@ -59,6 +59,25 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "No organisation found" }, { status: 404 });
   }
 
+  // Must have a live (non-left) membership in this org to register. If
+  // they left the WhatsApp group we've marked their Membership.leftAt;
+  // `group_join` will null it out when they're re-added. Until then we
+  // silently drop their IN/OUT — treat them like an unknown player so
+  // the bot stays quiet and admins can decide.
+  const activeMembership = await db.membership.findUnique({
+    where: { userId_orgId: { userId: user.id, orgId } },
+    select: { leftAt: true },
+  });
+  if (!activeMembership || activeMembership.leftAt !== null) {
+    return NextResponse.json(
+      {
+        error: "unknown_player",
+        message: `Phone ${normalized} is no longer a member of this org.`,
+      },
+      { status: 404 },
+    );
+  }
+
   // Find the next upcoming match for this org
   const now = new Date();
   const nextMatch = await db.match.findFirst({

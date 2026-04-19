@@ -98,6 +98,10 @@ export function setMonitoredGroups(groupIds: string[]) {
   monitoredGroups = new Set(groupIds);
 }
 
+export function isMonitoredGroup(groupId: string): boolean {
+  return monitoredGroups.has(groupId);
+}
+
 export async function handleMessage(msg: Message) {
   if (!msg.from.endsWith("@g.us")) return;
   if (!monitoredGroups.has(msg.from)) return;

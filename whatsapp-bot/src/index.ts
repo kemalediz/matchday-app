@@ -1,9 +1,15 @@
 import pkg from "whatsapp-web.js";
 const { Client, LocalAuth } = pkg;
 import qrcode from "qrcode-terminal";
-import { handleMessage, setMonitoredGroups } from "./handlers.js";
+import { handleMessage, setMonitoredGroups, isMonitoredGroup } from "./handlers.js";
 import { initScheduler, stopScheduler } from "./scheduler.js";
-import { getEnabledOrgs, postReaction, postPollVote } from "./api.js";
+import {
+  getEnabledOrgs,
+  postReaction,
+  postPollVote,
+  postGroupJoin,
+  postGroupLeave,
+} from "./api.js";
 import { backfillMessagesForGroups } from "./backfill.js";
 import { config } from "./config.js";
 
@@ -124,6 +130,57 @@ async function main() {
         await postPollVote({ waMessageId, voterPhone: phone, optionName: picked });
       } catch (err) {
         console.error("Error forwarding poll vote:", err);
+      }
+    },
+  );
+
+  // Group-membership events — someone joined or left a monitored group.
+  // We forward the phone numbers (minus `@c.us`, minus any `@lid`
+  // participants we can't resolve) to the server, which auto-onboards
+  // new joiners and marks leavers as `leftAt` without destroying their
+  // history. DMs to admins are queued server-side.
+  //
+  // Self-events (the bot itself being added/removed) are skipped so we
+  // don't DM admins about the bot joining its own group.
+  function extractPhones(recipientIds: string[] | undefined, selfId: string | undefined): string[] {
+    if (!Array.isArray(recipientIds)) return [];
+    return recipientIds
+      .filter((id) => id.endsWith("@c.us"))
+      .filter((id) => id !== selfId)
+      .map((id) => id.replace("@c.us", "").replace(/^\+/, ""))
+      .filter((p) => p.length > 0);
+  }
+
+  client.on(
+    "group_join" as Parameters<typeof client.on>[0],
+    async (notification: { chatId?: string; recipientIds?: string[] }) => {
+      try {
+        const groupId = notification.chatId;
+        if (!groupId || !isMonitoredGroup(groupId)) return;
+        const selfId = client.info?.wid?._serialized;
+        const phones = extractPhones(notification.recipientIds, selfId);
+        if (phones.length === 0) return;
+        console.log(`group_join in ${groupId}: ${phones.join(", ")}`);
+        await postGroupJoin({ groupId, phones });
+      } catch (err) {
+        console.error("Error forwarding group_join:", err);
+      }
+    },
+  );
+
+  client.on(
+    "group_leave" as Parameters<typeof client.on>[0],
+    async (notification: { chatId?: string; recipientIds?: string[] }) => {
+      try {
+        const groupId = notification.chatId;
+        if (!groupId || !isMonitoredGroup(groupId)) return;
+        const selfId = client.info?.wid?._serialized;
+        const phones = extractPhones(notification.recipientIds, selfId);
+        if (phones.length === 0) return;
+        console.log(`group_leave in ${groupId}: ${phones.join(", ")}`);
+        await postGroupLeave({ groupId, phones });
+      } catch (err) {
+        console.error("Error forwarding group_leave:", err);
       }
     },
   );

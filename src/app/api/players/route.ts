@@ -12,6 +12,7 @@ export async function GET(request: Request) {
 
   const { searchParams } = new URL(request.url);
   const activityIdParam = searchParams.get("activityId");
+  const includeFormer = searchParams.get("includeFormer") === "1";
 
   // If admin passed a specific activityId, scope positions to THAT activity.
   // Otherwise fall back to the org's primary active activity.
@@ -34,7 +35,10 @@ export async function GET(request: Request) {
   }
 
   const memberships = await db.membership.findMany({
-    where: { orgId: membership.orgId },
+    where: {
+      orgId: membership.orgId,
+      ...(includeFormer ? {} : { leftAt: null }),
+    },
     include: {
       user: {
         include: {
@@ -58,6 +62,7 @@ export async function GET(request: Request) {
     positions: m.user.activityPositions?.[0]?.positions ?? [],
     seedRating: m.user.seedRating,
     isActive: m.user.isActive,
+    leftAt: m.leftAt ? m.leftAt.toISOString() : null,
     _count: m.user._count,
   }));
 

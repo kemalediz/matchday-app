@@ -126,3 +126,31 @@ export async function postPollVote(params: {
     console.error("poll-vote post failed:", res.status, await res.text());
   }
 }
+
+export async function postGroupJoin(params: {
+  groupId: string;
+  phones: string[]; // E.164 without the leading "+"
+}): Promise<void> {
+  const res = await fetch(`${config.apiUrl}/api/whatsapp/group-join`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(params),
+  });
+  if (!res.ok) {
+    console.error("group-join post failed:", res.status, await res.text());
+  }
+}
+
+export async function postGroupLeave(params: {
+  groupId: string;
+  phones: string[];
+}): Promise<void> {
+  const res = await fetch(`${config.apiUrl}/api/whatsapp/group-leave`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(params),
+  });
+  if (!res.ok) {
+    console.error("group-leave post failed:", res.status, await res.text());
+  }
+}
