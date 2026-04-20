@@ -36,7 +36,7 @@ async function fetchGroupMessagesWithRetry(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   chat: any,
   limit: number,
-  attempts = 3,
+  attempts = 2,
 ): Promise<Message[]> {
   let lastErr: unknown = null;
   for (let i = 0; i < attempts; i++) {
@@ -54,7 +54,15 @@ async function fetchGroupMessagesWithRetry(
       lastErr = err;
     }
   }
-  throw lastErr;
+  // wweb.js's fetchMessages is known-flaky on some LocalAuth sessions.
+  // We've tried our best; fall back to "no catch-up this tick" silently
+  // so the inline message-event path (which DOES work) keeps running
+  // without the log being drowned in Puppeteer stack traces.
+  throw new Error(
+    `fetchMessages unavailable after ${attempts} attempts: ${
+      lastErr instanceof Error ? lastErr.message : String(lastErr)
+    }`,
+  );
 }
 
 /** Per-group rolling history buffer, newest last. In-memory; reset on bot restart. */
@@ -154,7 +162,9 @@ export async function catchUpScan(client: Client, groupId: string, limit = CATCH
     const chat = await client.getChatById(groupId);
     msgs = await fetchGroupMessagesWithRetry(chat, limit);
   } catch (err) {
-    console.error(`[smart] catchUpScan fetch failed for ${groupId}:`, err);
+    console.warn(
+      `[smart] catchUp skipped for ${groupId}: ${err instanceof Error ? err.message : err}`,
+    );
     return;
   }
   if (msgs.length === 0) return;

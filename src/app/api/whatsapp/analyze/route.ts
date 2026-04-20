@@ -178,8 +178,11 @@ async function processOne(args: {
     };
   }
 
-  // 3. Resolve author → User.
-  const normalised = normalisePhone(msg.authorPhone);
+  // 3. Resolve author → User. Accept both "447…" and "+447…" forms —
+  //    the bot hands them in without the `+`, but stored numbers are
+  //    E.164 with `+`.
+  const rawPhone = msg.authorPhone.startsWith("+") ? msg.authorPhone : `+${msg.authorPhone}`;
+  const normalised = normalisePhone(rawPhone);
   const user = normalised
     ? await db.user.findUnique({
         where: { phoneNumber: normalised },
