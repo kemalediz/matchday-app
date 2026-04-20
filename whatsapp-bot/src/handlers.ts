@@ -151,12 +151,16 @@ export async function handleMessage(msg: Message): Promise<FastPathOutcome> {
 
   // WhatsApp now sends participant ids in two formats depending on
   // privacy settings: the classic `<phone>@c.us` and the newer
-  // `<opaque>@lid` (Linked ID). `@lid` ids are NOT phone numbers —
-  // they're opaque identifiers that hide the user's real phone. We
-  // can't map them to our User.phoneNumber lookup, so bail silently.
+  // `<opaque>@lid` (Linked ID). `@lid` ids hide the real phone.
+  //
+  // Historically we bailed here because attendance IN/OUT needs a
+  // phone to look up the User. Now, with the smart-analysis path in
+  // play, even a phone-less message is valuable — someone could be
+  // asking "do we have enough?" or dropping out with a nuanced
+  // sentence. So we only bail on the fast-path (IN/OUT/score) and
+  // defer to the LLM escalation for classification/replies.
   if (!authorId.endsWith("@c.us")) {
-    await markHandled(msg, "ignored", "non-c.us author");
-    return { handled: true, action: "ignored:non-c.us" };
+    return { handled: false };
   }
 
   const phone = "+" + authorId.replace("@c.us", "");

@@ -81,14 +81,21 @@ function getHistory(groupId: string): AnalyzeInboundHistory[] {
 
 function phoneFromAuthor(authorId: string | undefined, fromId: string): string | null {
   const id = authorId ?? fromId;
-  if (!id.endsWith("@c.us")) return null;
+  // `@lid` senders don't carry a real phone — let them flow to the
+  // analyser with empty phone; the server will try a name-based
+  // fallback and still run classification/reply even when attendance
+  // side-effects aren't possible.
+  if (!id.endsWith("@c.us")) return "";
   return id.replace("@c.us", "").replace(/^\+/, "");
 }
 
 export async function analyzeSingleMessage(client: Client, msg: Message): Promise<void> {
   if (!msg.from.endsWith("@g.us")) return;
   const phone = phoneFromAuthor(msg.author, msg.from);
-  if (!phone) return;
+  // `null` means we can't even attempt analysis (shouldn't happen for
+  // group messages — both `@c.us` and `@lid` return strings). Empty
+  // string means @lid — server will try name-based fallback.
+  if (phone === null) return;
 
   const waMessageId = msg.id._serialized;
   const contact = await msg.getContact().catch(() => null);
@@ -184,7 +191,7 @@ export async function catchUpScan(client: Client, groupId: string, limit = CATCH
   const inbound: AnalyzeInboundMessage[] = [];
   for (const m of eligible) {
     const phone = phoneFromAuthor(m.author, m.from);
-    if (!phone) continue;
+    if (phone === null) continue;
     const contact = await m.getContact().catch(() => null);
     const authorName = contact?.pushname ?? contact?.name ?? null;
     inbound.push({

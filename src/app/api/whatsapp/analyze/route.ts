@@ -178,17 +178,41 @@ async function processOne(args: {
     };
   }
 
-  // 3. Resolve author → User. Accept both "447…" and "+447…" forms —
-  //    the bot hands them in without the `+`, but stored numbers are
-  //    E.164 with `+`.
-  const rawPhone = msg.authorPhone.startsWith("+") ? msg.authorPhone : `+${msg.authorPhone}`;
-  const normalised = normalisePhone(rawPhone);
-  const user = normalised
-    ? await db.user.findUnique({
+  // 3. Resolve author → User.
+  //    a) Try by phone (the bot may send without the '+' — be forgiving).
+  //    b) Fallback: `@lid` senders carry no phone. Try a best-effort
+  //       match by authorName against User.name within this org. If a
+  //       unique non-left member matches, we'll use them. Otherwise
+  //       the message still gets classified, just without an attendance
+  //       side-effect.
+  let user: { id: string; name: string | null } | null = null;
+  let normalised: string | null = null;
+  if (msg.authorPhone) {
+    const rawPhone = msg.authorPhone.startsWith("+") ? msg.authorPhone : `+${msg.authorPhone}`;
+    normalised = normalisePhone(rawPhone);
+    if (normalised) {
+      user = await db.user.findUnique({
         where: { phoneNumber: normalised },
         select: { id: true, name: true },
-      })
-    : null;
+      });
+    }
+  }
+  if (!user && msg.authorName && msg.authorName.trim().length >= 3) {
+    const matches = await db.membership.findMany({
+      where: {
+        orgId,
+        leftAt: null,
+        user: {
+          name: { equals: msg.authorName.trim(), mode: "insensitive" },
+        },
+      },
+      include: { user: { select: { id: true, name: true } } },
+      take: 2,
+    });
+    if (matches.length === 1) {
+      user = matches[0].user;
+    }
+  }
 
   // Only act on attendance for users who ARE members of this org (and
   // haven't been marked as left). Unknown users → we still let Claude
