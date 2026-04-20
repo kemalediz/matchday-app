@@ -348,3 +348,36 @@ model MoMVote {
 
   @@unique([matchId, voterId])
 }
+
+/**
+ * Smart-analysis dedupe key: every WhatsApp group message the bot
+ * processes gets recorded here by its `waMessageId`. The inline path
+ * (fast-path + LLM), periodic catch-up scan, and startup backfill all
+ * check this table first so no message is processed twice. The
+ * `intent` / `action` columns record what the bot decided, useful for
+ * auditing and prompt-tuning.
+ *
+ * handledBy:
+ *   - "fast-path": regex matched (IN/OUT/score); acted inline
+ *   - "llm":       sent to Claude for classification; action executed
+ *   - "ignored":   skipped on purpose (bot's own msg, non-c.us author, empty body)
+ *   - "error":     analyzer call failed; don't re-try this exact message
+ */
+model AnalyzedMessage {
+  id           String   @id @default(cuid())
+  waMessageId  String   @unique
+  orgId        String
+  groupId      String
+  authorPhone  String?
+  authorUserId String?
+  body         String?  @db.Text
+  handledBy    String
+  intent       String?
+  action       String?
+  confidence   Float?
+  reasoning    String?  @db.Text
+  createdAt    DateTime @default(now())
+
+  @@index([orgId, createdAt])
+  @@index([groupId, createdAt])
+}

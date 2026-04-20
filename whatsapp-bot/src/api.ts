@@ -159,3 +159,69 @@ export async function postGroupLeave(params: {
     console.error("group-leave post failed:", res.status, await res.text());
   }
 }
+
+// ───────────────────── Smart-analysis endpoints ──────────────────────
+
+export interface AnalyzeInboundMessage {
+  waMessageId: string;
+  body: string;
+  authorPhone: string;
+  authorName: string | null;
+  timestamp: string; // ISO
+}
+
+export interface AnalyzeInboundHistory {
+  authorName: string | null;
+  body: string;
+  timestamp: string; // ISO
+}
+
+export interface AnalyzeResult {
+  waMessageId: string;
+  handledBy: "fast-path" | "llm" | "ignored" | "error" | "deduped";
+  intent: string | null;
+  react: string | null;
+  reply: string | null;
+  reasoning?: string;
+}
+
+export async function postAnalyze(params: {
+  groupId: string;
+  messages: AnalyzeInboundMessage[];
+  history?: AnalyzeInboundHistory[];
+}): Promise<AnalyzeResult[]> {
+  const res = await fetch(`${config.apiUrl}/api/whatsapp/analyze`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(params),
+  });
+  if (!res.ok) {
+    console.error("analyze post failed:", res.status, await res.text());
+    return [];
+  }
+  const json = (await res.json()) as { results?: AnalyzeResult[] };
+  return json.results ?? [];
+}
+
+/**
+ * Mark a message as handled by the regex fast-path (or intentionally
+ * ignored) so the periodic catch-up scan doesn't re-feed it to the LLM.
+ */
+export async function postMarkHandled(params: {
+  groupId: string;
+  waMessageId: string;
+  body: string;
+  authorPhone?: string;
+  handledBy: "fast-path" | "ignored";
+  action?: string;
+  intent?: string;
+}): Promise<void> {
+  const res = await fetch(`${config.apiUrl}/api/whatsapp/mark-handled`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(params),
+  });
+  if (!res.ok) {
+    console.error("mark-handled post failed:", res.status, await res.text());
+  }
+}

@@ -18,8 +18,7 @@ export function middleware(request: NextRequest) {
     pathname.startsWith("/r/") || // magic-link landing page does its own sign-in
     pathname.startsWith("/api/auth") ||
     pathname.startsWith("/api/cron") ||
-    pathname.startsWith("/api/whatsapp") ||
-    pathname.startsWith("/api/debug/")
+    pathname.startsWith("/api/whatsapp")
   ) {
     return NextResponse.next();
   }

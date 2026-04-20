@@ -1,4 +1,4 @@
-import { postAttendance, postScore } from "./api.js";
+import { postAttendance, postScore, postMarkHandled } from "./api.js";
 import { unknownPlayerMessage, errorMessage } from "./messages.js";
 
 /**
@@ -118,9 +118,20 @@ interface Message {
    *  arrive on the attendance list with a real display name instead of
    *  "(unnamed)". Optional because some wweb.js events don't expose it. */
   authorName?: string;
+  /** Stable WhatsApp message id, used to record "fast-path handled this"
+   *  so the LLM catch-up scanner doesn't re-process it. */
+  waMessageId?: string;
   reply: (text: string) => Promise<void>;
   react?: (emoji: string) => Promise<void>;
 }
+
+/**
+ * Whether the regex fast-path acted on a message. When false, the
+ * caller should forward the message to the smart-analysis pipeline.
+ */
+export type FastPathOutcome =
+  | { handled: true; action: string }
+  | { handled: false };
 
 let monitoredGroups = new Set<string>();
 
@@ -132,9 +143,9 @@ export function isMonitoredGroup(groupId: string): boolean {
   return monitoredGroups.has(groupId);
 }
 
-export async function handleMessage(msg: Message) {
-  if (!msg.from.endsWith("@g.us")) return;
-  if (!monitoredGroups.has(msg.from)) return;
+export async function handleMessage(msg: Message): Promise<FastPathOutcome> {
+  if (!msg.from.endsWith("@g.us")) return { handled: false };
+  if (!monitoredGroups.has(msg.from)) return { handled: false };
 
   const authorId = msg.author || msg.from;
 
@@ -143,7 +154,10 @@ export async function handleMessage(msg: Message) {
   // `<opaque>@lid` (Linked ID). `@lid` ids are NOT phone numbers —
   // they're opaque identifiers that hide the user's real phone. We
   // can't map them to our User.phoneNumber lookup, so bail silently.
-  if (!authorId.endsWith("@c.us")) return;
+  if (!authorId.endsWith("@c.us")) {
+    await markHandled(msg, "ignored", "non-c.us author");
+    return { handled: true, action: "ignored:non-c.us" };
+  }
 
   const phone = "+" + authorId.replace("@c.us", "");
 
@@ -163,25 +177,33 @@ export async function handleMessage(msg: Message) {
           });
           if (result.ok) {
             if (msg.react) await msg.react("👍");
-            return;
+            await markHandled(msg, "fast-path", "score-submit");
+            return { handled: true, action: "score" };
           }
-          if (result.error === "no_match") return;
+          if (result.error === "no_match") {
+            await markHandled(msg, "ignored", "no-match-for-score");
+            return { handled: true, action: "score:no-match" };
+          }
           if (result.error === "forbidden") {
             await msg.reply("Only players from that match or an admin can record the score.");
-            return;
+            await markHandled(msg, "fast-path", "score-forbidden");
+            return { handled: true, action: "score:forbidden" };
           }
-          if (result.error === "unknown_player") return; // silent
+          if (result.error === "unknown_player") {
+            await markHandled(msg, "ignored", "unknown-player-score");
+            return { handled: true, action: "score:unknown" };
+          }
         } catch (err) {
           console.error("Failed to post score:", err);
         }
-        return;
+        return { handled: true, action: "score:error" };
       }
     }
   }
 
   // 2) Attendance — IN / OUT detection.
   const action = extract(msg.body);
-  if (!action) return;
+  if (!action) return { handled: false }; // → escalate to smart analysis
 
   try {
     const result = await postAttendance(phone, action, msg.from, msg.authorName);
@@ -190,12 +212,14 @@ export async function handleMessage(msg: Message) {
     // someone whose first action is to leave.
     if (result.error === "unknown_player") {
       console.log(`unknown_player ${phone} — silent drop`);
-      return;
+      await markHandled(msg, "ignored", "unknown_player");
+      return { handled: true, action: "unknown-player" };
     }
 
     if (result.error) {
       console.log(`attendance error ${phone}: ${result.error}`);
-      return;
+      await markHandled(msg, "ignored", `attendance-error:${result.error}`);
+      return { handled: true, action: "attendance-error" };
     }
 
     if (msg.react) {
@@ -208,8 +232,29 @@ export async function handleMessage(msg: Message) {
         await msg.react("👋");
       }
     }
+    await markHandled(msg, "fast-path", `attendance:${action}`);
+    return { handled: true, action: `attendance:${action}` };
   } catch (err) {
     console.error("Error handling message:", err);
     // Quiet on unexpected errors too.
+    return { handled: true, action: "attendance:error" };
+  }
+}
+
+async function markHandled(msg: Message, handledBy: "fast-path" | "ignored", intent: string) {
+  if (!msg.waMessageId) return;
+  try {
+    const authorId = msg.author || msg.from;
+    const phone = authorId.endsWith("@c.us") ? authorId.replace("@c.us", "") : undefined;
+    await postMarkHandled({
+      groupId: msg.from,
+      waMessageId: msg.waMessageId,
+      body: msg.body,
+      authorPhone: phone,
+      handledBy,
+      intent,
+    });
+  } catch (err) {
+    console.error("markHandled failed:", err);
   }
 }

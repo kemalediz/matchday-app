@@ -11,6 +11,11 @@ import {
   postGroupLeave,
 } from "./api.js";
 import { backfillMessagesForGroups } from "./backfill.js";
+import {
+  analyzeSingleMessage,
+  catchUpAllGroups,
+  recordHistory,
+} from "./smart-analysis.js";
 import { config } from "./config.js";
 
 async function main() {
@@ -66,7 +71,31 @@ async function main() {
       // (or before it was enabled). Silent — no reactions, no replies.
       await backfillMessagesForGroups(client, orgConfigs);
 
+      // Fat LLM catch-up on startup — scan the last ~50 messages in each
+      // monitored group and feed anything the server hasn't seen through
+      // the smart analyser. Server dedupes by `waMessageId`, so this is
+      // safe to re-run.
+      try {
+        await catchUpAllGroups(
+          client,
+          orgConfigs.map((o: { groupId: string }) => o.groupId),
+          50,
+        );
+      } catch (err) {
+        console.error("startup catchUpAllGroups failed:", err);
+      }
+
       initScheduler(client, orgConfigs);
+
+      // Recurring catch-up tick — every 10 min, scan recent messages
+      // for anything inline processing missed (e.g. WebSocket hiccup).
+      setInterval(() => {
+        catchUpAllGroups(
+          client,
+          orgConfigs.map((o: { groupId: string }) => o.groupId),
+          30,
+        ).catch((err) => console.error("periodic catchUp failed:", err));
+      }, 10 * 60 * 1000);
     } catch (err) {
       console.error("Failed to fetch org configs:", err);
     }
@@ -95,11 +124,21 @@ async function main() {
         }
       }
 
-      await handleMessage({
+      // Record in the rolling history buffer so the smart analyser has
+      // context for nuanced messages even when the fast-path short-
+      // circuits.
+      recordHistory(msg.from, {
+        authorName: authorName ?? null,
+        body: msg.body ?? "",
+        timestamp: new Date((msg.timestamp ?? Date.now() / 1000) * 1000).toISOString(),
+      });
+
+      const outcome = await handleMessage({
         body: msg.body,
         from: msg.from,
         author: msg.author,
         authorName,
+        waMessageId: msg.id?._serialized,
         reply: async (text: string) => {
           const chat = await client.getChatById(msg.from);
           await chat.sendMessage(text);
@@ -112,6 +151,15 @@ async function main() {
           }
         },
       });
+
+      // Fast-path didn't act → send to the smart analyser inline.
+      if (!outcome.handled) {
+        try {
+          await analyzeSingleMessage(client, msg);
+        } catch (err) {
+          console.error("analyzeSingleMessage failed:", err);
+        }
+      }
     },
   );
 
