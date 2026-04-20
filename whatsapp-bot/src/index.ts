@@ -79,7 +79,7 @@ async function main() {
         await catchUpAllGroups(
           client,
           orgConfigs.map((o: { groupId: string }) => o.groupId),
-          50,
+          200,
         );
       } catch (err) {
         console.error("startup catchUpAllGroups failed:", err);

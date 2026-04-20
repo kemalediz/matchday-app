@@ -24,6 +24,39 @@ const HISTORY_PER_GROUP = 15;
 const CATCH_UP_LIMIT = 50;
 const MAX_MESSAGE_AGE_MS = 24 * 60 * 60 * 1000; // never analyse messages older than a day
 
+/**
+ * wweb.js's `chat.fetchMessages` fails intermittently on freshly-linked
+ * sessions with `Cannot read properties of undefined (reading
+ * 'waitForChatLoading')` — the WhatsApp Web DOM hasn't finished wiring
+ * up the chat pane yet. `sendSeen()` primes the view (it's a no-op if
+ * already primed) and a short delay is usually enough. Retry 3 times
+ * before giving up.
+ */
+async function fetchGroupMessagesWithRetry(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  chat: any,
+  limit: number,
+  attempts = 3,
+): Promise<Message[]> {
+  let lastErr: unknown = null;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      if (i > 0) {
+        try {
+          await chat.sendSeen();
+        } catch {
+          /* non-fatal */
+        }
+        await new Promise((r) => setTimeout(r, 1500 * (i + 1)));
+      }
+      return (await chat.fetchMessages({ limit })) as Message[];
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  throw lastErr;
+}
+
 /** Per-group rolling history buffer, newest last. In-memory; reset on bot restart. */
 const historyByGroup = new Map<string, AnalyzeInboundHistory[]>();
 
@@ -119,7 +152,7 @@ export async function catchUpScan(client: Client, groupId: string, limit = CATCH
   let msgs: Message[] = [];
   try {
     const chat = await client.getChatById(groupId);
-    msgs = await chat.fetchMessages({ limit });
+    msgs = await fetchGroupMessagesWithRetry(chat, limit);
   } catch (err) {
     console.error(`[smart] catchUpScan fetch failed for ${groupId}:`, err);
     return;
