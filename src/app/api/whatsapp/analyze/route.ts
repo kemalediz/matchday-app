@@ -46,6 +46,7 @@ import {
   type BatchInputMessage,
 } from "@/lib/message-analyzer";
 import { registerAttendance, cancelAttendance } from "@/lib/attendance";
+import { computeEloDeltas } from "@/lib/elo";
 
 interface InboundMessage {
   waMessageId: string;
@@ -187,6 +188,7 @@ export async function POST(request: Request) {
       const { react, reply } = await executeVerdict({
         verdict,
         user: sender.userId ? { id: sender.userId, name: sender.name } : null,
+        orgId: org.id,
       });
       await recordAnalysis({
         orgId: org.id,
@@ -283,16 +285,42 @@ async function resolveSender(orgId: string, msg: InboundMessage): Promise<Resolv
   return { userId: null, name: msg.authorName, phone: null };
 }
 
+/**
+ * Slot → emoji map for the bot's attendance reactions. Confirmed slots
+ * 1-10 get the corresponding keycap; 11+ fall back to ⚽ (WhatsApp
+ * reactions don't support multi-digit keycaps). Bench slots always get
+ * 🪑. OUT always gets 👋.
+ */
+const KEYCAP: Record<number, string> = {
+  1: "1️⃣",
+  2: "2️⃣",
+  3: "3️⃣",
+  4: "4️⃣",
+  5: "5️⃣",
+  6: "6️⃣",
+  7: "7️⃣",
+  8: "8️⃣",
+  9: "9️⃣",
+  10: "🔟",
+};
+
 async function executeVerdict(args: {
   verdict: AnalysisVerdict;
   user: { id: string; name: string | null } | null;
+  orgId: string;
 }): Promise<{ react: string | null; reply: string | null }> {
-  const { verdict, user } = args;
+  const { verdict, user, orgId } = args;
+  let finalReact = verdict.react;
+  const finalReply = verdict.reply;
 
+  // ── Attendance IN/OUT ────────────────────────────────────────────
+  //    When the verdict says to register, update attendance and then
+  //    compute the real slot emoji so the bot reacts with the correct
+  //    1️⃣–🔟 / 🪑 / 👋 instead of the generic 👍/👋 Claude emits.
   if (verdict.registerAttendance && user) {
     const matchForOrg = await db.match.findFirst({
       where: {
-        activity: { org: { memberships: { some: { userId: user.id } } } },
+        activity: { orgId },
         status: { in: ["UPCOMING", "TEAMS_GENERATED", "TEAMS_PUBLISHED"] },
         attendanceDeadline: { gt: new Date() },
       },
@@ -301,9 +329,28 @@ async function executeVerdict(args: {
     if (matchForOrg) {
       try {
         if (verdict.registerAttendance === "IN") {
-          await registerAttendance(user.id, matchForOrg.id);
+          const result = await registerAttendance(user.id, matchForOrg.id);
+          // `registerAttendance` returns { status, position } but position
+          // is the raw 1-based index of the insertion. Re-derive the slot
+          // within the bucket so the emoji matches what the player sees
+          // on the list (nth confirmed / nth bench).
+          const attendances = await db.attendance.findMany({
+            where: { matchId: matchForOrg.id, status: { in: ["CONFIRMED", "BENCH"] } },
+            orderBy: { position: "asc" },
+          });
+          const confirmed = attendances.filter((a) => a.status === "CONFIRMED");
+          const bench = attendances.filter((a) => a.status === "BENCH");
+          if (result.status === "CONFIRMED") {
+            const slot = confirmed.findIndex((a) => a.userId === user.id) + 1;
+            finalReact = KEYCAP[slot] ?? "⚽";
+          } else {
+            // BENCH
+            const slot = bench.findIndex((a) => a.userId === user.id) + 1;
+            finalReact = slot > 0 ? "🪑" : "🪑";
+          }
         } else {
           await cancelAttendance(user.id, matchForOrg.id);
+          finalReact = "👋";
         }
       } catch (err) {
         console.error("[analyze] attendance update failed:", err);
@@ -311,7 +358,85 @@ async function executeVerdict(args: {
     }
   }
 
-  return { react: verdict.react, reply: verdict.reply };
+  // ── Score submission ─────────────────────────────────────────────
+  //    LLM extracted scoreRed / scoreYellow. Match is identified the
+  //    same way /api/whatsapp/score does: most recent ended-but-unscored
+  //    match in the org. Authoriser check: confirmed participant OR
+  //    org admin (same as the existing score endpoint).
+  if (
+    verdict.intent === "score" &&
+    typeof verdict.scoreRed === "number" &&
+    typeof verdict.scoreYellow === "number"
+  ) {
+    try {
+      const now = new Date();
+      const candidates = await db.match.findMany({
+        where: {
+          activity: { orgId },
+          redScore: null,
+          yellowScore: null,
+          status: { in: ["TEAMS_PUBLISHED", "COMPLETED", "TEAMS_GENERATED"] },
+        },
+        include: {
+          activity: true,
+          teamAssignments: {
+            include: { user: { select: { matchRating: true } } },
+          },
+        },
+        orderBy: { date: "desc" },
+        take: 10,
+      });
+      const target = candidates.find((m) => {
+        const endedAt = new Date(m.date.getTime() + m.activity.matchDurationMins * 60 * 1000);
+        return endedAt <= now;
+      });
+      if (target && user) {
+        const attendance = await db.attendance.findUnique({
+          where: { matchId_userId: { matchId: target.id, userId: user.id } },
+        });
+        const membership = await db.membership.findUnique({
+          where: { userId_orgId: { userId: user.id, orgId } },
+        });
+        const isAdmin =
+          membership && (membership.role === "OWNER" || membership.role === "ADMIN");
+        const wasPlaying = attendance?.status === "CONFIRMED";
+        if (isAdmin || wasPlaying) {
+          await db.match.update({
+            where: { id: target.id },
+            data: {
+              redScore: verdict.scoreRed,
+              yellowScore: verdict.scoreYellow,
+              status: "COMPLETED",
+            },
+          });
+          try {
+            const eloInputs = target.teamAssignments.map((t) => ({
+              userId: t.userId,
+              team: t.team,
+              matchRating: t.user.matchRating,
+            }));
+            const deltas = computeEloDeltas(eloInputs, verdict.scoreRed, verdict.scoreYellow);
+            await db.$transaction(
+              deltas.map((d) =>
+                db.user.update({ where: { id: d.userId }, data: { matchRating: d.after } }),
+              ),
+            );
+          } catch (err) {
+            console.error("[analyze] Elo update after LLM score failed:", err);
+          }
+          finalReact = finalReact ?? "👍";
+        } else {
+          // Non-participant / non-admin tried to record a score — stay
+          // silent. Don't even react; the LLM reasoning gets logged.
+          finalReact = null;
+        }
+      }
+    } catch (err) {
+      console.error("[analyze] score processing failed:", err);
+    }
+  }
+
+  return { react: finalReact, reply: finalReply };
 }
 
 async function recordAnalysis(args: {

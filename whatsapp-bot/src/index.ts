@@ -1,7 +1,7 @@
 import pkg from "whatsapp-web.js";
 const { Client, LocalAuth } = pkg;
 import qrcode from "qrcode-terminal";
-import { handleMessage, setMonitoredGroups, isMonitoredGroup } from "./handlers.js";
+import { setMonitoredGroups, isMonitoredGroup } from "./handlers.js";
 import { initScheduler, stopScheduler } from "./scheduler.js";
 import {
   getEnabledOrgs,
@@ -10,7 +10,6 @@ import {
   postGroupJoin,
   postGroupLeave,
 } from "./api.js";
-import { backfillMessagesForGroups } from "./backfill.js";
 import {
   enqueueForAnalysis,
   recordHistory,
@@ -68,16 +67,13 @@ async function main() {
         console.log(`  - ${o.orgName} (${o.groupId})`),
       );
 
-      // Catch up on any IN/OUT messages posted while the bot was offline
-      // (or before it was enabled). Silent — no reactions, no replies.
-      await backfillMessagesForGroups(client, orgConfigs);
-
       initScheduler(client, orgConfigs);
 
-      // Start the batch-flush timer. Anything the regex fast-path
-      // doesn't handle gets buffered in-memory per group and flushed
-      // every 10 minutes (or immediately when the next match is within
-      // an hour of kickoff, or when the buffer hits MAX_BUFFER).
+      // Start the batch-flush timer. Every inbound group message is
+      // buffered in-memory and flushed every 10 min (or immediately
+      // when the next match is within an hour of kickoff), at which
+      // point the server-side analyser classifies the batch and the
+      // bot executes the returned reacts/replies.
       startBatchFlushTimer(
         client,
         orgConfigs.map((o: { groupId: string }) => o.groupId),
@@ -87,14 +83,21 @@ async function main() {
     }
   });
 
-  // Inbound group messages — IN/OUT detection.
-  client.on(
-    "message",
-    async (msg) => {
-      // WhatsApp pushname — the sender's self-set profile name. Useful
-      // for auto-enrolment when someone new types IN. wweb.js stashes it
-      // on `_data.notifyName`; fall back to the Contact resource if the
-      // raw field isn't populated (some platforms omit it on groups).
+  // Inbound group messages. EVERY message goes to the smart-analysis
+  // pipeline — no regex fast-path. Claude sees the batch every 10 min
+  // (or sooner if kickoff is within an hour) and decides intent:
+  // IN / OUT / score / replacement_request / conditional_in / question
+  // / noise / unclear. The server executes side effects (attendance,
+  // scoring, Elo, replies) and hands back the WhatsApp-side actions
+  // (react, reply) for the bot to perform.
+  client.on("message", async (msg) => {
+    try {
+      if (!msg.from?.endsWith("@g.us")) return;
+      if (!isMonitoredGroup(msg.from)) return;
+
+      // WhatsApp pushname — the sender's self-set profile name. Used
+      // for auto-enrolment on new phones and for name-based fallback
+      // when the sender is an @lid (opaque, no phone).
       let authorName: string | undefined;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const rawNotify = (msg as any)._data?.notifyName;
@@ -106,50 +109,22 @@ async function main() {
           const pn = contact.pushname || contact.name;
           if (pn && pn.trim()) authorName = pn.trim();
         } catch {
-          /* ignore — missing name just means server falls back to phone */
+          /* non-fatal — missing name just means server falls back to phone */
         }
       }
 
-      // Record in the rolling history buffer so the smart analyser has
-      // context for nuanced messages even when the fast-path short-
-      // circuits.
+      // Context buffer the analyser reads for nuanced classification.
       recordHistory(msg.from, {
         authorName: authorName ?? null,
         body: msg.body ?? "",
         timestamp: new Date((msg.timestamp ?? Date.now() / 1000) * 1000).toISOString(),
       });
 
-      const outcome = await handleMessage({
-        body: msg.body,
-        from: msg.from,
-        author: msg.author,
-        authorName,
-        waMessageId: msg.id?._serialized,
-        reply: async (text: string) => {
-          const chat = await client.getChatById(msg.from);
-          await chat.sendMessage(text);
-        },
-        react: async (emoji: string) => {
-          try {
-            await msg.react(emoji);
-          } catch (err) {
-            console.error("Failed to react:", err);
-          }
-        },
-      });
-
-      // Fast-path didn't act → queue the message for the next batch
-      // flush (every 10 min by default; immediate if kickoff < 1h or
-      // buffer full).
-      if (!outcome.handled) {
-        try {
-          await enqueueForAnalysis(client, msg);
-        } catch (err) {
-          console.error("enqueueForAnalysis failed:", err);
-        }
-      }
-    },
-  );
+      await enqueueForAnalysis(client, msg);
+    } catch (err) {
+      console.error("message handler failed:", err);
+    }
+  });
 
   // Reactions on any tracked message (bench-prompt 👍/👎). Forward to server
   // and let it decide the outcome.

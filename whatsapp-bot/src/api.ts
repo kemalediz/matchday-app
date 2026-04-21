@@ -224,25 +224,3 @@ export async function postAnalyzeFull(params: {
   };
 }
 
-/**
- * Mark a message as handled by the regex fast-path (or intentionally
- * ignored) so the periodic catch-up scan doesn't re-feed it to the LLM.
- */
-export async function postMarkHandled(params: {
-  groupId: string;
-  waMessageId: string;
-  body: string;
-  authorPhone?: string;
-  handledBy: "fast-path" | "ignored";
-  action?: string;
-  intent?: string;
-}): Promise<void> {
-  const res = await fetch(`${config.apiUrl}/api/whatsapp/mark-handled`, {
-    method: "POST",
-    headers,
-    body: JSON.stringify(params),
-  });
-  if (!res.ok) {
-    console.error("mark-handled post failed:", res.status, await res.text());
-  }
-}

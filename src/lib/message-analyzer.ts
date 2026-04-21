@@ -43,6 +43,7 @@ export type AnalysisIntent =
   | "replacement_request"
   | "conditional_in"
   | "question"
+  | "score"
   | "noise"
   | "unclear";
 
@@ -68,6 +69,10 @@ export interface AnalysisVerdict {
   react: string | null;
   reply: string | null;
   registerAttendance: "IN" | "OUT" | null;
+  /** Populated when intent = "score". `scoreRed` + `scoreYellow` correspond
+   *  to the two team labels of the match's sport (usually Red/Yellow). */
+  scoreRed: number | null;
+  scoreYellow: number | null;
   reasoning: string;
 }
 
@@ -77,43 +82,60 @@ export interface AnalysisBatchInput {
   history: BatchInputHistory[];
 }
 
-const SYSTEM_PROMPT = `You are MatchTime, a WhatsApp bot that helps manage a weekly amateur football match. Players in a group chat say things like "IN" or "I'll play" to register, and "out" / "can't make it" to drop. A regex fast-path already handles those obvious cases. Your job is to classify the *nuanced* messages the regex missed — apologies, conditional commitments, replacement requests, questions about the squad, and social noise.
+const SYSTEM_PROMPT = `You are MatchTime, a WhatsApp bot that helps run a weekly amateur match (typically football). You watch a group chat and classify every message. The bot executes your output directly, so be precise.
 
-You respond with JSON only — no markdown fences, no prose. Your output is executed by the bot directly.
-
-You will receive a BATCH of messages. Return a verdict for each one, keyed by its waMessageId. Messages are listed oldest-first.
+You respond with JSON only — no markdown fences, no prose. You receive a BATCH of messages and return a verdict for each, keyed by waMessageId. Messages are oldest-first.
 
 Output schema:
 {
   "verdicts": [
     {
       "waMessageId": "<string>",
-      "intent": "in" | "out" | "replacement_request" | "conditional_in" | "question" | "noise" | "unclear",
+      "intent": "in" | "out" | "replacement_request" | "conditional_in" | "question" | "score" | "noise" | "unclear",
       "confidence": 0..1,
       "react": "<emoji>" | null,
       "reply": "<text>" | null,
       "registerAttendance": "IN" | "OUT" | null,
+      "scoreRed": <number> | null,
+      "scoreYellow": <number> | null,
       "reasoning": "<short internal explanation>"
     }
   ]
 }
 
 Intent rules:
-- "in": Clearly joining the match. react: "👍". registerAttendance: "IN".
-- "out": Dropping without asking for cover. react: "👋". registerAttendance: "OUT".
-- "replacement_request": Dropping AND asking for a replacement. react: "👋", registerAttendance: "OUT", reply: short note asking the group to step in (personalise with the author's first name — e.g. "Sorry to hear, <name> — can anyone step in?"). Keep it 1 sentence.
-- "conditional_in": Tentative commitment ("in if my back holds up"). react: "🤔". registerAttendance: null (do NOT auto-register — admin will chase). reply: null.
-- "question": Asking about squad numbers, venue, timing, or match state. registerAttendance: null. react: null. reply: a short, accurate answer grounded in the provided match context — e.g. "We're 13/14 ✅ — need 1 more", or "Tomorrow 21:30 at <venue>". Use null reply if the answer isn't in context.
-- "noise": Social chat, jokes, recipe pranks, photos, links, tangential banter. Everything null.
-- "unclear": You genuinely can't tell. Everything null — bot stays silent.
+- "in": Clearly joining the match ("IN", "I'm in", "count me in", "I'll play", "yes playing").
+  → registerAttendance: "IN". react: "👍" (the bot may override with a slot-number emoji 1️⃣–🔟 / 🪑 / ⚽ — that's fine).
+- "out": Dropping out without asking for cover ("OUT", "can't make it", "not playing tonight", "sorry guys, work").
+  → registerAttendance: "OUT". react: "👋".
+- "replacement_request": Player asks the group to find cover because they're unwell, running late, or otherwise compromised. Two flavours:
+  (a) Definite drop ("I'm out, ankle sore, can anyone step in?"). registerAttendance: "OUT". react: "👋".
+  (b) Tentative ("anyone else who can replace me too? If not I'll still join", "feeling unwell, will play if nobody steps in"). registerAttendance: null (do NOT flip — they're still committed as a backstop). react: "🤔".
+  Both emit a reply: one sentence asking the group to step in, personalised with the author's first name and, for (b), acknowledging they'll still play if nobody takes it (e.g. "Ehtisham's not feeling 100% — can anyone step in? Otherwise he'll still play.").
+- "conditional_in": Tentative commitment ("in if my back holds up", "probably, will confirm later", "maybe").
+  → registerAttendance: null (do NOT register; admin will chase). react: "🤔". reply: null.
+- "question": Asking about squad numbers, venue, kickoff time, who's in, match state ("do we have enough?", "where tonight?", "who's playing?").
+  → registerAttendance: null. react: null. reply: a short accurate answer grounded in the Match Context block (e.g. "We're 13/14 ✅ — need 1 more", "Tonight 21:30 at <venue>"). If the answer isn't in context, reply: null.
+- "score": A final match result like "7-3", "Final 5:2", "we won 4-2" posted after the game.
+  → Populate scoreRed + scoreYellow with the two numbers. Order: if the message explicitly names the team labels, align accordingly; otherwise emit the numbers in the order they appear in the message. react: "👍". registerAttendance: null.
+- "noise": Social chat, jokes, memes, photos, links, tangential banter, off-topic questions (recipe links, memes, sports trivia).
+  → Everything null.
+- "unclear": Genuinely can't tell. Everything null — bot stays silent.
 
-State collapse: if the SAME author has multiple messages in this batch, treat the LATEST one as their authoritative state. Emit verdicts for all their messages, but only the latest gets attendance side-effects; earlier ones in the same batch should have registerAttendance=null (react/reply can still happen).
+CHASE behaviour (important):
+- When someone drops (intent "out" or "replacement_request") AND the resulting squad is short (confirmed < maxPlayers per the Match Context), you should nudge the group. "replacement_request" already does this; for a bare "out" that leaves the squad short, still emit a chase reply on THAT verdict — one sentence asking if anyone's free — unless another message in this same batch already asked.
+- If someone in the batch stepped in to cover (intent "in" after a recent drop), you've got it covered — do NOT emit another chase reply.
+- Don't chase on every single "out" — only when the squad actually goes below full after that drop.
 
-De-duplicate replies: if several players ask the same squad question in this batch, emit a reply on at most ONE verdict — set reply: null on the others.
+State collapse (when SAME author has multiple messages in the batch):
+- Only the LATEST message gets the attendance side-effect. Earlier messages from the same author get registerAttendance: null (react/reply can still happen for those).
+- Example: "IN if back holds up" at 18:00 → "actually OUT" at 18:03 in the same batch → verdict for 18:00 is conditional_in with no attendance; verdict for 18:03 is out with registerAttendance: OUT.
 
-Confidence: be honest. If below 0.7 for anything non-noise, downgrade to "unclear" with everything null. Better silent than wrong.
+De-duplicate replies: if multiple people ask the same squad question in this batch, reply on at most ONE verdict. Set reply: null on the others.
 
-Reply tone: WhatsApp casual, one-line, no corporate fluff. Never invent facts — if the question needs info outside the context, set reply: null.`;
+Confidence: be honest. If below 0.7 for anything except "noise", downgrade the verdict to "unclear" with everything null. Better silent than wrong.
+
+Reply tone: WhatsApp casual, one-line, no corporate fluff. Match the group's energy. Never invent facts — if the answer needs info outside the Match Context block, reply: null.`;
 
 function buildMatchContextBlock(args: {
   orgName: string;
@@ -281,6 +303,8 @@ function offlineVerdict(waMessageId: string, reason: string): AnalysisVerdict {
     react: null,
     reply: null,
     registerAttendance: null,
+    scoreRed: null,
+    scoreYellow: null,
     reasoning: reason,
   };
 }
@@ -330,6 +354,7 @@ function normaliseVerdict(waMessageId: string, raw: Record<string, unknown>): An
     "replacement_request",
     "conditional_in",
     "question",
+    "score",
     "noise",
     "unclear",
   ];
@@ -347,6 +372,14 @@ function normaliseVerdict(waMessageId: string, raw: Record<string, unknown>): An
     raw.registerAttendance === "IN" || raw.registerAttendance === "OUT"
       ? raw.registerAttendance
       : null;
+  const scoreRed =
+    typeof raw.scoreRed === "number" && Number.isFinite(raw.scoreRed) && raw.scoreRed >= 0
+      ? Math.min(99, Math.round(raw.scoreRed))
+      : null;
+  const scoreYellow =
+    typeof raw.scoreYellow === "number" && Number.isFinite(raw.scoreYellow) && raw.scoreYellow >= 0
+      ? Math.min(99, Math.round(raw.scoreYellow))
+      : null;
   const reasoning = typeof raw.reasoning === "string" ? raw.reasoning : "";
 
   // Low-confidence downgrade: wipe all actions so the bot stays silent.
@@ -358,11 +391,23 @@ function normaliseVerdict(waMessageId: string, raw: Record<string, unknown>): An
       react: null,
       reply: null,
       registerAttendance: null,
+      scoreRed: null,
+      scoreYellow: null,
       reasoning: `[low-confidence downgrade] ${reasoning}`,
     };
   }
 
-  return { waMessageId, intent, confidence, react, reply, registerAttendance, reasoning };
+  return {
+    waMessageId,
+    intent,
+    confidence,
+    react,
+    reply,
+    registerAttendance,
+    scoreRed,
+    scoreYellow,
+    reasoning,
+  };
 }
 
 // ─── Back-compat shim ─────────────────────────────────────────────────
@@ -376,6 +421,8 @@ export interface AnalysisResult {
   react: string | null;
   reply: string | null;
   registerAttendance: "IN" | "OUT" | null;
+  scoreRed: number | null;
+  scoreYellow: number | null;
   reasoning: string;
 }
 
@@ -414,6 +461,8 @@ export async function analyzeMessage(input: AnalysisInput): Promise<AnalysisResu
     react: v.react,
     reply: v.reply,
     registerAttendance: v.registerAttendance,
+    scoreRed: v.scoreRed,
+    scoreYellow: v.scoreYellow,
     reasoning: v.reasoning,
   };
 }
