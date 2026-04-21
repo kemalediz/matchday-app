@@ -488,7 +488,64 @@ async function computeForMatch(
     }
   }
 
+  // ── 4c. Replacement chase cadence ─────────────────────────────────────
+  //       When the squad is short and kickoff is approaching, post a
+  //       fresh chase message at two more points so the "step in?"
+  //       ask doesn't go stale. Each chase has its own idempotency key.
+  //       Chases run on UPCOMING matches only; once the squad is full
+  //       again they naturally stop firing.
+  {
+    const short = confirmed.length < maxPlayers;
+    const need = maxPlayers - confirmed.length;
+    const inLive = m.status === "UPCOMING" || m.status === "TEAMS_GENERATED" || m.status === "TEAMS_PUBLISHED";
+
+    // Chase A: morning of match day, 8-9am London.
+    {
+      const dayKey = londonDateKey(now);
+      const matchDayKey = londonDateKey(m.date);
+      const isMatchDay = dayKey === matchDayKey;
+      const hour = londonHour(now);
+      const inMorningWindow = hour >= 8 && hour < 9;
+      const key = `${matchId}:chase-match-day-morning:${dayKey}`;
+      if (
+        !sentKeys.has(key) &&
+        short &&
+        inLive &&
+        isMatchDay &&
+        inMorningWindow
+      ) {
+        out.push({
+          kind: "group-message",
+          key,
+          matchId,
+          text: `☀️ Morning all — still *${need} short* for tonight's *${activity.name}*. Any takers? 👀`,
+        });
+      }
+    }
+
+    // Chase B: 3-4h before kickoff.
+    {
+      const key = `${matchId}:chase-pre-kickoff`;
+      if (
+        !sentKeys.has(key) &&
+        short &&
+        inLive &&
+        hoursUntilMatch <= 4 &&
+        hoursUntilMatch >= 3
+      ) {
+        out.push({
+          kind: "group-message",
+          key,
+          matchId,
+          text: `⏳ Still *${need} short* for *${activity.name}* at ${format(m.date, "HH:mm")}. Anyone free tonight?`,
+        });
+      }
+    }
+  }
+
   // ── 5. 2h before kickoff ──────────────────────────────────────────────
+  //       Gentle status post. When the squad is short we add a "still
+  //       need X" line so it doubles as a final chase.
   {
     const key = `${matchId}:pre-kickoff`;
     if (
@@ -497,11 +554,37 @@ async function computeForMatch(
       hoursUntilMatch > 0.5 &&
       (m.status === "TEAMS_PUBLISHED" || m.status === "TEAMS_GENERATED" || m.status === "UPCOMING")
     ) {
+      const need = maxPlayers - confirmed.length;
+      const base = `⏰ Tonight *${format(m.date, "HH:mm")}* at *${activity.venue}* · ${confirmed.length}/${maxPlayers}`;
+      const text =
+        need > 0
+          ? `${base} — *still need ${need}*, last chance to jump in. 🙏`
+          : `${base}. See you there.`;
+      out.push({ kind: "group-message", key, matchId, text });
+    }
+  }
+
+  // ── 5a. Football gear reminder ────────────────────────────────────────
+  //       Football-only. 2h before kickoff, post a one-off reminder to
+  //       bring goalie gloves + a ball so nobody shows up empty-handed.
+  //       Detection: we match on the sport name starting with "football"
+  //       so this covers 5-a-side, 7-a-side, 11-a-side etc. — but not
+  //       Basketball / other sports.
+  {
+    const key = `${matchId}:football-gear-reminder`;
+    const isFootball = sport.name.trim().toLowerCase().startsWith("football");
+    if (
+      !sentKeys.has(key) &&
+      isFootball &&
+      hoursUntilMatch <= 2 &&
+      hoursUntilMatch >= 1.5 &&
+      (m.status === "UPCOMING" || m.status === "TEAMS_GENERATED" || m.status === "TEAMS_PUBLISHED")
+    ) {
       out.push({
         kind: "group-message",
         key,
         matchId,
-        text: `⏰ Tonight *${format(m.date, "HH:mm")}* at *${activity.venue}* · ${confirmed.length} confirmed. See you there.`,
+        text: `⚽ Quick reminder — if you've got them, please bring your *goalie gloves* and a *ball* tonight. See you at ${activity.venue}!`,
       });
     }
   }
