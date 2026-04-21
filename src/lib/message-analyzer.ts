@@ -44,6 +44,7 @@ export type AnalysisIntent =
   | "conditional_in"
   | "question"
   | "score"
+  | "generate_teams_request"
   | "noise"
   | "unclear";
 
@@ -73,6 +74,12 @@ export interface AnalysisVerdict {
    *  to the two team labels of the match's sport (usually Red/Yellow). */
   scoreRed: number | null;
   scoreYellow: number | null;
+  /** Populated when intent = "generate_teams_request" — player names the
+   *  author wants flipped from DROPPED/BENCH back to CONFIRMED before
+   *  balancing (e.g. "generate the teams and consider Ibrahim and
+   *  Ehtisham as IN"). Server resolves names against the current match
+   *  roster; unmatched names are ignored. */
+  includeNames: string[] | null;
   reasoning: string;
 }
 
@@ -91,13 +98,14 @@ Output schema:
   "verdicts": [
     {
       "waMessageId": "<string>",
-      "intent": "in" | "out" | "replacement_request" | "conditional_in" | "question" | "score" | "noise" | "unclear",
+      "intent": "in" | "out" | "replacement_request" | "conditional_in" | "question" | "score" | "generate_teams_request" | "noise" | "unclear",
       "confidence": 0..1,
       "react": "<emoji>" | null,
       "reply": "<text>" | null,
       "registerAttendance": "IN" | "OUT" | null,
       "scoreRed": <number> | null,
       "scoreYellow": <number> | null,
+      "includeNames": [<string>, ...] | null,
       "reasoning": "<short internal explanation>"
     }
   ]
@@ -118,6 +126,13 @@ Intent rules:
   → registerAttendance: null. react: null. reply: a short accurate answer grounded in the Match Context block (e.g. "We're 13/14 ✅ — need 1 more", "Tonight 21:30 at <venue>"). If the answer isn't in context, reply: null.
 - "score": A final match result like "7-3", "Final 5:2", "we won 4-2" posted after the game.
   → Populate scoreRed + scoreYellow with the two numbers. Order: if the message explicitly names the team labels, align accordingly; otherwise emit the numbers in the order they appear in the message. react: "👍". registerAttendance: null.
+- "generate_teams_request": Someone asks the bot to set up / balance / post the teams for the next match ("generate teams", "@M Time teams please", "let's see the teams", "split us up", "balance the teams"). The request may optionally include overrides like "consider Ibrahim and Ehtisham as IN" / "include X and Y" / "treat Z as confirmed".
+  → react: "⚽". registerAttendance: null. reply: null — the SERVER runs the balancer and replaces reply with the formatted Red/Yellow lineup. Do NOT invent teams yourself.
+  → If the message names players to include (force-add), extract those names (first-name-only is fine) into includeNames. Examples:
+     "@M Time generate teams and consider Ibrahim and Ehtisham as IN"  → includeNames: ["Ibrahim", "Ehtisham"]
+     "teams please, count Baki in"                                     → includeNames: ["Baki"]
+     "generate teams"                                                   → includeNames: []
+  → Only classify as this intent if the request is CLEAR. If the person is just wondering who'd be on which team ("who'd be in red?"), that's "question", not this.
 - "noise": Social chat, jokes, memes, photos, links, tangential banter, off-topic questions (recipe links, memes, sports trivia).
   → Everything null.
 - "unclear": Genuinely can't tell. Everything null — bot stays silent.
@@ -613,6 +628,7 @@ function offlineVerdict(waMessageId: string, reason: string): AnalysisVerdict {
     registerAttendance: null,
     scoreRed: null,
     scoreYellow: null,
+    includeNames: null,
     reasoning: reason,
   };
 }
@@ -663,6 +679,7 @@ function normaliseVerdict(waMessageId: string, raw: Record<string, unknown>): An
     "conditional_in",
     "question",
     "score",
+    "generate_teams_request",
     "noise",
     "unclear",
   ];
@@ -688,6 +705,12 @@ function normaliseVerdict(waMessageId: string, raw: Record<string, unknown>): An
     typeof raw.scoreYellow === "number" && Number.isFinite(raw.scoreYellow) && raw.scoreYellow >= 0
       ? Math.min(99, Math.round(raw.scoreYellow))
       : null;
+  const includeNames =
+    Array.isArray(raw.includeNames)
+      ? (raw.includeNames as unknown[])
+          .filter((n): n is string => typeof n === "string" && n.trim().length > 0)
+          .map((n) => n.trim())
+      : null;
   const reasoning = typeof raw.reasoning === "string" ? raw.reasoning : "";
 
   // Low-confidence downgrade: wipe all actions so the bot stays silent.
@@ -701,6 +724,7 @@ function normaliseVerdict(waMessageId: string, raw: Record<string, unknown>): An
       registerAttendance: null,
       scoreRed: null,
       scoreYellow: null,
+      includeNames: null,
       reasoning: `[low-confidence downgrade] ${reasoning}`,
     };
   }
@@ -714,6 +738,7 @@ function normaliseVerdict(waMessageId: string, raw: Record<string, unknown>): An
     registerAttendance,
     scoreRed,
     scoreYellow,
+    includeNames,
     reasoning,
   };
 }
@@ -731,6 +756,7 @@ export interface AnalysisResult {
   registerAttendance: "IN" | "OUT" | null;
   scoreRed: number | null;
   scoreYellow: number | null;
+  includeNames: string[] | null;
   reasoning: string;
 }
 
@@ -771,6 +797,7 @@ export async function analyzeMessage(input: AnalysisInput): Promise<AnalysisResu
     registerAttendance: v.registerAttendance,
     scoreRed: v.scoreRed,
     scoreYellow: v.scoreYellow,
+    includeNames: v.includeNames,
     reasoning: v.reasoning,
   };
 }

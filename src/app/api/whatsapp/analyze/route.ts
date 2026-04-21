@@ -47,6 +47,7 @@ import {
 } from "@/lib/message-analyzer";
 import { registerAttendance, cancelAttendance } from "@/lib/attendance";
 import { computeEloDeltas } from "@/lib/elo";
+import { generateTeamsForMatch } from "@/lib/team-generation";
 
 interface InboundMessage {
   waMessageId: string;
@@ -311,7 +312,7 @@ async function executeVerdict(args: {
 }): Promise<{ react: string | null; reply: string | null }> {
   const { verdict, user, orgId } = args;
   let finalReact = verdict.react;
-  const finalReply = verdict.reply;
+  let finalReply = verdict.reply;
 
   // ── Attendance IN/OUT ────────────────────────────────────────────
   //    When the verdict says to register, update attendance and then
@@ -433,6 +434,80 @@ async function executeVerdict(args: {
       }
     } catch (err) {
       console.error("[analyze] score processing failed:", err);
+    }
+  }
+
+  // ── Generate-teams request ───────────────────────────────────────
+  //    Someone asked the bot to balance + post the teams. Optionally
+  //    with "consider Ibrahim + Ehtisham as IN" overrides, which we
+  //    honour by flipping those players from DROPPED/BENCH to
+  //    CONFIRMED before calling the balancer. Server generates the
+  //    reply text from the actual balancer output — Claude's `reply`
+  //    field (if any) is overridden.
+  if (verdict.intent === "generate_teams_request") {
+    try {
+      const match = await db.match.findFirst({
+        where: {
+          activity: { orgId },
+          status: { in: ["UPCOMING", "TEAMS_GENERATED", "TEAMS_PUBLISHED"] },
+          attendanceDeadline: { gt: new Date(Date.now() - 24 * 60 * 60 * 1000) },
+        },
+        orderBy: { date: "asc" },
+      });
+      if (!match) {
+        finalReply = "No match lined up to build teams for.";
+        finalReact = "🤔";
+      } else {
+        // Force-include players named in the message.
+        const includedLog: string[] = [];
+        const unmatchedLog: string[] = [];
+        if (verdict.includeNames && verdict.includeNames.length > 0) {
+          const roster = await db.attendance.findMany({
+            where: { matchId: match.id },
+            include: { user: { select: { id: true, name: true } } },
+          });
+          const norm = (s: string) =>
+            s.trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+          for (const rawName of verdict.includeNames) {
+            const target = roster.find((a) => {
+              if (!a.user.name) return false;
+              const u = norm(a.user.name);
+              const q = norm(rawName);
+              return u === q || u.startsWith(`${q} `) || u.split(" ")[0] === q;
+            });
+            if (!target) {
+              unmatchedLog.push(rawName);
+              continue;
+            }
+            if (target.status !== "CONFIRMED") {
+              await db.attendance.update({
+                where: { id: target.id },
+                data: { status: "CONFIRMED" },
+              });
+            }
+            includedLog.push(target.user.name ?? rawName);
+          }
+        }
+
+        const result = await generateTeamsForMatch(match.id);
+        if (result.ok) {
+          let text = result.groupPost;
+          if (includedLog.length > 0) {
+            text = `_Including ${includedLog.join(", ")} as CONFIRMED per the request._\n\n${text}`;
+          }
+          if (unmatchedLog.length > 0) {
+            text += `\n\n_(couldn't find ${unmatchedLog.join(", ")} in the roster — ignored)_`;
+          }
+          finalReply = text;
+          finalReact = "⚽";
+        } else {
+          finalReply = `Can't build teams right now — ${result.reason}.`;
+          finalReact = "🤔";
+        }
+      }
+    } catch (err) {
+      console.error("[analyze] generate_teams_request failed:", err);
+      finalReply = null;
     }
   }
 

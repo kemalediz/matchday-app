@@ -387,37 +387,13 @@ async function computeForMatch(
     });
   }
 
-  // ── 4. Morning-of-match teams post ────────────────────────────────────
-  {
-    const key = `${matchId}:teams-morning`;
-    const matchDateKey = londonDateKey(m.date);
-    const todayKey = londonDateKey(now);
-    const isMatchDay = todayKey === matchDateKey;
-    const morning = londonHour(now) >= 8 && londonHour(now) < 11;
-    if (
-      !sentKeys.has(key) &&
-      isMatchDay &&
-      morning &&
-      (m.status === "TEAMS_GENERATED" || m.status === "TEAMS_PUBLISHED") &&
-      m.teamAssignments.length > 0
-    ) {
-      const [redLabel, yellowLabel] = sport.teamLabels as [string, string];
-      const red = m.teamAssignments.filter((t) => t.team === "RED");
-      const yellow = m.teamAssignments.filter((t) => t.team === "YELLOW");
-      const listFor = (arr: typeof red) =>
-        arr.map((t, i) => `${i + 1}. ${t.user.name ?? "(unnamed)"}`).join("\n");
-      out.push({
-        kind: "group-message",
-        key,
-        matchId,
-        text:
-          `⚽ *Teams for tonight*\n\n` +
-          `*${redLabel}*:\n${listFor(red)}\n\n` +
-          `*${yellowLabel}*:\n${listFor(yellow)}\n\n` +
-          `Objections? Reply \`swap X Y\` — admin will confirm.`,
-      });
-    }
-  }
+  // ── 4. Teams post ────────────────────────────────────────────────────
+  //     The old match-day-morning teams post was removed on 2026-04-21.
+  //     Teams are now generated + posted on demand when someone in the
+  //     group asks ("@M Time generate teams"). The LLM classifies the
+  //     request as `generate_teams_request` and the analyze route runs
+  //     the balancer and posts the lineup. This removes the 8-11am time
+  //     gate so admins can trigger whenever it's right for the day.
 
   // ── 4b. Day-before DM nudges to the org OWNER ────────────────────────
   //       Two triggers, both on the day before the match in London time:
