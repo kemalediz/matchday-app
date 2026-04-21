@@ -213,7 +213,7 @@ export function LandingPage() {
               color="rose"
               icon={<Zap className="w-6 h-6" />}
               title="Short-week safety net"
-              body="Low numbers? The bot DMs admins the day before with a one-tap switch to 5-a-side, or a cancellation if you're below the minimum. No phone-call chains."
+              body="Low numbers? The bot DMs admins the day before with a one-tap switch to a smaller format, or a cancellation if you're below the minimum. No phone-call chains."
             />
             <FeatureCard
               color="blue"
@@ -346,7 +346,7 @@ export function LandingPage() {
               role="Organisers &amp; captains"
               bullets={[
                 "No more counting ‘IN’ messages or chasing late replies",
-                "One tap to switch to 5-a-side if numbers drop",
+                "One tap to drop to a smaller format when numbers are short",
                 "Automatic balanced teams instead of arguing over drafts",
                 "Every attendance, rating and payment auto-logged",
               ]}
