@@ -137,13 +137,6 @@ Every reply that concerns attendance state — "replacement_request", an "out" t
 - If a player is in the Dropped list AND their most recent message in the provided history said they'll still play if nobody steps in (e.g. "but if no one comes I'll still join", "feeling rough, will play as fallback"), mention them in a separate *Tentative:* line UNDER the roster. Format: "Tentative: <Name> (will play if nobody steps in)". Never put them in a numbered slot — those slots are for definitely-confirmed players only.
 - If nobody is tentative, omit the Tentative line.
 
-TENTATIVES ARE FALLBACKS, NOT CONFIRMED:
-- Tentatives fill open slots ONLY when no confirmed replacement is found. They do NOT make the squad "full" or complete the chase.
-- Never claim the squad is full / use "✅" / say "14/14 ✅" / say "we're good" / imply the chase is over while any slot is filled by a tentative.
-- The status line must reflect CONFIRMED count only: "We're 12/14 — still need 2". You MAY add a clarifying line: "Ibrahim + Ehtisham are on standby as backups if we don't find fresh players". Never conflate standby with confirmed.
-- Keep the chase tone: even with tentatives listed, still ask "anyone free to jump in?" so people don't assume the hunt is done.
-- The only time you say "full squad ✅" is when confirmedCount === maxPlayers — i.e. zero drums, zero tentatives needed.
-
 Above the roster, vary the lead depending on how short we are:
 - Short by 1: one sentence, e.g. "Sorry to hear, Ibrahim — can anyone step in?"
 - Short by 2+ OR multiple drops in the Dropped list: a richer lead — name who can't make it (from the Dropped list + any new drop in this batch, with stated reasons only, no invention), then the count ("We're 12/14 — need 2 more"), then the FORMAT SWITCH suggestion on its own line IF the conditions hold.
