@@ -619,7 +619,7 @@ async function computeForMatch(
         matchId,
         text:
           `🏁 *${activity.name}* — hope it was a good one. What was the final score? ` +
-          `I'll use it to update everyone's rating for next week (margin of victory counts — a 7–3 shifts more than 5–4).`,
+          `I'll use it to update everyone's rating for next week.`,
       });
     }
   }
@@ -643,44 +643,61 @@ async function computeForMatch(
       }
     }
 
-    // 6b. Magic-link DM per confirmed player (initial send)
-    for (const a of confirmed) {
-      if (!a.user.phoneNumber) continue;
-      const key = `${matchId}:rate-dm:${a.userId}`;
-      if (sentKeys.has(key)) continue;
-      const token = signMagicLinkToken({
-        userId: a.userId,
-        purpose: "rate-match",
-        matchId,
-        ttlSeconds: MAGIC_LINK_TTL.rateMatch,
-      });
-      out.push({
-        kind: "dm",
-        key,
-        matchId,
-        targetUser: a.userId,
-        phone: a.user.phoneNumber.replace(/^\+/, ""),
-        text:
-          `🏆 *${activity.name}* — ${format(m.date, "EEE d MMM")}\n\n` +
-          `Rate your teammates and pick ${sport.mvpLabel}. Takes ~1 minute.\n\n` +
-          `Your personal link:\n${buildMagicLinkUrl(token)}\n\n` +
-          `Link expires in 5 days.`,
-      });
-    }
-
-    // 6c. Single group promo message once the DMs have been queued
+    // 6b + 6c. Rating DMs + group promo — HOLD until 08:00–09:00 London
+    //          the morning AFTER match day. Previously these fired the
+    //          moment the match flipped to COMPLETED, which for a
+    //          21:30 kickoff meant midnight DMs — players asleep, worst
+    //          possible time to ask for a rating. Now we wait for a
+    //          civilised hour the next morning. Idempotency keys unchanged
+    //          so this is a one-time shift, not a retroactive resend.
     {
-      const key = `${matchId}:rate-promo`;
-      if (!sentKeys.has(key) && confirmed.some((a) => a.user.phoneNumber)) {
-        out.push({
-          kind: "group-message",
-          key,
-          matchId,
-          text:
-            `🎯 I've DM'd every player from tonight with a personal rating link. ` +
-            `The more ratings we get, the better-balanced the teams get next week. ` +
-            `Check your DMs from me 👇`,
-        });
+      const matchDayKey = londonDateKey(m.date);
+      const todayKey = londonDateKey(now);
+      const hourNow = londonHour(now);
+      const isMorningAfter =
+        todayKey !== matchDayKey &&
+        hoursSinceMatch >= 6 &&
+        hoursSinceMatch <= 36 &&
+        hourNow >= 8 &&
+        hourNow < 9;
+
+      if (isMorningAfter) {
+        for (const a of confirmed) {
+          if (!a.user.phoneNumber) continue;
+          const key = `${matchId}:rate-dm:${a.userId}`;
+          if (sentKeys.has(key)) continue;
+          const token = signMagicLinkToken({
+            userId: a.userId,
+            purpose: "rate-match",
+            matchId,
+            ttlSeconds: MAGIC_LINK_TTL.rateMatch,
+          });
+          out.push({
+            kind: "dm",
+            key,
+            matchId,
+            targetUser: a.userId,
+            phone: a.user.phoneNumber.replace(/^\+/, ""),
+            text:
+              `🏆 *${activity.name}* — ${format(m.date, "EEE d MMM")}\n\n` +
+              `Rate your teammates and pick ${sport.mvpLabel}. Takes ~1 minute.\n\n` +
+              `Your personal link:\n${buildMagicLinkUrl(token)}\n\n` +
+              `Link expires in 5 days.`,
+          });
+        }
+
+        const promoKey = `${matchId}:rate-promo`;
+        if (!sentKeys.has(promoKey) && confirmed.some((a) => a.user.phoneNumber)) {
+          out.push({
+            kind: "group-message",
+            key: promoKey,
+            matchId,
+            text:
+              `🎯 Morning all — just DM'd every player from last night's *${activity.name}* ` +
+              `a personal rating link. The more ratings we get, the better-balanced the ` +
+              `teams get next week. Check your DMs from me 👇`,
+          });
+        }
       }
     }
 
