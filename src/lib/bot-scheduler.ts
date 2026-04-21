@@ -624,24 +624,39 @@ async function computeForMatch(
     }
   }
 
-  // ── 6. Match-end: payment poll + magic-link DMs + promo message ──────
-  //       Gated by postMatchEndFlow. For the first match after launch
-  //       we set this false because the rating UI is still being built.
-  if (m.status === "COMPLETED" && m.postMatchEndFlow !== false) {
-    // 6a. Payment poll
-    {
-      const key = `${matchId}:payment-poll`;
-      if (!sentKeys.has(key)) {
-        const [redLabel, yellowLabel] = sport.teamLabels as [string, string];
-        out.push({
-          kind: "group-poll",
-          key,
-          matchId,
-          question: `💳 Payments for *${activity.name}* — tick when you've paid`,
-          options: [redLabel, yellowLabel],
-        });
-      }
+  // ── 6a. Payment poll — fires as soon as the match ENDS (kickoff +
+  //        duration), regardless of whether the score is recorded yet.
+  //        Players pay right after the final whistle on the pitch, so
+  //        the poll needs to be waiting in the group by the time they
+  //        check their phones — not hours later when the score trickles
+  //        in. Gated by postMatchEndFlow so first-match-after-launch
+  //        can opt out while things stabilise.
+  if (m.postMatchEndFlow !== false) {
+    const endedAt = new Date(m.date.getTime() + activity.matchDurationMins * 60 * 1000);
+    const key = `${matchId}:payment-poll`;
+    if (
+      !sentKeys.has(key) &&
+      now >= endedAt &&
+      (m.status === "UPCOMING" ||
+        m.status === "TEAMS_GENERATED" ||
+        m.status === "TEAMS_PUBLISHED" ||
+        m.status === "COMPLETED")
+    ) {
+      const [redLabel, yellowLabel] = sport.teamLabels as [string, string];
+      out.push({
+        kind: "group-poll",
+        key,
+        matchId,
+        question: `💳 Payments for *${activity.name}* — tick when you've paid`,
+        options: [redLabel, yellowLabel],
+      });
     }
+  }
+
+  // ── 6b/c/d/e below are gated on COMPLETED because they concern the
+  //    outcome of the match (rating DMs, MoM announcement). Payment
+  //    above is gated on *ended*, which is earlier.
+  if (m.status === "COMPLETED" && m.postMatchEndFlow !== false) {
 
     // 6b + 6c. Rating DMs + group promo — HOLD until 08:00–09:00 London
     //          the morning AFTER match day. Previously these fired the
