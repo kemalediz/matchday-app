@@ -1,12 +1,25 @@
 import type { Metadata } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
+import { Inter, Plus_Jakarta_Sans, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import { Providers } from "@/components/providers";
 import { AppShell } from "@/components/layout/app-shell";
 
-const geistSans = Geist({
+// Inter for body copy — tightly hinted, great on every device at every
+// size. `--font-geist-sans` kept as the CSS variable name so we don't
+// have to touch every consumer; it just resolves to Inter now.
+const inter = Inter({
   variable: "--font-geist-sans",
   subsets: ["latin"],
+  display: "swap",
+});
+
+// Plus Jakarta Sans for headings on the marketing surface — geometric,
+// friendly, holds up at large sizes better than Inter Bold.
+const jakarta = Plus_Jakarta_Sans({
+  variable: "--font-display",
+  subsets: ["latin"],
+  display: "swap",
+  weight: ["500", "600", "700", "800"],
 });
 
 const geistMono = Geist_Mono({
@@ -77,9 +90,9 @@ export default function RootLayout({
   return (
     <html
       lang="en"
-      className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
+      className={`${inter.variable} ${jakarta.variable} ${geistMono.variable} h-full antialiased`}
     >
-      <body className="min-h-full bg-slate-50 text-slate-800">
+      <body className="min-h-full bg-slate-50 text-slate-800 font-sans">
         <Providers>
           <AppShell>{children}</AppShell>
         </Providers>

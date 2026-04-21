@@ -10,6 +10,12 @@ import {
   Shield,
   ArrowRight,
   Check,
+  Sparkles,
+  Link2,
+  Building2,
+  BarChart3,
+  Clock,
+  Gamepad2,
 } from "lucide-react";
 
 /**
@@ -17,10 +23,21 @@ import {
  * Signed-in visitors see the player dashboard instead — branching happens
  * in app/page.tsx. Everything here is presentational: no auth state, no
  * data fetching.
+ *
+ * Typography: body uses Inter (loaded in app/layout.tsx as
+ * --font-geist-sans for back-compat); display copy uses Plus Jakarta
+ * Sans via `style={{ fontFamily: "var(--font-display)" }}` so headings
+ * render in the geometric display face regardless of surrounding CSS.
+ * Every heading on a dark section is also explicitly `text-white` so
+ * colour never inherits dark-on-dark from the body defaults.
  */
+const DISPLAY_FONT: React.CSSProperties = {
+  fontFamily: "var(--font-display), system-ui, sans-serif",
+};
+
 export function LandingPage() {
   return (
-    <div className="bg-slate-950 text-slate-100 overflow-x-hidden">
+    <div className="bg-slate-950 text-slate-100 overflow-x-hidden font-sans">
       {/* ── Top nav ───────────────────────────────────────────────────── */}
       <header className="absolute top-0 inset-x-0 z-20">
         <div className="max-w-6xl mx-auto px-5 sm:px-8 py-5 flex items-center justify-between">
@@ -29,7 +46,7 @@ export function LandingPage() {
               M
               <span className="absolute -inset-0.5 rounded-lg bg-gradient-to-br from-blue-400 to-teal-300 opacity-0 group-hover:opacity-40 blur-md transition-opacity" />
             </span>
-            <span className="font-bold tracking-tight text-lg">
+            <span className="font-bold tracking-tight text-lg text-white" style={DISPLAY_FONT}>
               Match<span className="text-blue-400">Time</span>
             </span>
           </Link>
@@ -58,7 +75,6 @@ export function LandingPage() {
 
       {/* ── Hero ──────────────────────────────────────────────────────── */}
       <section className="relative pt-36 pb-24 sm:pt-44 sm:pb-32 px-5 sm:px-8">
-        {/* Background flourishes */}
         <div className="absolute inset-0 bg-gradient-to-b from-slate-950 via-blue-950 to-slate-950" />
         <div
           className="absolute inset-0 opacity-40"
@@ -79,21 +95,24 @@ export function LandingPage() {
         />
 
         <div className="relative max-w-6xl mx-auto text-center">
-          <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-white/10 border border-white/10 text-xs font-medium text-blue-200 backdrop-blur mb-6">
-            <span className="inline-block w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" />
-            Live in WhatsApp — no app install for players
+          <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-white/10 border border-white/15 text-xs font-medium text-blue-100 backdrop-blur mb-6">
+            <span className="inline-block w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+            AI-powered · Live in WhatsApp · No app install for players
           </div>
-          <h1 className="text-4xl sm:text-6xl lg:text-7xl font-black tracking-tight leading-[1.05]">
+          <h1
+            className="text-4xl sm:text-6xl lg:text-7xl font-extrabold tracking-tight leading-[1.05] text-white"
+            style={DISPLAY_FONT}
+          >
             Run your weekly match
             <br />
             <span className="bg-gradient-to-r from-blue-400 via-teal-300 to-emerald-400 bg-clip-text text-transparent">
               on autopilot.
             </span>
           </h1>
-          <p className="mt-7 text-base sm:text-lg lg:text-xl text-slate-300 max-w-2xl mx-auto leading-relaxed">
-            MatchTime is the organiser&apos;s autopilot for recurring sports groups.
-            Attendance, balanced teams, player ratings and payment polls —
-            handled in the WhatsApp group you already use.
+          <p className="mt-7 text-base sm:text-lg lg:text-xl text-slate-200 max-w-2xl mx-auto leading-relaxed">
+            MatchTime reads your WhatsApp group, understands who&apos;s playing,
+            balances teams, chases replacements, and handles ratings — so you
+            stop refereeing the group chat.
           </p>
           <div className="mt-10 flex flex-col sm:flex-row gap-3 items-center justify-center">
             <Link
@@ -105,98 +124,149 @@ export function LandingPage() {
             </Link>
             <Link
               href="#how-it-works"
-              className="inline-flex items-center justify-center gap-2 px-7 py-3.5 rounded-xl bg-white/5 hover:bg-white/10 text-white font-medium text-base border border-white/10 backdrop-blur transition-colors"
+              className="inline-flex items-center justify-center gap-2 px-7 py-3.5 rounded-xl bg-white/10 hover:bg-white/15 text-white font-medium text-base border border-white/15 backdrop-blur transition-colors"
             >
               See how it works
             </Link>
           </div>
 
-          {/* Social proof */}
-          <div className="mt-14 flex flex-wrap items-center justify-center gap-x-8 gap-y-3 text-xs sm:text-sm text-slate-400">
+          <div className="mt-14 flex flex-wrap items-center justify-center gap-x-8 gap-y-3 text-xs sm:text-sm text-slate-300">
             <span className="inline-flex items-center gap-1.5">
               <Check className="w-4 h-4 text-emerald-400" />
               No player sign-ups required
             </span>
             <span className="inline-flex items-center gap-1.5">
               <Check className="w-4 h-4 text-emerald-400" />
-              Football, basketball, custom sports
+              Any sport, any format
             </span>
             <span className="inline-flex items-center gap-1.5">
               <Check className="w-4 h-4 text-emerald-400" />
-              Multi-org and multi-team ready
+              Multiple groups, multiple admins
             </span>
           </div>
         </div>
       </section>
 
       {/* ── Features grid ─────────────────────────────────────────────── */}
-      <section id="features" className="relative py-24 sm:py-32 px-5 sm:px-8 bg-slate-50 text-slate-800">
+      <section
+        id="features"
+        className="relative py-24 sm:py-32 px-5 sm:px-8 bg-slate-50 text-slate-800"
+      >
         <div className="max-w-6xl mx-auto">
           <div className="max-w-2xl">
             <span className="text-xs font-semibold uppercase tracking-[0.2em] text-blue-600">
               Why MatchTime
             </span>
-            <h2 className="mt-3 text-3xl sm:text-5xl font-black tracking-tight text-slate-900">
+            <h2
+              className="mt-3 text-3xl sm:text-5xl font-extrabold tracking-tight text-slate-900"
+              style={DISPLAY_FONT}
+            >
               The boring admin, done for you.
             </h2>
-            <p className="mt-5 text-lg text-slate-600">
-              Every weekly-match organiser knows the pain: chasing names, rebalancing teams, collecting money, nagging late replies. MatchTime automates the lot — in the same WhatsApp group you already use.
+            <p className="mt-5 text-lg text-slate-600 leading-relaxed">
+              Every weekly-match organiser knows the pain: chasing names,
+              rebalancing teams, collecting money, nagging late replies,
+              arguing over who&apos;s on the bench. MatchTime reads the chat,
+              understands it, and handles the whole cycle — in the same group
+              you already use.
             </p>
           </div>
 
           <div className="mt-16 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
             <FeatureCard
+              color="violet"
+              icon={<Sparkles className="w-6 h-6" />}
+              title="AI reads the group chat"
+              body="Claude understands every message — not just 'IN' or 'OUT'. Excuses, conditional commitments, replacement requests and questions all get classified and handled correctly."
+            />
+            <FeatureCard
               color="green"
               icon={<MessageCircle className="w-6 h-6" />}
-              title="WhatsApp-first attendance"
-              body="Players say &ldquo;IN&rdquo; or &ldquo;OUT&rdquo; in the group — the bot reacts with 👍 and logs them. No app install, no sign-up."
+              title="Zero-friction attendance"
+              body="Players reply naturally in WhatsApp. The bot logs them, reacts with their slot number, and answers 'do we have enough?' questions instantly."
             />
             <FeatureCard
               color="blue"
               icon={<Scale className="w-6 h-6" />}
               title="Auto-balanced teams"
-              body="Elo-style ratings plus per-position composition. Snake-draft seed, hill-climb refine. Posted on match-day morning."
+              body="Elo from real match results + per-position composition + peer ratings. Snake-draft seed, hill-climb refine. Posted on match-day morning."
             />
             <FeatureCard
               color="amber"
               icon={<Trophy className="w-6 h-6" />}
-              title="Ratings & Man of the Match"
-              body="Players rate each other 1–10 after every match. MoM announced 5 days later. Builds a real skill picture over time."
+              title="Ratings &amp; Man of the Match"
+              body="One-tap magic-link DMs collect 1–10 ratings + MoM picks. Votes merge from WhatsApp polls + in-app. Winner announced 5 days later."
             />
             <FeatureCard
               color="purple"
               icon={<Users className="w-6 h-6" />}
-              title="Smart bench promotion"
-              body="Someone drops? Bot DMs the first bencher, waits 2h for 👍/👎, then moves on automatically. No manual chasing."
+              title="Smart bench + replacement chase"
+              body="Someone drops, the bot asks the group — and chases again at the right times: match morning, 3 h before, 2 h pre-kickoff. Stops the moment you're full."
             />
             <FeatureCard
               color="teal"
               icon={<CreditCard className="w-6 h-6" />}
               title="Payment polls"
-              body="Tick to pay. The bot posts a payment poll after every game and tracks who&apos;s paid. Admins see the list."
+              body="Tick to pay. Posted after every game, tracked in the admin dashboard. No more 'who didn't pay last week' detective work."
             />
             <FeatureCard
               color="rose"
               icon={<Zap className="w-6 h-6" />}
               title="Short-week safety net"
-              body="Low numbers? Bot DMs admins to switch to 5-a-side at 10am, or cancel at 6pm the day before. One tap."
+              body="Low numbers? The bot DMs admins the day before with a one-tap switch to 5-a-side, or a cancellation if you're below the minimum. No phone-call chains."
+            />
+            <FeatureCard
+              color="blue"
+              icon={<Link2 className="w-6 h-6" />}
+              title="Magic-link sign-in"
+              body="Players never create accounts or remember passwords. Every link the bot DMs signs them in automatically for 5 days."
+            />
+            <FeatureCard
+              color="green"
+              icon={<Building2 className="w-6 h-6" />}
+              title="Multi-group, multi-admin"
+              body="Run Tuesday 7-a-side AND Thursday basketball from the same dashboard. Add or remove admins; everyone gets chase DMs."
+            />
+            <FeatureCard
+              color="amber"
+              icon={<BarChart3 className="w-6 h-6" />}
+              title="Elo rating that self-calibrates"
+              body="Every recorded score updates each player's rating. Margin of victory counts. Over a season the team-balancer actually gets smarter."
+            />
+            <FeatureCard
+              color="violet"
+              icon={<Clock className="w-6 h-6" />}
+              title="Time-smart reminders"
+              body="Daily roll-call at 17:00. Pre-kickoff at T−2 h. Football? Bot reminds the group to bring goalie gloves and a ball. No mental load for you."
+            />
+            <FeatureCard
+              color="teal"
+              icon={<Gamepad2 className="w-6 h-6" />}
+              title="Any sport, any format"
+              body="Football 5/7/11-a-side, futsal, basketball 5v5 or 3v3, netball, volleyball, cricket — or roll your own custom sport with positions and team size."
             />
           </div>
         </div>
       </section>
 
       {/* ── How it works ──────────────────────────────────────────────── */}
-      <section id="how-it-works" className="relative py-24 sm:py-32 px-5 sm:px-8 bg-white text-slate-800">
+      <section
+        id="how-it-works"
+        className="relative py-24 sm:py-32 px-5 sm:px-8 bg-white text-slate-800"
+      >
         <div className="max-w-6xl mx-auto">
           <div className="max-w-2xl mx-auto text-center">
             <span className="text-xs font-semibold uppercase tracking-[0.2em] text-blue-600">
               How it works
             </span>
-            <h2 className="mt-3 text-3xl sm:text-5xl font-black tracking-tight text-slate-900">
+            <h2
+              className="mt-3 text-3xl sm:text-5xl font-extrabold tracking-tight text-slate-900"
+              style={DISPLAY_FONT}
+            >
               Three steps to autopilot.
             </h2>
             <p className="mt-5 text-lg text-slate-600">
-              Set it up once, play every week. The bot takes care of the rest.
+              Set it up once, play every week. MatchTime takes care of the rest.
             </p>
           </div>
 
@@ -204,21 +274,21 @@ export function LandingPage() {
             <Step
               n={1}
               title="Create your group"
-              body="Pick a sport preset (football 7-a-side, basketball 5v5, or custom). Set your venue, day, time, and the size of your squad."
+              body="Pick a sport preset (football 7-a-side, basketball 5v5, or custom). Set your venue, day, time and squad size. Takes under five minutes."
             />
             <Step
               n={2}
-              title="Connect WhatsApp"
-              body="Add the MatchTime bot to your WhatsApp group. It auto-onboards everyone, logs IN/OUT as they come in, and posts the daily roll-call."
+              title="Add the bot to WhatsApp"
+              body="Invite MatchTime's number to your group. It auto-onboards every member, reads the chat every 10 minutes and starts handling attendance, questions and drops."
             />
             <Step
               n={3}
-              title="Play & rate"
-              body="The bot announces balanced teams, asks for the score, DMs rating links, tallies MoM votes, and drives it all again next week."
+              title="Play &amp; rate"
+              body="On match day the bot posts balanced teams, asks for the score, DMs rating links, tallies MoM votes — and does it all again next week."
             />
           </ol>
 
-          <div className="mt-16 p-6 sm:p-10 rounded-2xl bg-gradient-to-br from-slate-900 via-blue-950 to-slate-900 text-slate-100 border border-white/10 relative overflow-hidden">
+          <div className="mt-16 p-6 sm:p-10 rounded-2xl bg-gradient-to-br from-slate-900 via-blue-950 to-slate-900 border border-white/10 relative overflow-hidden">
             <div
               className="absolute inset-0 opacity-30"
               style={{
@@ -228,14 +298,17 @@ export function LandingPage() {
             />
             <div className="relative grid grid-cols-1 lg:grid-cols-[1fr_auto] gap-6 items-center">
               <div>
-                <h3 className="text-2xl sm:text-3xl font-black tracking-tight">
-                  Built around the admin, not the player.
+                <h3
+                  className="text-2xl sm:text-3xl font-extrabold tracking-tight text-white"
+                  style={DISPLAY_FONT}
+                >
+                  Built for the admin, invisible to the player.
                 </h3>
-                <p className="mt-3 text-slate-300 max-w-xl leading-relaxed">
-                  Players never have to download anything. Admins get a proper
+                <p className="mt-3 text-slate-200 max-w-xl leading-relaxed">
+                  Players never have to download anything. Admins get a full
                   dashboard — override positions, seed ratings, switch formats,
-                  even flip the bot off for a specific match while you&apos;re
-                  testing.
+                  see every rating ever given. The bot sits in the middle doing
+                  the tedious bit.
                 </p>
               </div>
               <Link
@@ -251,31 +324,37 @@ export function LandingPage() {
       </section>
 
       {/* ── Who it's for ──────────────────────────────────────────────── */}
-      <section id="for-whom" className="relative py-24 sm:py-32 px-5 sm:px-8 bg-slate-50 text-slate-800">
+      <section
+        id="for-whom"
+        className="relative py-24 sm:py-32 px-5 sm:px-8 bg-slate-50 text-slate-800"
+      >
         <div className="max-w-6xl mx-auto">
           <div className="max-w-2xl">
             <span className="text-xs font-semibold uppercase tracking-[0.2em] text-blue-600">
               Who it&apos;s for
             </span>
-            <h2 className="mt-3 text-3xl sm:text-5xl font-black tracking-tight text-slate-900">
+            <h2
+              className="mt-3 text-3xl sm:text-5xl font-extrabold tracking-tight text-slate-900"
+              style={DISPLAY_FONT}
+            >
               If you play every week, this is for you.
             </h2>
           </div>
 
           <div className="mt-16 grid grid-cols-1 md:grid-cols-2 gap-6">
             <PersonaCard
-              role="Organisers & captains"
+              role="Organisers &amp; captains"
               bullets={[
-                "No more chasing WhatsApp replies to get a final 11",
-                "One click to switch to 5-a-side if numbers drop",
+                "No more counting ‘IN’ messages or chasing late replies",
+                "One tap to switch to 5-a-side if numbers drop",
                 "Automatic balanced teams instead of arguing over drafts",
-                "Paper-trail for attendance, ratings and payments",
+                "Every attendance, rating and payment auto-logged",
               ]}
             />
             <PersonaCard
               role="Players"
               bullets={[
-                "Reply IN in WhatsApp — you&apos;re in. That&apos;s it.",
+                "Reply IN in WhatsApp — that&apos;s it.",
                 "Balanced teams every match, no favouritism",
                 "One-tap rating link after each game",
                 "Your own stats: matches played, MoMs, rating over time",
@@ -287,9 +366,13 @@ export function LandingPage() {
             {[
               "Football 7-a-side",
               "Football 5-a-side",
+              "Football 11-a-side",
               "Futsal",
               "Basketball 5v5",
               "Basketball 3v3",
+              "Netball",
+              "Volleyball",
+              "Cricket",
               "Custom sport",
             ].map((s) => (
               <span
@@ -304,7 +387,7 @@ export function LandingPage() {
       </section>
 
       {/* ── Final CTA ─────────────────────────────────────────────────── */}
-      <section className="relative py-24 sm:py-32 px-5 sm:px-8 bg-gradient-to-br from-slate-950 via-blue-950 to-slate-950 text-white overflow-hidden">
+      <section className="relative py-24 sm:py-32 px-5 sm:px-8 bg-gradient-to-br from-slate-950 via-blue-950 to-slate-950 overflow-hidden">
         <div
           className="absolute inset-0 opacity-40"
           style={{
@@ -314,11 +397,14 @@ export function LandingPage() {
         />
         <div className="relative max-w-3xl mx-auto text-center">
           <Shield className="w-10 h-10 mx-auto text-blue-400 mb-5" />
-          <h2 className="text-3xl sm:text-5xl font-black tracking-tight">
+          <h2
+            className="text-3xl sm:text-5xl font-extrabold tracking-tight text-white"
+            style={DISPLAY_FONT}
+          >
             Ready for a quieter
             <br /> match-day morning?
           </h2>
-          <p className="mt-5 text-lg text-slate-300">
+          <p className="mt-5 text-lg text-slate-200 leading-relaxed">
             Set your group up in under five minutes. First month on us — no
             credit card needed.
           </p>
@@ -332,7 +418,7 @@ export function LandingPage() {
             </Link>
             <Link
               href="/login"
-              className="inline-flex items-center justify-center gap-2 px-7 py-3.5 rounded-xl bg-white/10 hover:bg-white/15 text-white font-medium text-base border border-white/10 backdrop-blur transition-colors"
+              className="inline-flex items-center justify-center gap-2 px-7 py-3.5 rounded-xl bg-white/10 hover:bg-white/15 text-white font-medium text-base border border-white/15 backdrop-blur transition-colors"
             >
               Sign in
             </Link>
@@ -347,7 +433,7 @@ export function LandingPage() {
             <span className="inline-flex w-7 h-7 rounded-lg bg-gradient-to-br from-blue-500 to-teal-400 items-center justify-center text-white font-black text-sm">
               M
             </span>
-            <span className="font-bold text-white">
+            <span className="font-bold text-white" style={DISPLAY_FONT}>
               Match<span className="text-blue-400">Time</span>
             </span>
           </div>
@@ -390,7 +476,7 @@ export function LandingPage() {
             applicationCategory: "SportsApplication",
             operatingSystem: "Web, WhatsApp",
             description:
-              "WhatsApp-first attendance, auto-balanced teams, player ratings and payment automation for recurring sports groups.",
+              "AI-powered WhatsApp-first attendance, auto-balanced teams, player ratings, Man-of-the-Match voting and payment polls for recurring sports groups.",
             url: "https://matchtime.ai",
             offers: {
               "@type": "Offer",
@@ -416,6 +502,7 @@ const COLORS = {
   purple: "bg-purple-50 text-purple-600 border-purple-100",
   teal: "bg-teal-50 text-teal-600 border-teal-100",
   rose: "bg-rose-50 text-rose-600 border-rose-100",
+  violet: "bg-violet-50 text-violet-600 border-violet-100",
 } as const;
 
 function FeatureCard({
@@ -436,20 +523,42 @@ function FeatureCard({
       >
         {icon}
       </div>
-      <h3 className="mt-5 text-lg font-bold text-slate-900">{title}</h3>
-      <p className="mt-2 text-sm leading-relaxed text-slate-600">{body}</p>
+      <h3
+        className="mt-5 text-lg font-bold text-slate-900"
+        style={DISPLAY_FONT}
+        dangerouslySetInnerHTML={{ __html: title }}
+      />
+      <p
+        className="mt-2 text-sm leading-relaxed text-slate-600"
+        dangerouslySetInnerHTML={{ __html: body }}
+      />
     </div>
   );
 }
 
-function Step({ n, title, body }: { n: number; title: string; body: string }) {
+function Step({
+  n,
+  title,
+  body,
+}: {
+  n: number;
+  title: string;
+  body: string;
+}) {
   return (
     <li className="relative p-7 rounded-2xl bg-white border border-slate-200">
       <div className="absolute -top-4 left-7 w-8 h-8 rounded-full bg-gradient-to-br from-blue-500 to-teal-500 text-white font-black flex items-center justify-center shadow-lg shadow-blue-500/30">
         {n}
       </div>
-      <h3 className="mt-2 text-lg font-bold text-slate-900">{title}</h3>
-      <p className="mt-2 text-sm leading-relaxed text-slate-600">{body}</p>
+      <h3
+        className="mt-2 text-lg font-bold text-slate-900"
+        style={DISPLAY_FONT}
+        dangerouslySetInnerHTML={{ __html: title }}
+      />
+      <p
+        className="mt-2 text-sm leading-relaxed text-slate-600"
+        dangerouslySetInnerHTML={{ __html: body }}
+      />
     </li>
   );
 }
@@ -459,7 +568,7 @@ function PersonaCard({ role, bullets }: { role: string; bullets: string[] }) {
     <div className="p-7 rounded-2xl bg-white border border-slate-200 shadow-sm">
       <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-blue-50 text-blue-700 text-xs font-semibold mb-4">
         <Star className="w-3 h-3" />
-        {role}
+        <span dangerouslySetInnerHTML={{ __html: role }} />
       </div>
       <ul className="space-y-3">
         {bullets.map((b) => (
