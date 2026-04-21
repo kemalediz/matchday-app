@@ -170,23 +170,21 @@ Example (12/14, Ibrahim + Ehtisham dropped, Ehtisham tentative):
 Tentative: Ehtisham (will play if nobody steps in)"
 
 FORMAT SWITCH (important):
-The Match Context has two separate blocks:
-  - "Alternative formats ACTIVE for this sport (safe to recommend)"
-  - "Alternative formats CONFIGURED BUT DISABLED"
+The Match Context may list "Alternative formats available for this sport" (e.g. Football 5-a-side = 10 players when the current match is 7-a-side). Admins execute a switch by rebooking the venue (e.g. calling Goals) and flipping the match in the portal — you never execute it, you only recommend.
 
-Proactive recommendation (only in ACTIVE block):
-- When someone drops and the squad goes below full, or someone asks about numbers, you MAY propose switching to an ACTIVE smaller format — but only when ALL of these hold:
-  1. Confirmed squad is BELOW maxPlayers.
-  2. Kickoff is within ~24 hours (see "X.Xh until kickoff").
-  3. Confirmed count is >= the smaller format's total players (we'd actually fill it).
-- Proposal is one line inside the SQUAD-STATE reply: "If we don't find 2 more, we could switch to 5-a-side (10 players) — Mauricio + Ersin go on the bench. Admins can toggle via the portal." Use the LAST N confirmed names (N = confirmedCount - smallerFormatTotal) for who'd go to bench. Never invent.
+Proactive recommendation:
+- When someone drops and the squad goes below full, or someone asks about numbers, you MAY propose switching to a smaller format — but only when ALL of these hold:
+  1. The smaller format is listed in the Alternatives block.
+  2. Confirmed squad is BELOW maxPlayers.
+  3. Kickoff is within ~24 hours (see "X.Xh until kickoff").
+  4. Confirmed count is >= the smaller format's total players (we'd actually fill it).
+- Proposal is one line inside the SQUAD-STATE reply: "If we don't find 2 more, we could switch to 5-a-side (10 players) — Mauricio + Ersin go on the bench. Admins can rebook and flip it in the portal." Use the LAST N confirmed names (N = confirmedCount - smallerFormatTotal) for who'd go to bench. Never invent.
 - Dedupe: at most once per batch.
 
 Direct question about a switch (e.g. "should we switch to 5-a-side?", "@M Time 5 aside?", "can we downgrade?"):
 - Treat as intent "question".
-- If the smaller format is in the ACTIVE block: give a grounded recommendation — yes/no based on numbers + kickoff time. Include the roster.
-- If the smaller format is ONLY in the DISABLED block: reply honestly that the format is configured for this group but not currently active — admin would need to toggle it on in the portal before a switch is possible. Then still include the current numbers + roster so the group sees the state.
-- If neither block lists that format at all: reply that the format isn't set up for this group; admin would need to add it first.
+- If the smaller format is in the Alternatives block: give a grounded recommendation — yes/no based on numbers + kickoff time. If the switch conditions hold, say "yes, worth it" briefly and explain who goes to bench. Include the roster.
+- If the format isn't in the Alternatives block: reply honestly that the group hasn't set it up; admin would need to add it first as an Activity. Include the current roster regardless.
 - Never pretend a format is available when it isn't. Never execute the switch yourself.
 
 State collapse (when SAME author has multiple messages in the batch):
@@ -208,12 +206,10 @@ function buildMatchContextBlock(args: {
     maxPlayers: number;
     attendances: Array<{ status: string; user: { id: string; name: string | null } }>;
   } | null;
-  /** Active smaller-format activities — safe for the LLM to recommend. */
+  /** Every smaller-format activity configured for this org. The LLM
+   *  may propose a switch to any of them — admins handle the venue
+   *  rebooking (e.g. ring Goals) and flip the match in the app. */
   alternatives?: Array<{ sportName: string; totalPlayers: number }>;
-  /** Smaller-format activities that exist but are disabled by admin —
-   *  only usable once admin toggles them on. Mentioned by the LLM only
-   *  when a player asks directly. */
-  inactiveAlternatives?: Array<{ sportName: string; totalPlayers: number }>;
 }): string {
   if (!args.match) {
     return `## Organisation\n${args.orgName}\n\n## Current Match\nNo upcoming match within the attendance window.`;
@@ -251,23 +247,15 @@ function buildMatchContextBlock(args: {
     lines.push("", `Dropped: ${dropped.map((a) => a.user.name ?? "(unnamed)").join(", ")}`);
   }
   if (args.alternatives && args.alternatives.length > 0) {
-    lines.push("", "Alternative formats ACTIVE for this sport (safe to recommend):");
+    lines.push("", "Alternative formats available for this sport:");
     for (const a of args.alternatives) {
       lines.push(`  - ${a.sportName} (${a.totalPlayers} players total)`);
     }
     lines.push(
-      "Admins can toggle via the portal; a switch converts everyone " +
+      "Admins switch by rebooking the venue (e.g. ringing Goals) and " +
+        "flipping the match in the portal; a switch converts everyone " +
         "above the new cap from confirmed to bench, keeping their order.",
     );
-  }
-  if (args.inactiveAlternatives && args.inactiveAlternatives.length > 0) {
-    lines.push(
-      "",
-      "Alternative formats CONFIGURED BUT DISABLED (admin must activate before we can switch — do NOT recommend proactively, but if a player directly asks about switching, you can say the format exists but needs admin to activate it):",
-    );
-    for (const a of args.inactiveAlternatives) {
-      lines.push(`  - ${a.sportName} (${a.totalPlayers} players total)`);
-    }
   }
   return lines.join("\n");
 }
@@ -307,19 +295,15 @@ export async function analyzeBatch(input: AnalysisBatchInput): Promise<AnalysisV
     orderBy: { date: "asc" },
   });
 
-  // Load alternative formats the admin might use for a switch. Split
-  // into two buckets:
-  //   - activeAlternatives: Activity rows with isActive=true. The LLM
-  //     can proactively recommend switching to these.
-  //   - inactiveAlternatives: Activity rows with isActive=false. The
-  //     LLM does NOT recommend these proactively, but if a player
-  //     directly asks "should we switch to 5-a-side?" Claude can
-  //     honestly respond that the format exists but admin would need
-  //     to activate it first.
+  // Load alternative formats — every Activity the admin has created
+  // under this org in the same sport family with a smaller
+  // playersPerTeam. isActive is NOT a gate here: it only controls
+  // whether the cron auto-generates weekly matches for that Activity;
+  // a one-off format switch on the current match simply re-points it
+  // at the new Activity row and works regardless of isActive.
   // Sport "family" = first word of the sport name (e.g. "Football
   // 7-a-side" and "Football 5-a-side" share family "Football").
-  const activeAlternatives: Array<{ sportName: string; totalPlayers: number }> = [];
-  const inactiveAlternatives: Array<{ sportName: string; totalPlayers: number }> = [];
+  const alternatives: Array<{ sportName: string; totalPlayers: number }> = [];
   if (match) {
     const family = match.activity.sport.name.split(" ")[0];
     const currentPpt = match.activity.sport.playersPerTeam;
@@ -327,34 +311,24 @@ export async function analyzeBatch(input: AnalysisBatchInput): Promise<AnalysisV
       where: { orgId: org.id },
       include: { sport: { select: { name: true, playersPerTeam: true } } },
     });
-    const seenActive = new Set<string>();
-    const seenInactive = new Set<string>();
+    const seen = new Set<string>();
     for (const a of siblingActivities) {
       if (a.sport.name.split(" ")[0] !== family) continue;
       if (a.sport.playersPerTeam >= currentPpt) continue;
-      const entry = {
+      if (seen.has(a.sport.name)) continue;
+      seen.add(a.sport.name);
+      alternatives.push({
         sportName: a.sport.name,
         totalPlayers: a.sport.playersPerTeam * 2,
-      };
-      if (a.isActive) {
-        if (seenActive.has(a.sport.name)) continue;
-        seenActive.add(a.sport.name);
-        activeAlternatives.push(entry);
-      } else {
-        if (seenInactive.has(a.sport.name) || seenActive.has(a.sport.name)) continue;
-        seenInactive.add(a.sport.name);
-        inactiveAlternatives.push(entry);
-      }
+      });
     }
-    activeAlternatives.sort((x, y) => y.totalPlayers - x.totalPlayers);
-    inactiveAlternatives.sort((x, y) => y.totalPlayers - x.totalPlayers);
+    alternatives.sort((x, y) => y.totalPlayers - x.totalPlayers);
   }
 
   const matchContext = buildMatchContextBlock({
     orgName: org.name,
     match,
-    alternatives: activeAlternatives,
-    inactiveAlternatives,
+    alternatives,
   });
 
   const historyBlock = input.history.length
