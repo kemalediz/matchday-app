@@ -127,6 +127,16 @@ CHASE behaviour (important):
 - If someone in the batch stepped in to cover (intent "in" after a recent drop), you've got it covered — do NOT emit another chase reply.
 - Don't chase on every single "out" — only when the squad actually goes below full after that drop.
 
+FORMAT SWITCH (important):
+- The Match Context block may list "Alternative formats available for this sport" (e.g. Football 5-a-side = 10 players when the current match is 7-a-side = 14). When it does, you can propose switching to a smaller format in your reply — but only when ALL of these are true:
+  1. Confirmed squad is BELOW maxPlayers (we're short).
+  2. Kickoff is within ~24 hours (see "X.Xh until kickoff" in the context).
+  3. Confirmed count is >= the smaller format's total players (we'd actually fill the smaller format).
+- When you propose it, keep it to one sentence on top of (or instead of) the chase, and mention that the extra players go to the bench — NOT dropped. Example: "We're 12/14 for 7-a-side — still need 2. If we don't find them, we could switch to 5-a-side (10 players) and Mauricio + Aydın go on the bench. Admins can toggle via the portal."
+- Use the ACTUAL player names from the Confirmed list for who'd go to the bench — take the last N confirmed (where N = confirmed - smallerFormatTotal). Never invent names.
+- Don't suggest a switch more than once per batch (dedupe reply across verdicts).
+- Never execute the switch yourself. This is just a recommendation — admins toggle it via /admin.
+
 State collapse (when SAME author has multiple messages in the batch):
 - Only the LATEST message gets the attendance side-effect. Earlier messages from the same author get registerAttendance: null (react/reply can still happen for those).
 - Example: "IN if back holds up" at 18:00 → "actually OUT" at 18:03 in the same batch → verdict for 18:00 is conditional_in with no attendance; verdict for 18:03 is out with registerAttendance: OUT.
@@ -146,6 +156,9 @@ function buildMatchContextBlock(args: {
     maxPlayers: number;
     attendances: Array<{ status: string; user: { id: string; name: string | null } }>;
   } | null;
+  /** Alternative formats for the current sport family (same org, smaller
+   *  playersPerTeam). Empty array when nothing smaller exists. */
+  alternatives?: Array<{ sportName: string; totalPlayers: number }>;
 }): string {
   if (!args.match) {
     return `## Organisation\n${args.orgName}\n\n## Current Match\nNo upcoming match within the attendance window.`;
@@ -155,13 +168,18 @@ function buildMatchContextBlock(args: {
   const bench = m.attendances.filter((a) => a.status === "BENCH");
   const dropped = m.attendances.filter((a) => a.status === "DROPPED");
   const need = Math.max(0, m.maxPlayers - confirmed.length);
+  const hoursToKickoff = (m.date.getTime() - Date.now()) / (1000 * 60 * 60);
+  const kickoffHint =
+    hoursToKickoff > 0
+      ? `${hoursToKickoff.toFixed(1)}h until kickoff`
+      : `${Math.abs(hoursToKickoff).toFixed(1)}h since kickoff`;
   const lines = [
     `## Organisation`,
     args.orgName,
     ``,
     `## Current Match`,
     `Activity: ${m.activity.name}`,
-    `Date: ${m.date.toISOString()}`,
+    `Date: ${m.date.toISOString()}  (${kickoffHint})`,
     `Venue: ${m.activity.venue}`,
     `Status: ${m.status}`,
     `Confirmed: ${confirmed.length}/${m.maxPlayers}${need > 0 ? ` (need ${need} more)` : " ✅ full squad"}`,
@@ -176,6 +194,16 @@ function buildMatchContextBlock(args: {
   }
   if (dropped.length) {
     lines.push("", `Dropped: ${dropped.map((a) => a.user.name ?? "(unnamed)").join(", ")}`);
+  }
+  if (args.alternatives && args.alternatives.length > 0) {
+    lines.push("", "Alternative formats available for this sport:");
+    for (const a of args.alternatives) {
+      lines.push(`  - ${a.sportName} (${a.totalPlayers} players total)`);
+    }
+    lines.push(
+      "Admins can toggle via the portal; a switch converts everyone " +
+        "above the new cap from confirmed to bench, keeping their order.",
+    );
   }
   return lines.join("\n");
 }
@@ -200,7 +228,13 @@ export async function analyzeBatch(input: AnalysisBatchInput): Promise<AnalysisV
       attendanceDeadline: { gt: now },
     },
     include: {
-      activity: { select: { name: true, venue: true } },
+      activity: {
+        select: {
+          name: true,
+          venue: true,
+          sport: { select: { name: true, playersPerTeam: true } },
+        },
+      },
       attendances: {
         include: { user: { select: { id: true, name: true } } },
         orderBy: { position: "asc" },
@@ -209,7 +243,37 @@ export async function analyzeBatch(input: AnalysisBatchInput): Promise<AnalysisV
     orderBy: { date: "asc" },
   });
 
-  const matchContext = buildMatchContextBlock({ orgName: org.name, match });
+  // Load alternative formats (smaller playersPerTeam, same sport family)
+  // so the LLM can propose a switch when the squad is short and kickoff
+  // is close. Sport "family" is the first word of the sport name — e.g.
+  // "Football 7-a-side" / "Football 5-a-side" share family "Football".
+  const alternatives: Array<{ sportName: string; totalPlayers: number }> = [];
+  if (match) {
+    const family = match.activity.sport.name.split(" ")[0];
+    const currentPpt = match.activity.sport.playersPerTeam;
+    const siblingActivities = await db.activity.findMany({
+      where: { orgId: org.id },
+      include: { sport: { select: { name: true, playersPerTeam: true } } },
+    });
+    const seen = new Set<string>();
+    for (const a of siblingActivities) {
+      if (a.sport.name.split(" ")[0] !== family) continue;
+      if (a.sport.playersPerTeam >= currentPpt) continue;
+      if (seen.has(a.sport.name)) continue;
+      seen.add(a.sport.name);
+      alternatives.push({
+        sportName: a.sport.name,
+        totalPlayers: a.sport.playersPerTeam * 2,
+      });
+    }
+    alternatives.sort((x, y) => y.totalPlayers - x.totalPlayers);
+  }
+
+  const matchContext = buildMatchContextBlock({
+    orgName: org.name,
+    match,
+    alternatives,
+  });
 
   const historyBlock = input.history.length
     ? input.history
