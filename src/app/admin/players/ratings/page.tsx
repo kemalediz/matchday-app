@@ -77,10 +77,10 @@ export default function BulkRatingsPage() {
       setStates((s) => ({ ...s, [userId]: "idle" }));
       return;
     }
-    const num = parseFloat(raw);
+    const num = parseInt(raw, 10);
     if (isNaN(num) || num < 1 || num > 10) {
       setStates((s) => ({ ...s, [userId]: "error" }));
-      setErrors((e) => ({ ...e, [userId]: "Must be 1–10" }));
+      setErrors((e) => ({ ...e, [userId]: "Must be an integer 1–10" }));
       return;
     }
     const existing = players.find((p) => p.id === userId)?.seedRating;
@@ -204,7 +204,7 @@ export default function BulkRatingsPage() {
                       type="number"
                       min="1"
                       max="10"
-                      step="0.5"
+                      step="1"
                       value={values[p.id] ?? ""}
                       onChange={(e) => onChange(p.id, e.target.value)}
                       onBlur={() => save(p.id)}

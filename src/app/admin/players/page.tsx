@@ -57,12 +57,18 @@ export default function PlayersPage() {
   }
 
   async function handleSeedRating(userId: string, value: string) {
-    const num = parseFloat(value);
+    // Integers only — the whole numbers are easier to reason about and
+    // the balancer picks up 1-point differences fine.
+    const num = parseInt(value, 10);
     if (isNaN(num) || num < 1 || num > 10 || !orgId) return;
     try {
       await seedPlayerRating(userId, orgId, num);
+      // Optimistic in-place update — keeps scroll position and focus so
+      // admin can rate many players in a row without fighting the page.
+      setPlayers((prev) =>
+        prev.map((p) => (p.id === userId ? { ...p, seedRating: num } : p)),
+      );
       toast.success("Rating updated");
-      loadPlayers(includeFormer);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed");
     }
@@ -173,10 +179,10 @@ export default function PlayersPage() {
                 </label>
                 <input
                   type="number"
-                  defaultValue={p.seedRating ?? ""}
+                  defaultValue={p.seedRating != null ? Math.round(p.seedRating) : ""}
                   min={1}
                   max={10}
-                  step={0.5}
+                  step={1}
                   title="Seed rating (1–10). Used by the team-balancer until peer ratings accumulate."
                   onBlur={(e) => e.target.value && handleSeedRating(p.id, e.target.value)}
                   className="w-20 h-10 px-2 rounded-lg border border-slate-200 text-sm text-center focus:outline-none focus:ring-2 focus:ring-blue-500"

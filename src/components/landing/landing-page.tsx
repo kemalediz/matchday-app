@@ -354,7 +354,7 @@ export function LandingPage() {
             <PersonaCard
               role="Players"
               bullets={[
-                "Reply IN in WhatsApp — that&apos;s it.",
+                "Chat naturally in WhatsApp — &lsquo;IN&rsquo;, &lsquo;count me in&rsquo;, &lsquo;sorry not tonight&rsquo;, the bot gets it.",
                 "Balanced teams every match, no favouritism",
                 "One-tap rating link after each game",
                 "Your own stats: matches played, MoMs, rating over time",
