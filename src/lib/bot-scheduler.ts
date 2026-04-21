@@ -17,7 +17,13 @@
 import { db } from "./db";
 import { buildMagicLinkUrl, signMagicLinkToken, MAGIC_LINK_TTL } from "./magic-link";
 import { findOrgAdminsWithPhone } from "./org";
-import { format } from "date-fns";
+import { formatLondon } from "./london-time";
+
+// All user-facing times in bot-posted messages are Europe/London wall
+// clock. Wrap date-fns-tz in a short helper so this file reads cleanly.
+function format(d: Date, pattern: string): string {
+  return formatLondon(d, pattern);
+}
 
 // ───────── Same-sport helpers for switch/cancel-format nudges ────────
 

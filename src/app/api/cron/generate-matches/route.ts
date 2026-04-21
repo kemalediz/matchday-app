@@ -1,5 +1,16 @@
+/**
+ * Weekly cron: for each active Activity, generate the upcoming Match
+ * record for its next scheduled weekday + time. Time is stored as a
+ * London wall clock on the Activity (`time: "21:30"`) — we convert
+ * that to a UTC instant here so Match.date is a real, unambiguous
+ * timestamp. DST is handled via date-fns-tz.
+ *
+ * Before this version the code used `setHours()` which, running on
+ * Vercel's UTC servers, mis-stamped every match by +1h (BST offset).
+ */
 import { db } from "@/lib/db";
 import { NextResponse } from "next/server";
+import { londonWallClockToUtc, formatLondon } from "@/lib/london-time";
 
 export async function GET(request: Request) {
   const authHeader = request.headers.get("authorization");
@@ -14,37 +25,42 @@ export async function GET(request: Request) {
   let created = 0;
 
   for (const activity of activities) {
+    // Find the London-local calendar day of the next occurrence of the
+    // activity's weekday. `Date#getDay()` returns the weekday in local
+    // server time — on Vercel that's UTC, which for most of the year
+    // disagrees with London for 0-1 hours per day. Safest to read the
+    // weekday directly via Intl so near-midnight edge cases don't slip.
     const now = new Date();
-    const currentDay = now.getDay();
-    let daysUntil = activity.dayOfWeek - currentDay;
+    const londonWeekday = Number(formatLondon(now, "i")) % 7; // Mon=1..Sun=7 → 0..6; convert to JS Sun=0..Sat=6
+    let daysUntil = activity.dayOfWeek - londonWeekday;
     if (daysUntil <= 0) daysUntil += 7;
 
-    const matchDate = new Date(now);
-    matchDate.setDate(now.getDate() + daysUntil);
-    const [hours, minutes] = activity.time.split(":").map(Number);
-    matchDate.setHours(hours, minutes, 0, 0);
+    // Anchor at midnight London time of the target day — fromZonedTime
+    // inside the helper handles the wall-clock → UTC translation.
+    const todayLondonMidnight = londonWallClockToUtc(now, "00:00");
+    const anchor = new Date(todayLondonMidnight.getTime() + daysUntil * 24 * 60 * 60 * 1000);
+    const matchDate = londonWallClockToUtc(anchor, activity.time);
 
-    const startOfDay = new Date(matchDate);
-    startOfDay.setHours(0, 0, 0, 0);
-    const endOfDay = new Date(matchDate);
-    endOfDay.setHours(23, 59, 59, 999);
-
+    // Dedupe window: ±12h around the intended match time — enough to
+    // catch a pre-existing record even if the prior run used a slightly
+    // different representation.
+    const dayStart = new Date(matchDate.getTime() - 12 * 60 * 60 * 1000);
+    const dayEnd = new Date(matchDate.getTime() + 12 * 60 * 60 * 1000);
     const existing = await db.match.findFirst({
-      where: { activityId: activity.id, date: { gte: startOfDay, lte: endOfDay } },
+      where: { activityId: activity.id, date: { gte: dayStart, lte: dayEnd } },
     });
+    if (existing) continue;
 
-    if (!existing) {
-      const deadline = new Date(matchDate.getTime() - activity.deadlineHours * 60 * 60 * 1000);
-      await db.match.create({
-        data: {
-          activityId: activity.id,
-          date: matchDate,
-          maxPlayers: activity.sport.playersPerTeam * 2,
-          attendanceDeadline: deadline,
-        },
-      });
-      created++;
-    }
+    const deadline = new Date(matchDate.getTime() - activity.deadlineHours * 60 * 60 * 1000);
+    await db.match.create({
+      data: {
+        activityId: activity.id,
+        date: matchDate,
+        maxPlayers: activity.sport.playersPerTeam * 2,
+        attendanceDeadline: deadline,
+      },
+    });
+    created++;
   }
 
   return NextResponse.json({ created });
