@@ -15,9 +15,6 @@
  * new message triggers an immediate flush instead of waiting for the
  * next tick — we don't want slow answers to "can I still join?" at
  * kickoff-0:30.
- *
- * Hard cap: buffers also flush immediately once they hit MAX_BUFFER
- * messages, to avoid unbounded accumulation on chatty groups.
  */
 import type { Client, Message } from "whatsapp-web.js";
 import {
@@ -30,7 +27,6 @@ import {
 const HISTORY_PER_GROUP = 15;
 const FLUSH_INTERVAL_MS = 10 * 60 * 1000;
 const URGENCY_WINDOW_MS = 60 * 60 * 1000; // within 1h of kickoff → flush immediately
-const MAX_BUFFER = 10; // force flush once a group hits this many pending messages
 
 interface Pending {
   waMessageId: string;
@@ -102,15 +98,13 @@ export async function enqueueForAnalysis(client: Client, msg: Message): Promise<
   arr.push(pending);
   bufferByGroup.set(msg.from, arr);
 
-  // Urgency check — match starts within URGENCY_WINDOW → flush now.
+  // Urgency: match kicks off within URGENCY_WINDOW → flush now so any
+  // "can I still join?" style questions land in the group without a
+  // 10-min wait. Otherwise the buffer just sits until the next tick.
   const kickoff = nextKickoffMsByGroup.get(msg.from);
   const urgent = typeof kickoff === "number" && kickoff - Date.now() <= URGENCY_WINDOW_MS;
-  const oversized = arr.length >= MAX_BUFFER;
-
-  if (urgent || oversized) {
-    console.log(
-      `[smart] immediate flush for ${msg.from} (${urgent ? "urgent" : "oversized"}, ${arr.length} pending)`,
-    );
+  if (urgent) {
+    console.log(`[smart] urgency flush for ${msg.from} (${arr.length} pending)`);
     await flushGroup(client, msg.from);
   }
 }
