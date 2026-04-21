@@ -12,9 +12,10 @@ import {
 } from "./api.js";
 import { backfillMessagesForGroups } from "./backfill.js";
 import {
-  analyzeSingleMessage,
-  catchUpAllGroups,
+  enqueueForAnalysis,
   recordHistory,
+  startBatchFlushTimer,
+  stopBatchFlushTimer,
 } from "./smart-analysis.js";
 import { config } from "./config.js";
 
@@ -71,31 +72,16 @@ async function main() {
       // (or before it was enabled). Silent — no reactions, no replies.
       await backfillMessagesForGroups(client, orgConfigs);
 
-      // Fat LLM catch-up on startup — scan the last ~50 messages in each
-      // monitored group and feed anything the server hasn't seen through
-      // the smart analyser. Server dedupes by `waMessageId`, so this is
-      // safe to re-run.
-      try {
-        await catchUpAllGroups(
-          client,
-          orgConfigs.map((o: { groupId: string }) => o.groupId),
-          200,
-        );
-      } catch (err) {
-        console.error("startup catchUpAllGroups failed:", err);
-      }
-
       initScheduler(client, orgConfigs);
 
-      // Recurring catch-up tick — every 10 min, scan recent messages
-      // for anything inline processing missed (e.g. WebSocket hiccup).
-      setInterval(() => {
-        catchUpAllGroups(
-          client,
-          orgConfigs.map((o: { groupId: string }) => o.groupId),
-          30,
-        ).catch((err) => console.error("periodic catchUp failed:", err));
-      }, 10 * 60 * 1000);
+      // Start the batch-flush timer. Anything the regex fast-path
+      // doesn't handle gets buffered in-memory per group and flushed
+      // every 10 minutes (or immediately when the next match is within
+      // an hour of kickoff, or when the buffer hits MAX_BUFFER).
+      startBatchFlushTimer(
+        client,
+        orgConfigs.map((o: { groupId: string }) => o.groupId),
+      );
     } catch (err) {
       console.error("Failed to fetch org configs:", err);
     }
@@ -152,12 +138,14 @@ async function main() {
         },
       });
 
-      // Fast-path didn't act → send to the smart analyser inline.
+      // Fast-path didn't act → queue the message for the next batch
+      // flush (every 10 min by default; immediate if kickoff < 1h or
+      // buffer full).
       if (!outcome.handled) {
         try {
-          await analyzeSingleMessage(client, msg);
+          await enqueueForAnalysis(client, msg);
         } catch (err) {
-          console.error("analyzeSingleMessage failed:", err);
+          console.error("enqueueForAnalysis failed:", err);
         }
       }
     },
@@ -256,17 +244,20 @@ async function main() {
   client.on("disconnected", (reason: string) => {
     console.log("Client disconnected:", reason);
     stopScheduler();
+    stopBatchFlushTimer();
   });
 
   process.on("SIGINT", async () => {
     console.log("\nShutting down...");
     stopScheduler();
+    stopBatchFlushTimer();
     await client.destroy();
     process.exit(0);
   });
 
   process.on("SIGTERM", async () => {
     stopScheduler();
+    stopBatchFlushTimer();
     await client.destroy();
     process.exit(0);
   });

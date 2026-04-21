@@ -1,73 +1,56 @@
 /**
- * Smart-analysis glue: takes a WhatsApp message (or batch of them) the
- * regex didn't handle, calls the server-side analyzer, and executes the
- * returned actions on the WhatsApp session (react, reply).
+ * Smart-analysis glue: buffers any message the regex fast-path didn't
+ * handle, flushes the buffer to the server-side analyzer on a timer
+ * (every ~10 min), and executes the returned verdicts (react, reply).
  *
- * Three entry points:
- *   - `analyzeSingleMessage`: inline call from the `message` event
- *      handler when the regex fast-path doesn't match.
- *   - `catchUpScan`:          fetch last N messages from a group and
- *      feed anything the server hasn't seen through the LLM. Called
- *      on startup + every scheduler tick.
- *   - `recordHistory`:        appends to an in-memory rolling buffer
- *      that the single-message path uses for context.
+ * Why batch instead of inline:
+ *   - One Claude call per tick instead of per message → cheaper.
+ *   - Claude sees several messages at once → can collapse state
+ *     ("in if back holds up" followed 3 min later by "actually out"
+ *     resolves to just OUT).
+ *   - Duplicate questions in the same batch ("do we have enough?"
+ *     asked by two people) get a single reply.
+ *
+ * Urgency rule: if the next match kicks off in less than an hour, any
+ * new message triggers an immediate flush instead of waiting for the
+ * next tick — we don't want slow answers to "can I still join?" at
+ * kickoff-0:30.
+ *
+ * Hard cap: buffers also flush immediately once they hit MAX_BUFFER
+ * messages, to avoid unbounded accumulation on chatty groups.
  */
 import type { Client, Message } from "whatsapp-web.js";
 import {
-  postAnalyze,
+  postAnalyzeFull,
   type AnalyzeInboundHistory,
   type AnalyzeInboundMessage,
   type AnalyzeResult,
 } from "./api.js";
 
 const HISTORY_PER_GROUP = 15;
-const CATCH_UP_LIMIT = 50;
-const MAX_MESSAGE_AGE_MS = 24 * 60 * 60 * 1000; // never analyse messages older than a day
+const FLUSH_INTERVAL_MS = 10 * 60 * 1000;
+const URGENCY_WINDOW_MS = 60 * 60 * 1000; // within 1h of kickoff → flush immediately
+const MAX_BUFFER = 10; // force flush once a group hits this many pending messages
 
-/**
- * wweb.js's `chat.fetchMessages` fails intermittently on freshly-linked
- * sessions with `Cannot read properties of undefined (reading
- * 'waitForChatLoading')` — the WhatsApp Web DOM hasn't finished wiring
- * up the chat pane yet. `sendSeen()` primes the view (it's a no-op if
- * already primed) and a short delay is usually enough. Retry 3 times
- * before giving up.
- */
-async function fetchGroupMessagesWithRetry(
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  chat: any,
-  limit: number,
-  attempts = 2,
-): Promise<Message[]> {
-  let lastErr: unknown = null;
-  for (let i = 0; i < attempts; i++) {
-    try {
-      if (i > 0) {
-        try {
-          await chat.sendSeen();
-        } catch {
-          /* non-fatal */
-        }
-        await new Promise((r) => setTimeout(r, 1500 * (i + 1)));
-      }
-      return (await chat.fetchMessages({ limit })) as Message[];
-    } catch (err) {
-      lastErr = err;
-    }
-  }
-  // wweb.js's fetchMessages is known-flaky on some LocalAuth sessions.
-  // We've tried our best; fall back to "no catch-up this tick" silently
-  // so the inline message-event path (which DOES work) keeps running
-  // without the log being drowned in Puppeteer stack traces.
-  throw new Error(
-    `fetchMessages unavailable after ${attempts} attempts: ${
-      lastErr instanceof Error ? lastErr.message : String(lastErr)
-    }`,
-  );
+interface Pending {
+  waMessageId: string;
+  body: string;
+  authorPhone: string;
+  authorName: string | null;
+  timestamp: string;
+  /** Kept so the bot can react/reply to the exact wweb.js Message later. */
+  msg: Message;
 }
 
-/** Per-group rolling history buffer, newest last. In-memory; reset on bot restart. */
+// ─── In-memory state ────────────────────────────────────────────────
 const historyByGroup = new Map<string, AnalyzeInboundHistory[]>();
+const bufferByGroup = new Map<string, Pending[]>();
+const nextKickoffMsByGroup = new Map<string, number | null>();
+const inFlightFlush = new Set<string>(); // prevent two flushes running in parallel per group
+let flushTimer: NodeJS.Timeout | null = null;
+let sharedClient: Client | null = null;
 
+// ─── History buffer ─────────────────────────────────────────────────
 export function recordHistory(groupId: string, entry: AnalyzeInboundHistory) {
   const arr = historyByGroup.get(groupId) ?? [];
   arr.push(entry);
@@ -79,183 +62,159 @@ function getHistory(groupId: string): AnalyzeInboundHistory[] {
   return historyByGroup.get(groupId) ?? [];
 }
 
-function phoneFromAuthor(authorId: string | undefined, fromId: string): string | null {
+// ─── Phone helper ───────────────────────────────────────────────────
+function phoneFromAuthor(authorId: string | undefined, fromId: string): string {
   const id = authorId ?? fromId;
-  // `@lid` senders don't carry a real phone — let them flow to the
-  // analyser with empty phone; the server will try a name-based
-  // fallback and still run classification/reply even when attendance
-  // side-effects aren't possible.
+  // @lid senders carry no phone — return empty string so the server
+  // will try a name-based fallback. @c.us senders give a real phone.
   if (!id.endsWith("@c.us")) return "";
   return id.replace("@c.us", "").replace(/^\+/, "");
 }
 
-export async function analyzeSingleMessage(client: Client, msg: Message): Promise<void> {
+// ─── Enqueue ────────────────────────────────────────────────────────
+/**
+ * Called from the `message` event handler when the regex fast-path
+ * didn't act. Pushes the message onto the group's pending buffer and
+ * either (a) triggers an urgent flush if kickoff is close, or (b)
+ * flushes immediately if the buffer is full.
+ */
+export async function enqueueForAnalysis(client: Client, msg: Message): Promise<void> {
+  sharedClient = client;
   if (!msg.from.endsWith("@g.us")) return;
-  const phone = phoneFromAuthor(msg.author, msg.from);
-  // `null` means we can't even attempt analysis (shouldn't happen for
-  // group messages — both `@c.us` and `@lid` return strings). Empty
-  // string means @lid — server will try name-based fallback.
-  if (phone === null) return;
 
-  const waMessageId = msg.id._serialized;
+  const phone = phoneFromAuthor(msg.author, msg.from);
+  const waMessageId = msg.id?._serialized;
+  if (!waMessageId) return;
+
   const contact = await msg.getContact().catch(() => null);
   const authorName = contact?.pushname ?? contact?.name ?? null;
 
-  const inbound: AnalyzeInboundMessage = {
+  const pending: Pending = {
     waMessageId,
     body: msg.body ?? "",
     authorPhone: phone,
     authorName,
     timestamp: new Date((msg.timestamp ?? Date.now() / 1000) * 1000).toISOString(),
+    msg,
   };
 
-  const history = getHistory(msg.from);
+  const arr = bufferByGroup.get(msg.from) ?? [];
+  arr.push(pending);
+  bufferByGroup.set(msg.from, arr);
 
-  let results: AnalyzeResult[] = [];
-  try {
-    results = await postAnalyze({
-      groupId: msg.from,
-      messages: [inbound],
-      history,
-    });
-  } catch (err) {
-    console.error("[smart] analyze post failed:", err);
-    return;
-  }
+  // Urgency check — match starts within URGENCY_WINDOW → flush now.
+  const kickoff = nextKickoffMsByGroup.get(msg.from);
+  const urgent = typeof kickoff === "number" && kickoff - Date.now() <= URGENCY_WINDOW_MS;
+  const oversized = arr.length >= MAX_BUFFER;
 
-  const verdict = results[0];
-  if (!verdict) return;
-
-  await executeActions(client, msg, verdict);
-}
-
-async function executeActions(client: Client, msg: Message, verdict: AnalyzeResult) {
-  if (verdict.handledBy === "deduped") return;
-
-  if (verdict.react) {
-    try {
-      await msg.react(verdict.react);
-    } catch (err) {
-      console.error("[smart] react failed:", err);
-    }
-  }
-
-  if (verdict.reply) {
-    try {
-      const chat = await client.getChatById(msg.from);
-      await chat.sendMessage(verdict.reply);
-    } catch (err) {
-      console.error("[smart] reply failed:", err);
-    }
-  }
-
-  if (verdict.intent && verdict.intent !== "noise") {
+  if (urgent || oversized) {
     console.log(
-      `[smart] ${msg.id._serialized} intent=${verdict.intent} react=${verdict.react ?? "-"} reply=${
-        verdict.reply ? "yes" : "no"
-      } :: ${(verdict.reasoning ?? "").slice(0, 140)}`,
+      `[smart] immediate flush for ${msg.from} (${urgent ? "urgent" : "oversized"}, ${arr.length} pending)`,
     );
+    await flushGroup(client, msg.from);
   }
 }
 
-/**
- * Periodic catch-up: fetch the tail of group history, ask the server
- * which messages it hasn't analysed yet (via waMessageId dedupe), and
- * run Claude on them. Safe to call repeatedly — the server dedupes.
- */
-export async function catchUpScan(client: Client, groupId: string, limit = CATCH_UP_LIMIT) {
-  let msgs: Message[] = [];
+// ─── Flush mechanics ────────────────────────────────────────────────
+async function flushGroup(client: Client, groupId: string): Promise<void> {
+  if (inFlightFlush.has(groupId)) return;
+  inFlightFlush.add(groupId);
   try {
-    const chat = await client.getChatById(groupId);
-    msgs = await fetchGroupMessagesWithRetry(chat, limit);
-  } catch (err) {
-    console.warn(
-      `[smart] catchUp skipped for ${groupId}: ${err instanceof Error ? err.message : err}`,
-    );
-    return;
-  }
-  if (msgs.length === 0) return;
+    const pending = bufferByGroup.get(groupId) ?? [];
+    if (pending.length === 0) return;
+    bufferByGroup.set(groupId, []); // clear optimistically; errors will log, but we don't want to loop
 
-  const now = Date.now();
-  const eligible = msgs.filter((m) => {
-    if (!m || !m.id?._serialized) return false;
-    if (m.fromMe) return false; // skip the bot's own messages
-    if (m.isStatus) return false;
-    if (!m.from?.endsWith("@g.us")) return false;
-    const tsMs = (m.timestamp ?? 0) * 1000;
-    if (now - tsMs > MAX_MESSAGE_AGE_MS) return false;
-    if (!m.body || m.body.trim().length === 0) return false;
-    return true;
-  });
+    const msgsForAnalyze: AnalyzeInboundMessage[] = pending.map((p) => ({
+      waMessageId: p.waMessageId,
+      body: p.body,
+      authorPhone: p.authorPhone,
+      authorName: p.authorName,
+      timestamp: p.timestamp,
+    }));
+    const history = getHistory(groupId);
 
-  const inbound: AnalyzeInboundMessage[] = [];
-  for (const m of eligible) {
-    const phone = phoneFromAuthor(m.author, m.from);
-    if (phone === null) continue;
-    const contact = await m.getContact().catch(() => null);
-    const authorName = contact?.pushname ?? contact?.name ?? null;
-    inbound.push({
-      waMessageId: m.id._serialized,
-      body: m.body,
-      authorPhone: phone,
-      authorName,
-      timestamp: new Date((m.timestamp ?? now / 1000) * 1000).toISOString(),
-    });
-  }
-  if (inbound.length === 0) return;
+    let results: AnalyzeResult[] = [];
+    let nextKickoffMs: number | null = null;
+    try {
+      const res = await postAnalyzeFull({ groupId, messages: msgsForAnalyze, history });
+      results = res.results;
+      nextKickoffMs = res.nextKickoffMs;
+    } catch (err) {
+      console.error("[smart] analyze POST failed:", err);
+      return;
+    }
 
-  // Order oldest-first so Claude sees history coherently if multiple
-  // messages need analysis in one batch.
-  inbound.sort((a, b) => +new Date(a.timestamp) - +new Date(b.timestamp));
+    if (typeof nextKickoffMs === "number" || nextKickoffMs === null) {
+      nextKickoffMsByGroup.set(groupId, nextKickoffMs);
+    }
 
-  // Use the older-before-newer messages as each others' history context.
-  const history: AnalyzeInboundHistory[] = inbound.slice(-HISTORY_PER_GROUP).map((m) => ({
-    authorName: m.authorName,
-    body: m.body,
-    timestamp: m.timestamp,
-  }));
+    const actionable = results.filter((r) => r.handledBy !== "deduped");
+    if (actionable.length > 0) {
+      console.log(
+        `[smart] flush ${groupId}: ${actionable.length}/${results.length} actionable`,
+      );
+    }
 
-  let results: AnalyzeResult[] = [];
-  try {
-    results = await postAnalyze({ groupId, messages: inbound, history });
-  } catch (err) {
-    console.error("[smart] catchUp analyze post failed:", err);
-    return;
-  }
+    // Execute per-message actions on the WhatsApp side.
+    for (const r of results) {
+      if (r.handledBy === "deduped" || r.handledBy === "error") continue;
+      if (!r.react && !r.reply) continue;
 
-  const actedOn = results.filter((r) => r.handledBy !== "deduped").length;
-  if (actedOn > 0) {
-    console.log(`[smart] catchUp: ${actedOn}/${results.length} messages processed for ${groupId}`);
-  }
+      const target = pending.find((p) => p.waMessageId === r.waMessageId)?.msg;
+      if (!target) continue;
 
-  // Execute actions on the WhatsApp side (react + reply).
-  for (const r of results) {
-    if (r.handledBy === "deduped" || r.handledBy === "error") continue;
-    if (!r.react && !r.reply) continue;
-
-    const target = msgs.find((m) => m.id?._serialized === r.waMessageId);
-    if (!target) continue;
-
-    if (r.react) {
-      try {
-        await target.react(r.react);
-      } catch (err) {
-        console.error("[smart] catchUp react failed:", err);
+      if (r.react) {
+        try {
+          await target.react(r.react);
+        } catch (err) {
+          console.error("[smart] react failed:", err);
+        }
+      }
+      if (r.reply) {
+        try {
+          const chat = await client.getChatById(groupId);
+          await chat.sendMessage(r.reply);
+        } catch (err) {
+          console.error("[smart] reply failed:", err);
+        }
       }
     }
-    if (r.reply) {
-      try {
-        const chat = await client.getChatById(groupId);
-        await chat.sendMessage(r.reply);
-      } catch (err) {
-        console.error("[smart] catchUp reply failed:", err);
-      }
-    }
+  } finally {
+    inFlightFlush.delete(groupId);
   }
 }
 
-export async function catchUpAllGroups(client: Client, groupIds: string[], limit = CATCH_UP_LIMIT) {
-  for (const g of groupIds) {
-    await catchUpScan(client, g, limit);
+
+// ─── Timer ──────────────────────────────────────────────────────────
+export function startBatchFlushTimer(client: Client, groupIds: string[]): void {
+  sharedClient = client;
+  if (flushTimer) return; // idempotent
+
+  flushTimer = setInterval(() => {
+    for (const g of groupIds) {
+      flushGroup(client, g).catch((err) => console.error("[smart] scheduled flush failed:", err));
+    }
+  }, FLUSH_INTERVAL_MS);
+
+  // Also do one flush a few seconds after startup so any messages that
+  // came in right before boot get processed promptly.
+  setTimeout(() => {
+    for (const g of groupIds) {
+      flushGroup(client, g).catch(() => {
+        /* logged inside */
+      });
+    }
+  }, 15_000);
+}
+
+export function stopBatchFlushTimer(): void {
+  if (flushTimer) {
+    clearInterval(flushTimer);
+    flushTimer = null;
   }
+}
+
+export function _test_flushNow(groupId: string): Promise<void> {
+  if (!sharedClient) return Promise.resolve();
+  return flushGroup(sharedClient, groupId);
 }

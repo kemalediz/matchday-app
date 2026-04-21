@@ -1,44 +1,50 @@
 /**
- * Smart-analysis entry point. Called by the bot for any WhatsApp group
- * message the regex fast-path didn't handle — either inline (one
- * message at a time) or in a catch-up batch (startup / periodic scan).
+ * Smart-analysis entry point. Called by the bot once per flush cycle
+ * (every ~10 min, or immediately on urgency). Accepts a batch of group
+ * messages that the regex fast-path didn't handle, runs Claude Haiku
+ * ONCE on the batch, executes verdicts, and returns per-message
+ * actions for the bot to perform on the WhatsApp side.
  *
- * Flow per message:
- *   1. Skip if `waMessageId` already in `AnalyzedMessage` (dedupe across
- *      inline + catch-up paths).
- *   2. Resolve author phone → User → Membership (auto-onboard new
- *      members the same way /api/whatsapp/attendance does).
- *   3. Hand message + squad + history to `analyzeMessage()` (Claude).
- *   4. Execute the verdict:
- *        - register IN/OUT  → lib/attendance.ts
- *        - react             → returned to bot; bot calls msg.react()
- *        - reply             → returned to bot; bot posts in group
- *   5. Record the outcome in `AnalyzedMessage` so the same waMessageId
- *      can't be analysed twice.
+ * Flow:
+ *   1. Dedupe: skip any waMessageId already in AnalyzedMessage
+ *      (covers bot restarts + retries).
+ *   2. Hand the batch + cached context to `analyzeBatch()` (one Claude call).
+ *   3. For each verdict:
+ *        a. Resolve author → User (phone, then fallback by pushname).
+ *        b. If verdict says register IN/OUT and we have a User, update
+ *           attendance via lib/attendance.ts.
+ *        c. Record the outcome in AnalyzedMessage (intent, confidence,
+ *           action, reasoning).
+ *   4. Return the bot the per-message actions (react, reply) + the
+ *      next-kickoff timestamp it needs to decide urgency.
  *
- * The bot sends `actions[]` back to WhatsApp itself (we can't from
- * here — WhatsApp sessions live on the Pi). The API just computes what
- * *should* happen.
- *
- * Request shape:
+ * Request:
  *   {
  *     groupId: "xxx@g.us",
  *     history: [{authorName, body, timestamp}],
  *     messages: [{waMessageId, body, authorPhone, authorName, timestamp}]
  *   }
  *
- * Response shape:
+ * Response:
  *   {
  *     ok: true,
+ *     orgId: "...",
+ *     nextKickoffMs: number | null,   // ms since epoch of the next match,
+ *                                     // so the bot knows when to urgency-
+ *                                     // flush without an extra round trip
  *     results: [
- *       { waMessageId, handledBy, intent, actions: {react?, reply?} }
+ *       { waMessageId, handledBy, intent, react, reply, reasoning? }
  *     ]
  *   }
  */
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { normalisePhone } from "@/lib/phone";
-import { analyzeMessage, type AnalysisResult } from "@/lib/message-analyzer";
+import {
+  analyzeBatch,
+  type AnalysisVerdict,
+  type BatchInputMessage,
+} from "@/lib/message-analyzer";
 import { registerAttendance, cancelAttendance } from "@/lib/attendance";
 
 interface InboundMessage {
@@ -46,13 +52,13 @@ interface InboundMessage {
   body: string;
   authorPhone: string;
   authorName: string | null;
-  timestamp: string; // ISO
+  timestamp: string;
 }
 
 interface InboundHistory {
   authorName: string | null;
   body: string;
-  timestamp: string; // ISO
+  timestamp: string;
 }
 
 interface InboundBody {
@@ -68,6 +74,12 @@ type ActionForBot = {
   react: string | null;
   reply: string | null;
   reasoning?: string;
+};
+
+type ResolvedSender = {
+  userId: string | null;
+  name: string | null;
+  phone: string | null;
 };
 
 export async function POST(request: Request) {
@@ -89,115 +101,170 @@ export async function POST(request: Request) {
     return NextResponse.json({ ok: true, ignored: "unknown-or-disabled-group", results: [] });
   }
 
+  // 1. Dedupe.
+  const all = body.messages;
+  const ids = all.map((m) => m.waMessageId);
+  const seen = await db.analyzedMessage.findMany({
+    where: { waMessageId: { in: ids } },
+    select: { waMessageId: true, intent: true, handledBy: true },
+  });
+  const seenMap = new Map(seen.map((s) => [s.waMessageId, s]));
+
+  const fresh: InboundMessage[] = [];
+  const results: ActionForBot[] = [];
+
+  for (const msg of all) {
+    const prior = seenMap.get(msg.waMessageId);
+    if (prior) {
+      results.push({
+        waMessageId: msg.waMessageId,
+        handledBy: "deduped",
+        intent: prior.intent,
+        react: null,
+        reply: null,
+      });
+      continue;
+    }
+    const trimmed = msg.body.trim();
+    if (trimmed.length === 0) {
+      await recordAnalysis({
+        orgId: org.id,
+        groupId: body.groupId,
+        msg,
+        handledBy: "ignored",
+        intent: "noise",
+        action: null,
+        confidence: 1,
+        reasoning: "empty body",
+      });
+      results.push({
+        waMessageId: msg.waMessageId,
+        handledBy: "ignored",
+        intent: "noise",
+        react: null,
+        reply: null,
+      });
+      continue;
+    }
+    fresh.push(msg);
+  }
+
+  // 2. Resolve senders + hand the whole fresh batch to Claude in one call.
+  const senderById = new Map<string, ResolvedSender>();
+  for (const m of fresh) {
+    senderById.set(m.waMessageId, await resolveSender(org.id, m));
+  }
+
   const history = (body.history ?? []).map((h) => ({
     authorName: h.authorName,
     body: h.body,
     timestamp: new Date(h.timestamp),
   }));
 
-  const results: ActionForBot[] = [];
+  const batchInputs: BatchInputMessage[] = fresh.map((m) => {
+    const s = senderById.get(m.waMessageId)!;
+    return {
+      waMessageId: m.waMessageId,
+      body: m.body,
+      authorPhone: m.authorPhone,
+      authorName: m.authorName,
+      authorUserId: s.userId,
+      timestamp: new Date(m.timestamp),
+    };
+  });
 
-  for (const msg of body.messages) {
+  const verdicts = fresh.length
+    ? await analyzeBatch({ groupId: body.groupId, history, messages: batchInputs })
+    : [];
+
+  // 3. Execute verdicts sequentially (attendance writes are cheap and
+  //    order matters for state-collapse correctness).
+  for (let i = 0; i < fresh.length; i++) {
+    const msg = fresh[i];
+    const verdict = verdicts[i];
+    const sender = senderById.get(msg.waMessageId)!;
     try {
-      const result = await processOne({
+      const { react, reply } = await executeVerdict({
+        verdict,
+        user: sender.userId ? { id: sender.userId, name: sender.name } : null,
+      });
+      await recordAnalysis({
         orgId: org.id,
-        orgName: org.name,
         groupId: body.groupId,
         msg,
-        history,
+        handledBy: "llm",
+        intent: verdict.intent,
+        action:
+          verdict.registerAttendance ??
+          (react || reply ? (react ? "react" : "reply") : "none"),
+        confidence: verdict.confidence,
+        reasoning: verdict.reasoning,
+        authorUserId: sender.userId,
       });
-      results.push(result);
+      results.push({
+        waMessageId: msg.waMessageId,
+        handledBy: "llm",
+        intent: verdict.intent,
+        react,
+        reply,
+        reasoning: verdict.reasoning,
+      });
     } catch (err) {
-      console.error("[analyze] processOne failed:", err, "for", msg.waMessageId);
+      console.error("[analyze] verdict execution failed:", err, "for", msg.waMessageId);
       await recordAnalysis({
         orgId: org.id,
         groupId: body.groupId,
         msg,
         handledBy: "error",
-        intent: null,
+        intent: verdict.intent,
         action: null,
-        confidence: null,
+        confidence: verdict.confidence,
         reasoning: err instanceof Error ? err.message : String(err),
       });
       results.push({
         waMessageId: msg.waMessageId,
         handledBy: "error",
-        intent: null,
+        intent: verdict.intent,
         react: null,
         reply: null,
       });
     }
   }
 
-  return NextResponse.json({ ok: true, orgId: org.id, results });
+  // 4. Return + include next-kickoff so the bot can urgency-flush.
+  const nextMatch = await db.match.findFirst({
+    where: {
+      activity: { orgId: org.id },
+      status: { in: ["UPCOMING", "TEAMS_GENERATED", "TEAMS_PUBLISHED"] },
+    },
+    orderBy: { date: "asc" },
+    select: { date: true },
+  });
+
+  return NextResponse.json({
+    ok: true,
+    orgId: org.id,
+    nextKickoffMs: nextMatch?.date.getTime() ?? null,
+    results,
+  });
 }
 
-async function processOne(args: {
-  orgId: string;
-  orgName: string;
-  groupId: string;
-  msg: InboundMessage;
-  history: { authorName: string | null; body: string; timestamp: Date }[];
-}): Promise<ActionForBot> {
-  const { orgId, groupId, msg, history } = args;
-
-  // 1. Dedupe by waMessageId.
-  const already = await db.analyzedMessage.findUnique({
-    where: { waMessageId: msg.waMessageId },
-    select: { intent: true, handledBy: true },
-  });
-  if (already) {
-    return {
-      waMessageId: msg.waMessageId,
-      handledBy: "deduped",
-      intent: already.intent,
-      react: null,
-      reply: null,
-    };
-  }
-
-  // 2. Skip pathological bodies.
-  const body = msg.body.trim();
-  if (body.length === 0) {
-    await recordAnalysis({
-      orgId,
-      groupId,
-      msg,
-      handledBy: "ignored",
-      intent: "noise",
-      action: null,
-      confidence: 1,
-      reasoning: "empty body",
-    });
-    return {
-      waMessageId: msg.waMessageId,
-      handledBy: "ignored",
-      intent: "noise",
-      react: null,
-      reply: null,
-    };
-  }
-
-  // 3. Resolve author → User.
-  //    a) Try by phone (the bot may send without the '+' — be forgiving).
-  //    b) Fallback: `@lid` senders carry no phone. Try a best-effort
-  //       match by authorName against User.name within this org. If a
-  //       unique non-left member matches, we'll use them. Otherwise
-  //       the message still gets classified, just without an attendance
-  //       side-effect.
-  let user: { id: string; name: string | null } | null = null;
-  let normalised: string | null = null;
+async function resolveSender(orgId: string, msg: InboundMessage): Promise<ResolvedSender> {
+  // Phone first (most accurate). Accept raw digits — prepend '+' if the
+  // bot didn't. @lid senders arrive with empty phone: that's the signal
+  // to try a name-based fallback.
   if (msg.authorPhone) {
-    const rawPhone = msg.authorPhone.startsWith("+") ? msg.authorPhone : `+${msg.authorPhone}`;
-    normalised = normalisePhone(rawPhone);
-    if (normalised) {
-      user = await db.user.findUnique({
-        where: { phoneNumber: normalised },
+    const raw = msg.authorPhone.startsWith("+") ? msg.authorPhone : `+${msg.authorPhone}`;
+    const norm = normalisePhone(raw);
+    if (norm) {
+      const user = await db.user.findUnique({
+        where: { phoneNumber: norm },
         select: { id: true, name: true },
       });
+      if (user) return { userId: user.id, name: user.name, phone: norm };
     }
   }
-  if (!user && msg.authorName && msg.authorName.trim().length >= 3) {
+  if (msg.authorName && msg.authorName.trim().length >= 3) {
     const matches = await db.membership.findMany({
       where: {
         orgId,
@@ -210,76 +277,18 @@ async function processOne(args: {
       take: 2,
     });
     if (matches.length === 1) {
-      user = matches[0].user;
+      return { userId: matches[0].user.id, name: matches[0].user.name, phone: null };
     }
   }
-
-  // Only act on attendance for users who ARE members of this org (and
-  // haven't been marked as left). Unknown users → we still let Claude
-  // classify the message so we can maybe answer a question, but we
-  // won't register attendance on their behalf.
-  const membership = user
-    ? await db.membership.findUnique({
-        where: { userId_orgId: { userId: user.id, orgId } },
-        select: { leftAt: true },
-      })
-    : null;
-  const isActiveMember = !!membership && membership.leftAt === null;
-
-  // 4. Ask Claude.
-  const verdict = await analyzeMessage({
-    groupId,
-    message: {
-      body,
-      authorPhone: msg.authorPhone,
-      authorName: msg.authorName,
-      authorUserId: user?.id ?? null,
-      waMessageId: msg.waMessageId,
-      timestamp: new Date(msg.timestamp),
-    },
-    history,
-  });
-
-  // 5. Execute the verdict.
-  const { react, reply } = await executeVerdict({
-    verdict,
-    user: user && isActiveMember ? { id: user.id, name: user.name } : null,
-    orgName: args.orgName,
-  });
-
-  // 6. Record the outcome for dedupe + audit.
-  await recordAnalysis({
-    orgId,
-    groupId,
-    msg,
-    handledBy: "llm",
-    intent: verdict.intent,
-    action: verdict.registerAttendance ?? (react || reply ? "react-or-reply" : "none"),
-    confidence: verdict.confidence,
-    reasoning: verdict.reasoning,
-    authorUserId: user?.id ?? null,
-  });
-
-  return {
-    waMessageId: msg.waMessageId,
-    handledBy: "llm",
-    intent: verdict.intent,
-    react,
-    reply,
-    reasoning: verdict.reasoning,
-  };
+  return { userId: null, name: msg.authorName, phone: null };
 }
 
 async function executeVerdict(args: {
-  verdict: AnalysisResult;
+  verdict: AnalysisVerdict;
   user: { id: string; name: string | null } | null;
-  orgName: string;
 }): Promise<{ react: string | null; reply: string | null }> {
   const { verdict, user } = args;
-  let reply = verdict.reply;
 
-  // Attendance side-effects only run for a known active member — we
-  // never change a phone's attendance without an established membership.
   if (verdict.registerAttendance && user) {
     const matchForOrg = await db.match.findFirst({
       where: {
@@ -299,16 +308,10 @@ async function executeVerdict(args: {
       } catch (err) {
         console.error("[analyze] attendance update failed:", err);
       }
-
-      // Personalise replacement-request replies if Claude didn't
-      // include the player's name in its reply.
-      if (verdict.intent === "replacement_request" && reply && user.name && !reply.includes(user.name)) {
-        reply = reply.replace(/<name>/gi, user.name);
-      }
     }
   }
 
-  return { react: verdict.react, reply };
+  return { react: verdict.react, reply: verdict.reply };
 }
 
 async function recordAnalysis(args: {
@@ -328,7 +331,7 @@ async function recordAnalysis(args: {
         waMessageId: args.msg.waMessageId,
         orgId: args.orgId,
         groupId: args.groupId,
-        authorPhone: args.msg.authorPhone,
+        authorPhone: args.msg.authorPhone || null,
         authorUserId: args.authorUserId ?? null,
         body: args.msg.body.slice(0, 2000),
         handledBy: args.handledBy,
@@ -339,9 +342,8 @@ async function recordAnalysis(args: {
       },
     });
   } catch (err) {
-    // Unique violation → already analysed in a concurrent request; fine.
-    const msg = err instanceof Error ? err.message : String(err);
-    if (!/unique/i.test(msg)) {
+    const m = err instanceof Error ? err.message : String(err);
+    if (!/unique/i.test(m)) {
       console.error("[analyze] recordAnalysis failed:", err);
     }
   }

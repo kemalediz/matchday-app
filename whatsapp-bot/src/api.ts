@@ -190,6 +190,21 @@ export async function postAnalyze(params: {
   messages: AnalyzeInboundMessage[];
   history?: AnalyzeInboundHistory[];
 }): Promise<AnalyzeResult[]> {
+  const full = await postAnalyzeFull(params);
+  return full.results;
+}
+
+export interface AnalyzeFullResponse {
+  results: AnalyzeResult[];
+  /** ms since epoch of the next upcoming match's kickoff, or null if none. */
+  nextKickoffMs: number | null;
+}
+
+export async function postAnalyzeFull(params: {
+  groupId: string;
+  messages: AnalyzeInboundMessage[];
+  history?: AnalyzeInboundHistory[];
+}): Promise<AnalyzeFullResponse> {
   const res = await fetch(`${config.apiUrl}/api/whatsapp/analyze`, {
     method: "POST",
     headers,
@@ -197,10 +212,16 @@ export async function postAnalyze(params: {
   });
   if (!res.ok) {
     console.error("analyze post failed:", res.status, await res.text());
-    return [];
+    return { results: [], nextKickoffMs: null };
   }
-  const json = (await res.json()) as { results?: AnalyzeResult[] };
-  return json.results ?? [];
+  const json = (await res.json()) as {
+    results?: AnalyzeResult[];
+    nextKickoffMs?: number | null;
+  };
+  return {
+    results: json.results ?? [],
+    nextKickoffMs: typeof json.nextKickoffMs === "number" ? json.nextKickoffMs : null,
+  };
 }
 
 /**
