@@ -547,26 +547,25 @@ async function computeForMatch(
     }
   }
 
-  // ── 5. 2h before kickoff ──────────────────────────────────────────────
-  //       When the squad is full we post a "see you there"; when short we
-  //       post a last-chance plea. Both now LLM-composed via the scheduler
-  //       so the roster + tentative lines show up consistently, with
-  //       static text as a resilience fallback.
+  // ── 5. 2h before kickoff: squad-short last-chance plea ONLY ──────────
+  //       When squad is FULL we used to post a "see you there" — removed
+  //       on 2026-04-21 because it duplicated info everyone already knew
+  //       and added noise. Now this block ONLY fires when we're still
+  //       short 2h before kickoff, as a last call.
   {
     const key = `${matchId}:pre-kickoff`;
+    const need = maxPlayers - confirmed.length;
     if (
       !sentKeys.has(key) &&
+      need > 0 &&
       hoursUntilMatch <= 2 &&
       hoursUntilMatch > 0.5 &&
       (m.status === "TEAMS_PUBLISHED" || m.status === "TEAMS_GENERATED" || m.status === "UPCOMING")
     ) {
-      const need = maxPlayers - confirmed.length;
       const base = `⏰ Tonight *${format(m.date, "HH:mm")}* at *${activity.venue}* · ${confirmed.length}/${maxPlayers}`;
-      const kind: ChaseKind = need > 0 ? "pre-kickoff-short" : "pre-kickoff-full";
-      const text = await composeOrFallback(kind, () =>
-        need > 0
-          ? `${base} — *still need ${need}*, last chance to jump in. 🙏`
-          : `${base}. See you there.`,
+      const text = await composeOrFallback(
+        "pre-kickoff-short",
+        () => `${base} — *still need ${need}*, last chance to jump in. 🙏`,
       );
       out.push({ kind: "group-message", key, matchId, text });
     }
@@ -592,7 +591,9 @@ async function computeForMatch(
         kind: "group-message",
         key,
         matchId,
-        text: `⚽ Quick reminder — if you've got them, please bring your *goalie gloves* and a *ball* tonight. See you at ${activity.venue}!`,
+        text:
+          `⚽ *${format(m.date, "HH:mm")} at ${activity.venue}* — see you there!\n\n` +
+          `Quick reminder: if you've got them, please bring your *goalie gloves*, a *ball*, and *spare bibs*.`,
       });
     }
   }
@@ -617,8 +618,8 @@ async function computeForMatch(
         key,
         matchId,
         text:
-          `🏁 *${activity.name}* — what was the final score?\n\n` +
-          `Reply with just the numbers, e.g. *7-3* (${sport.teamLabels?.[0] ?? "Red"} – ${sport.teamLabels?.[1] ?? "Yellow"}).`,
+          `🏁 *${activity.name}* — hope it was a good one. What was the final score? ` +
+          `I'll use it to update everyone's rating for next week (margin of victory counts — a 7–3 shifts more than 5–4).`,
       });
     }
   }
