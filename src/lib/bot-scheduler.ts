@@ -27,9 +27,11 @@ function format(d: Date, pattern: string): string {
 
 // ───────── Same-sport helpers for switch/cancel-format nudges ────────
 
-/** Find the activity with the smallest playersPerTeam in the same sport
- *  family (e.g. "Football") and smaller than `currentPpt`. Used to offer
- *  a 7-a-side → 5-a-side switch when the squad is short. */
+/** Find the ACTIVE activity with the smallest playersPerTeam in the
+ *  same sport family (e.g. "Football") and smaller than `currentPpt`.
+ *  Used to offer a 7-a-side → 5-a-side switch when the squad is short.
+ *  If the admin hasn't set up a smaller-format Activity (or disabled
+ *  it), this returns null and no switch nudge fires. */
 async function findSmallerSameSportActivity(
   orgId: string,
   currentSportId: string,
@@ -42,7 +44,7 @@ async function findSmallerSameSportActivity(
   if (!currentSport) return null;
   const family = currentSport.name.split(" ")[0];
   const acts = await db.activity.findMany({
-    where: { orgId },
+    where: { orgId, isActive: true },
     include: { sport: true },
   });
   return (

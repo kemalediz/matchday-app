@@ -243,16 +243,18 @@ export async function analyzeBatch(input: AnalysisBatchInput): Promise<AnalysisV
     orderBy: { date: "asc" },
   });
 
-  // Load alternative formats (smaller playersPerTeam, same sport family)
-  // so the LLM can propose a switch when the squad is short and kickoff
-  // is close. Sport "family" is the first word of the sport name — e.g.
-  // "Football 7-a-side" / "Football 5-a-side" share family "Football".
+  // Load alternative formats the admin has actually set up for this
+  // org — only ACTIVE Activity rows count. Sport "family" is the first
+  // word of the sport name (e.g. "Football 7-a-side" and "Football
+  // 5-a-side" share family "Football"). If the admin hasn't configured
+  // a smaller-format Activity, the LLM gets no alternatives and is
+  // told to stay silent on the switch option.
   const alternatives: Array<{ sportName: string; totalPlayers: number }> = [];
   if (match) {
     const family = match.activity.sport.name.split(" ")[0];
     const currentPpt = match.activity.sport.playersPerTeam;
     const siblingActivities = await db.activity.findMany({
-      where: { orgId: org.id },
+      where: { orgId: org.id, isActive: true },
       include: { sport: { select: { name: true, playersPerTeam: true } } },
     });
     const seen = new Set<string>();
