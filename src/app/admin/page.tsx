@@ -30,7 +30,9 @@ export default async function AdminDashboardPage() {
         status: { in: ["UPCOMING", "TEAMS_GENERATED", "TEAMS_PUBLISHED"] },
       },
     }),
-    db.match.count({ where: { activity: { orgId }, status: "COMPLETED" } }),
+    db.match.count({
+      where: { activity: { orgId }, status: "COMPLETED", isHistorical: false },
+    }),
   ]);
 
   return (

@@ -214,6 +214,14 @@ model Match {
   /// the first match after launch while the rating UI is still maturing.
   postMatchEndFlow   Boolean     @default(true)
 
+  /// Synthetic historical match — NOT a real scheduled match, just an
+  /// anchor for pre-MatchTime MoM votes we backfilled from WhatsApp
+  /// chat history. Dashboards, the bot scheduler, and "recent results"
+  /// lists all exclude these so they don't pollute present-day UX.
+  /// The leaderboard's MoM-count query DOES include them — which is
+  /// the whole point of backfilling.
+  isHistorical       Boolean     @default(false)
+
   attendances            Attendance[]
   teamAssignments        TeamAssignment[]
   ratings                Rating[]

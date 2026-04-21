@@ -36,7 +36,7 @@ export default async function MatchesPage() {
   });
 
   const pastMatches = await db.match.findMany({
-    where: { activity: { orgId }, status: "COMPLETED" },
+    where: { activity: { orgId }, status: "COMPLETED", isHistorical: false },
     orderBy: { date: "desc" },
     take: 20,
     include: { activity: { include: { sport: true } } },

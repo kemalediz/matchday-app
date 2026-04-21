@@ -81,14 +81,18 @@ export default async function DashboardPage() {
     : null;
 
   const recentMatches = await db.match.findMany({
-    where: { activity: { orgId }, status: "COMPLETED" },
+    where: { activity: { orgId }, status: "COMPLETED", isHistorical: false },
     orderBy: { date: "desc" },
     take: 5,
     include: { activity: true },
   });
 
   const matchesPlayed = await db.attendance.count({
-    where: { userId: session.user.id, status: "CONFIRMED", match: { status: "COMPLETED" } },
+    where: {
+      userId: session.user.id,
+      status: "CONFIRMED",
+      match: { status: "COMPLETED", isHistorical: false },
+    },
   });
   const momWins = await db.moMVote.groupBy({
     by: ["matchId"],

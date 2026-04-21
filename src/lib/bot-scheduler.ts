@@ -264,6 +264,7 @@ async function getMatchesForScheduler(orgId: string, windowStart: Date) {
   return db.match.findMany({
     where: {
       activity: { orgId },
+      isHistorical: false,
       OR: [
         { status: { in: ["UPCOMING", "TEAMS_GENERATED", "TEAMS_PUBLISHED"] } },
         { status: "COMPLETED", date: { gte: windowStart } },
