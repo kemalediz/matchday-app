@@ -267,20 +267,52 @@ async function resolveSender(orgId: string, msg: InboundMessage): Promise<Resolv
       if (user) return { userId: user.id, name: user.name, phone: norm };
     }
   }
-  if (msg.authorName && msg.authorName.trim().length >= 3) {
-    const matches = await db.membership.findMany({
-      where: {
-        orgId,
-        leftAt: null,
-        user: {
-          name: { equals: msg.authorName.trim(), mode: "insensitive" },
-        },
-      },
+  if (msg.authorName && msg.authorName.trim().length >= 2) {
+    // Fuzzy name match — the sender's WhatsApp display name ("Kemal
+    // Ediz") often doesn't exactly match the DB record ("Kemal"), so
+    // we:
+    //   1. First try exact case-insensitive equals (the historic rule)
+    //   2. Fall back to first-token match on either side — DB first
+    //      name vs pushname first name, either direction
+    // Both variants still require a UNIQUE match in the org to avoid
+    // guessing between two players with the same first name.
+    const pushname = msg.authorName.trim();
+    const candidates = await db.membership.findMany({
+      where: { orgId, leftAt: null },
       include: { user: { select: { id: true, name: true } } },
-      take: 2,
     });
-    if (matches.length === 1) {
-      return { userId: matches[0].user.id, name: matches[0].user.name, phone: null };
+    const norm = (s: string) =>
+      s.trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+    const pushTokens = norm(pushname).split(/\s+/).filter(Boolean);
+    const pushFirst = pushTokens[0] ?? "";
+
+    const equalsMatches = candidates.filter(
+      (c) => c.user.name && norm(c.user.name) === norm(pushname),
+    );
+    if (equalsMatches.length === 1) {
+      return {
+        userId: equalsMatches[0].user.id,
+        name: equalsMatches[0].user.name,
+        phone: null,
+      };
+    }
+
+    const firstNameMatches = candidates.filter((c) => {
+      if (!c.user.name) return false;
+      const dbTokens = norm(c.user.name).split(/\s+/).filter(Boolean);
+      const dbFirst = dbTokens[0] ?? "";
+      return (
+        dbFirst === pushFirst ||
+        (dbFirst.length >= 3 && pushFirst.length >= 3 &&
+          (dbFirst.startsWith(pushFirst) || pushFirst.startsWith(dbFirst)))
+      );
+    });
+    if (firstNameMatches.length === 1) {
+      return {
+        userId: firstNameMatches[0].user.id,
+        name: firstNameMatches[0].user.name,
+        phone: null,
+      };
     }
   }
   return { userId: null, name: msg.authorName, phone: null };
@@ -360,10 +392,15 @@ async function executeVerdict(args: {
   }
 
   // ── Score submission ─────────────────────────────────────────────
-  //    LLM extracted scoreRed / scoreYellow. Match is identified the
-  //    same way /api/whatsapp/score does: most recent ended-but-unscored
-  //    match in the org. Authoriser check: confirmed participant OR
-  //    org admin (same as the existing score endpoint).
+  //    LLM extracted scoreRed / scoreYellow. We record the score as
+  //    long as we can identify an unscored match that has actually
+  //    ended. If we can resolve the sender to a known org admin or
+  //    confirmed participant → write the score. If we CAN'T resolve
+  //    them (e.g. WhatsApp hid the phone via @lid and the pushname
+  //    didn't match any player) → still write the score, because the
+  //    message came from the monitored org's group chat and losing
+  //    the score entirely is a worse failure mode than occasionally
+  //    trusting a wrong number. Admin can correct via the dashboard.
   if (
     verdict.intent === "score" &&
     typeof verdict.scoreRed === "number" &&
@@ -391,17 +428,24 @@ async function executeVerdict(args: {
         const endedAt = new Date(m.date.getTime() + m.activity.matchDurationMins * 60 * 1000);
         return endedAt <= now;
       });
-      if (target && user) {
-        const attendance = await db.attendance.findUnique({
-          where: { matchId_userId: { matchId: target.id, userId: user.id } },
-        });
-        const membership = await db.membership.findUnique({
-          where: { userId_orgId: { userId: user.id, orgId } },
-        });
-        const isAdmin =
-          membership && (membership.role === "OWNER" || membership.role === "ADMIN");
-        const wasPlaying = attendance?.status === "CONFIRMED";
-        if (isAdmin || wasPlaying) {
+      if (target) {
+        // Authorisation check only blocks if we resolved a user AND they
+        // are neither admin nor confirmed. If user is null (unresolvable
+        // @lid), we permit.
+        let allowed = true;
+        if (user) {
+          const attendance = await db.attendance.findUnique({
+            where: { matchId_userId: { matchId: target.id, userId: user.id } },
+          });
+          const membership = await db.membership.findUnique({
+            where: { userId_orgId: { userId: user.id, orgId } },
+          });
+          const isAdmin =
+            membership && (membership.role === "OWNER" || membership.role === "ADMIN");
+          const wasPlaying = attendance?.status === "CONFIRMED";
+          allowed = !!(isAdmin || wasPlaying);
+        }
+        if (allowed) {
           await db.match.update({
             where: { id: target.id },
             data: {
@@ -427,8 +471,8 @@ async function executeVerdict(args: {
           }
           finalReact = finalReact ?? "👍";
         } else {
-          // Non-participant / non-admin tried to record a score — stay
-          // silent. Don't even react; the LLM reasoning gets logged.
+          // Resolved sender who is neither admin nor confirmed tried to
+          // record — silent. Don't even react.
           finalReact = null;
         }
       }
