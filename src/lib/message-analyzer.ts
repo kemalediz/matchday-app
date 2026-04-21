@@ -417,6 +417,192 @@ export async function analyzeBatch(input: AnalysisBatchInput): Promise<AnalysisV
   }
 }
 
+// ─── LLM-composed scheduled chase messages ──────────────────────────
+//
+// The bot scheduler decides WHEN to chase (17:00 daily roll-call,
+// match-day morning 8-9am, 3-4h before kickoff, 2h pre-kickoff). This
+// function composes the TEXT for a chase using the same Match Context
+// + squad-state reply rules the reactive analyser uses — so the
+// scheduled posts get the same rich roster / tentative / dropped
+// summary as the reactive ones.
+//
+// Returns the message text ready to send to WhatsApp. If Claude fails
+// for any reason, returns `null` and the scheduler falls back to the
+// static text it used to emit.
+
+export type ChaseKind =
+  | "daily-in-list" // 17:00, roster + need-X-more
+  | "match-day-morning" // match day 8-9am, upbeat nudge
+  | "chase-pre-kickoff" // 3-4h before kickoff, sharper call
+  | "pre-kickoff-full" // 2h before, final line-up post (may or may not be short)
+  | "pre-kickoff-short"; // 2h before, short-squad variant (last-chance plea)
+
+export async function composeChaseText(input: {
+  groupId: string;
+  kind: ChaseKind;
+}): Promise<string | null> {
+  const anthropic = getAnthropic();
+  if (!anthropic) return null;
+
+  const org = await db.organisation.findFirst({
+    where: { whatsappGroupId: input.groupId },
+    select: { id: true, name: true },
+  });
+  if (!org) return null;
+
+  const match = await db.match.findFirst({
+    where: {
+      activity: { orgId: org.id },
+      status: { in: ["UPCOMING", "TEAMS_GENERATED", "TEAMS_PUBLISHED"] },
+      attendanceDeadline: { gt: new Date() },
+    },
+    include: {
+      activity: {
+        select: {
+          name: true,
+          venue: true,
+          sport: { select: { name: true, playersPerTeam: true } },
+        },
+      },
+      attendances: {
+        include: { user: { select: { id: true, name: true } } },
+        orderBy: { position: "asc" },
+      },
+    },
+    orderBy: { date: "asc" },
+  });
+  if (!match) return null;
+
+  // Reuse the alternatives query from analyzeBatch.
+  const alternatives: Array<{ sportName: string; totalPlayers: number }> = [];
+  const family = match.activity.sport.name.split(" ")[0];
+  const currentPpt = match.activity.sport.playersPerTeam;
+  const siblingActivities = await db.activity.findMany({
+    where: { orgId: org.id },
+    include: { sport: { select: { name: true, playersPerTeam: true } } },
+  });
+  const seen = new Set<string>();
+  for (const a of siblingActivities) {
+    if (a.sport.name.split(" ")[0] !== family) continue;
+    if (a.sport.playersPerTeam >= currentPpt) continue;
+    if (seen.has(a.sport.name)) continue;
+    seen.add(a.sport.name);
+    alternatives.push({
+      sportName: a.sport.name,
+      totalPlayers: a.sport.playersPerTeam * 2,
+    });
+  }
+  alternatives.sort((x, y) => y.totalPlayers - x.totalPlayers);
+
+  const matchContext = buildMatchContextBlock({
+    orgName: org.name,
+    match,
+    alternatives,
+  });
+
+  const composePrompt = buildChaseComposePrompt(input.kind);
+
+  try {
+    const response = await anthropic.messages.create({
+      model: MODEL,
+      max_tokens: 500,
+      system: [
+        {
+          type: "text",
+          text: CHASE_SYSTEM_PROMPT,
+          cache_control: { type: "ephemeral", ttl: "1h" },
+        },
+      ],
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "text",
+              text: matchContext,
+              cache_control: { type: "ephemeral", ttl: "1h" },
+            },
+            {
+              type: "text",
+              text: composePrompt,
+            },
+          ],
+        },
+      ],
+    });
+    const textBlock = response.content.find(
+      (b): b is Anthropic.TextBlock => b.type === "text",
+    );
+    const raw = textBlock?.text?.trim();
+    if (!raw) return null;
+    // Strip any accidental fences / leading labels.
+    return raw
+      .replace(/^```(?:text|markdown)?\s*/i, "")
+      .replace(/\s*```$/i, "")
+      .trim();
+  } catch (err) {
+    console.error("[analyzer] composeChaseText Claude call failed:", err);
+    return null;
+  }
+}
+
+const CHASE_SYSTEM_PROMPT = `You are MatchTime, composing a SCHEDULED group message — not a reply to anyone. The bot's scheduler is firing a chase/announcement at a fixed time because the squad is in a certain state.
+
+Output is PLAIN WhatsApp-ready text (no JSON, no markdown fences). Return only the message body — no preamble like "Here's the message:" and no closing commentary.
+
+Use the same style as the reactive replies: WhatsApp-friendly formatting with *bold* via single asterisks, real line breaks, one or two emoji at most. Ground every name in the Match Context — never invent. Use "Kemal" / "Elvin" first names fine; for ambiguous repeats in the group, use fuller names ("Ibrahim Sahin" when needed to disambiguate).
+
+Every chase message MUST end with a numbered roster block titled "*Playing tonight:*" (or equivalent for a morning post). The roster has exactly maxPlayers rows; filled slots use names from the Confirmed list in order; any row above confirmedCount is 🥁 (single drum per row).
+
+If any player appears in the Dropped list AND the history or chat context suggests they'll still play if nobody replaces them, add a separate line *below* the roster: "Tentative: <Name> (will play if nobody steps in)". Do not put tentative players in a numbered slot.
+
+If an "Alternative formats available" block is in the context AND the squad is short AND kickoff is within 24h AND the smaller format would actually fill, you MAY append one line proposing the switch and naming (from the Confirmed list) who'd go to the bench. Never invent names for the bench overflow.
+
+Tone: the group's tone — casual, terse, no corporate fluff. No emoji soup.`;
+
+function buildChaseComposePrompt(kind: ChaseKind): string {
+  const header = "## Chase type";
+  switch (kind) {
+    case "daily-in-list":
+      return [
+        header,
+        "daily-in-list (17:00 London)",
+        "",
+        "Purpose: quick squad-state recap so the group sees numbers in the evening.",
+        "Open with a one-liner that sets the scene (e.g. '🗓 Quick 5pm update') followed by the lead (who's out / count vs needed). End with the roster block.",
+      ].join("\n");
+    case "match-day-morning":
+      return [
+        header,
+        "match-day-morning (8-9am London on match day)",
+        "",
+        "Purpose: upbeat morning nudge while there's still time to fill spots.",
+        "Open with something like '☀️ Morning all —' and lead with how many we still need. End with the roster block.",
+      ].join("\n");
+    case "chase-pre-kickoff":
+      return [
+        header,
+        "chase-pre-kickoff (3-4 hours before kickoff)",
+        "",
+        "Purpose: sharper call — the window is closing. Lead should convey urgency without panic. Mention kickoff time. End with the roster block.",
+      ].join("\n");
+    case "pre-kickoff-full":
+      return [
+        header,
+        "pre-kickoff-full (2 hours before kickoff, squad is FULL)",
+        "",
+        "Purpose: final check-in — see-you-there vibe. Lead with kickoff time + venue + 'X/Y confirmed' (should be X = maxPlayers). End with the roster block.",
+      ].join("\n");
+    case "pre-kickoff-short":
+      return [
+        header,
+        "pre-kickoff-short (2 hours before kickoff, squad is SHORT)",
+        "",
+        "Purpose: last-chance plea — squad still not full and we're 2h out. Lead with kickoff time + venue + count. Explicit 'last chance to jump in' line. If a format switch is viable, propose it. End with the roster block.",
+      ].join("\n");
+  }
+}
+
 function offlineVerdict(waMessageId: string, reason: string): AnalysisVerdict {
   return {
     waMessageId,

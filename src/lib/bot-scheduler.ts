@@ -18,6 +18,7 @@ import { db } from "./db";
 import { buildMagicLinkUrl, signMagicLinkToken, MAGIC_LINK_TTL } from "./magic-link";
 import { findOrgAdminsWithPhone } from "./org";
 import { formatLondon } from "./london-time";
+import { composeChaseText, type ChaseKind } from "./message-analyzer";
 
 // All user-facing times in bot-posted messages are Europe/London wall
 // clock. Wrap date-fns-tz in a short helper so this file reads cleanly.
@@ -251,7 +252,7 @@ export async function computeDuePosts(groupId: string): Promise<DuePostsResult |
   const matches = await getMatchesForScheduler(org.id, windowStart);
 
   for (const m of matches) {
-    await computeForMatch(m, now, sentKeys, out);
+    await computeForMatch(m, now, sentKeys, out, groupId);
   }
 
   return { instructions: out, waGroupId: groupId, orgId: org.id };
@@ -285,7 +286,26 @@ async function computeForMatch(
   now: Date,
   sentKeys: Set<string>,
   out: DueInstruction[],
+  groupId: string,
 ) {
+  /**
+   * LLM compose with a static fallback. If Claude is unavailable
+   * (missing API key, network hiccup, rate-limited, etc.) we fall
+   * back to whatever static text the call site provided — so the
+   * chase always fires with *something*, just less rich.
+   */
+  async function composeOrFallback(
+    kind: ChaseKind,
+    staticFallback: () => string,
+  ): Promise<string> {
+    try {
+      const llm = await composeChaseText({ groupId, kind });
+      if (llm && llm.trim().length > 0) return llm;
+    } catch (err) {
+      console.error(`[scheduler] compose ${kind} failed:`, err);
+    }
+    return staticFallback();
+  }
   const matchId = m.id;
   const activity = m.activity;
   const sport = activity.sport;
@@ -333,17 +353,16 @@ async function computeForMatch(
       need > 0 &&
       m.status === "UPCOMING"
     ) {
-      const list = confirmed
-        .map((a, i) => `${i + 1}. ${a.user.name ?? "(unnamed)"}`)
-        .join("\n");
-      out.push({
-        kind: "group-message",
-        key,
-        matchId,
-        text:
+      const text = await composeOrFallback("daily-in-list", () => {
+        const list = confirmed
+          .map((a, i) => `${i + 1}. ${a.user.name ?? "(unnamed)"}`)
+          .join("\n");
+        return (
           `🗓 *${activity.name}* — need *${need} more*.\n\n` +
-          (confirmed.length > 0 ? list : "_nobody yet_"),
+          (confirmed.length > 0 ? list : "_nobody yet_")
+        );
       });
+      out.push({ kind: "group-message", key, matchId, text });
     }
   }
 
@@ -523,12 +542,12 @@ async function computeForMatch(
         isMatchDay &&
         inMorningWindow
       ) {
-        out.push({
-          kind: "group-message",
-          key,
-          matchId,
-          text: `☀️ Morning all — still *${need} short* for tonight's *${activity.name}*. Any takers? 👀`,
-        });
+        const text = await composeOrFallback(
+          "match-day-morning",
+          () =>
+            `☀️ Morning all — still *${need} short* for tonight's *${activity.name}*. Any takers? 👀`,
+        );
+        out.push({ kind: "group-message", key, matchId, text });
       }
     }
 
@@ -542,19 +561,21 @@ async function computeForMatch(
         hoursUntilMatch <= 4 &&
         hoursUntilMatch >= 3
       ) {
-        out.push({
-          kind: "group-message",
-          key,
-          matchId,
-          text: `⏳ Still *${need} short* for *${activity.name}* at ${format(m.date, "HH:mm")}. Anyone free tonight?`,
-        });
+        const text = await composeOrFallback(
+          "chase-pre-kickoff",
+          () =>
+            `⏳ Still *${need} short* for *${activity.name}* at ${format(m.date, "HH:mm")}. Anyone free tonight?`,
+        );
+        out.push({ kind: "group-message", key, matchId, text });
       }
     }
   }
 
   // ── 5. 2h before kickoff ──────────────────────────────────────────────
-  //       Gentle status post. When the squad is short we add a "still
-  //       need X" line so it doubles as a final chase.
+  //       When the squad is full we post a "see you there"; when short we
+  //       post a last-chance plea. Both now LLM-composed via the scheduler
+  //       so the roster + tentative lines show up consistently, with
+  //       static text as a resilience fallback.
   {
     const key = `${matchId}:pre-kickoff`;
     if (
@@ -565,10 +586,12 @@ async function computeForMatch(
     ) {
       const need = maxPlayers - confirmed.length;
       const base = `⏰ Tonight *${format(m.date, "HH:mm")}* at *${activity.venue}* · ${confirmed.length}/${maxPlayers}`;
-      const text =
+      const kind: ChaseKind = need > 0 ? "pre-kickoff-short" : "pre-kickoff-full";
+      const text = await composeOrFallback(kind, () =>
         need > 0
           ? `${base} — *still need ${need}*, last chance to jump in. 🙏`
-          : `${base}. See you there.`;
+          : `${base}. See you there.`,
+      );
       out.push({ kind: "group-message", key, matchId, text });
     }
   }
