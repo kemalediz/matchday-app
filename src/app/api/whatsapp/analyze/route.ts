@@ -234,6 +234,29 @@ export async function POST(request: Request) {
     }
   }
 
+  // 3b. Backfill slot-emoji on earlier duplicate IN messages from same author.
+  //     State-collapse: when a player sends "count me in" then "IN" 30s later,
+  //     the LLM only registers the latest (correct — no double-registration).
+  //     But the earlier message gets a plain 👍 which looks like "not registered"
+  //     and confuses people into retyping. If a later verdict for the same
+  //     author registered them as IN with a keycap slot emoji, propagate that
+  //     emoji back to the earlier intent=in verdicts so the chat reads cleanly.
+  const keycapSet = new Set(Object.values(KEYCAP).concat(["🪑"]));
+  const latestInReactByUser = new Map<string, string>();
+  for (let i = 0; i < results.length; i++) {
+    const r = results[i];
+    const uid = senderById.get(r.waMessageId)?.userId;
+    if (!uid || r.intent !== "in" || !r.react) continue;
+    if (keycapSet.has(r.react)) latestInReactByUser.set(uid, r.react);
+  }
+  for (const r of results) {
+    const uid = senderById.get(r.waMessageId)?.userId;
+    if (!uid || r.intent !== "in" || !r.react) continue;
+    if (keycapSet.has(r.react)) continue;
+    const slot = latestInReactByUser.get(uid);
+    if (slot) r.react = slot;
+  }
+
   // 4. Return + include next-kickoff so the bot can urgency-flush.
   const nextMatch = await db.match.findFirst({
     where: {
