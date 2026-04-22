@@ -68,7 +68,18 @@ async function executeInstruction(instr: DueInstruction, groupId: string): Promi
 
   try {
     if (instr.kind === "group-message") {
-      const msg = await client.sendMessage(groupId, instr.text);
+      // Server may pass `mentions` — an array of phone numbers (no +)
+      // that should be tagged as real WhatsApp mentions. The text uses
+      // @<phone> inline; whatsapp-web.js swaps those for proper tags
+      // when the matching JID appears in this array.
+      type GroupMessageWithMentions = typeof instr & { mentions?: string[] };
+      const withMentions = instr as GroupMessageWithMentions;
+      const options = withMentions.mentions?.length
+        ? { mentions: withMentions.mentions.map((p) => `${p}@c.us`) }
+        : undefined;
+      const msg = options
+        ? await client.sendMessage(groupId, instr.text, options)
+        : await client.sendMessage(groupId, instr.text);
       await ackInstruction({
         key: instr.key,
         kind: instr.kind,

@@ -88,6 +88,8 @@ export type DueInstruction =
       key: string;           // idempotency key
       text: string;
       matchId?: string;
+      /** Optional — phone numbers (no +) to tag as real WhatsApp mentions. */
+      mentions?: string[];
     }
   | {
       kind: "group-poll";
@@ -97,6 +99,12 @@ export type DueInstruction =
       multi?: boolean;
       matchId?: string;
     }
+  // Note: `group-message` + `dm` accept an optional `mentions` array of
+  // phone numbers (without +). When present, the bot passes them as
+  // whatsapp-web.js mentions so @-prefixed phone numbers in the text
+  // become real tagged mentions (notification + clickable). The bot
+  // released before this field exists just ignores the extra field
+  // — the text renders as plain @-prefixed names.
   | {
       kind: "dm";
       key: string;
@@ -196,14 +204,16 @@ function buildReminderText(args: {
  *     is false precision. Wait for the first real payment event to
  *     arrive before chasing.
  */
-async function buildUnpaidTail(activityId: string): Promise<string | null> {
+async function buildUnpaidTail(
+  activityId: string,
+): Promise<{ text: string; mentions: string[] } | null> {
   const lastCompleted = await db.match.findFirst({
     where: { activityId, status: "COMPLETED", isHistorical: false },
     orderBy: { date: "desc" },
     include: {
       attendances: {
         where: { status: "CONFIRMED" },
-        include: { user: { select: { name: true } } },
+        include: { user: { select: { name: true, phoneNumber: true } } },
       },
     },
   });
@@ -214,16 +224,27 @@ async function buildUnpaidTail(activityId: string): Promise<string | null> {
   // Don't chase when we have no signal — false precision is worse than silence.
   if (paid.length === 0) return null;
   if (unpaid.length === 0) return null;
-  const names = unpaid
-    .map((a) => a.user.name)
-    .filter(Boolean)
-    .slice(0, 8)
-    .join(", ");
-  const more = unpaid.length > 8 ? ` (+${unpaid.length - 8} more)` : "";
-  return (
+
+  // Build inline @-tags. For players with a phone number we use @<phone>
+  // format which whatsapp-web.js converts to a real mention when the bot
+  // passes the matching JID in the mentions array. Players without a
+  // phone fall back to @<FirstName> as plain text.
+  const mentions: string[] = [];
+  const tags = unpaid.slice(0, 14).map((a) => {
+    const name = a.user.name ?? "player";
+    const first = name.split(/\s+/)[0];
+    if (a.user.phoneNumber) {
+      const digits = a.user.phoneNumber.replace(/^\+/, "");
+      mentions.push(digits);
+      return `@${digits}`;
+    }
+    return `@${first}`;
+  });
+  const more = unpaid.length > 14 ? ` (+${unpaid.length - 14} more)` : "";
+  const text =
     `💳 Also — *${unpaid.length}* still haven't paid for last week's match. ` +
-    `Please *pay* asap 🙏\n\n${names}${more}`
-  );
+    `Please *pay* asap 🙏\n\n${tags.join(" ")}${more}`;
+  return { text, mentions };
 }
 
 /** Date-only key for "daily X" idempotency (YYYY-MM-DD in London). */
@@ -509,8 +530,14 @@ async function computeForMatch(
       // this 17:00 slot (same daily message) so players see both nudges
       // in one notification. Skips historical backfill matches.
       const unpaidTail = await buildUnpaidTail(activity.id);
-      const combined = unpaidTail ? `${text}\n\n${unpaidTail}` : text;
-      out.push({ kind: "group-message", key, matchId, text: combined });
+      const combined = unpaidTail ? `${text}\n\n${unpaidTail.text}` : text;
+      out.push({
+        kind: "group-message",
+        key,
+        matchId,
+        text: combined,
+        mentions: unpaidTail?.mentions,
+      });
     }
   }
 
