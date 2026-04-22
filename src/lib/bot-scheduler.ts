@@ -187,8 +187,14 @@ function buildReminderText(args: {
 
 /**
  * Compose a short "don't forget to pay" paragraph for the daily 17:00
- * chase. Returns null when there's nothing to remind about — no recent
- * completed match, or everyone has already ticked the payment poll.
+ * chase. Returns null when there's nothing honest to report:
+ *   - no recent completed match
+ *   - everyone ticked the payment poll (nothing to nag about)
+ *   - NOBODY has ticked yet — could mean nobody paid, but more likely
+ *     means the poll fired before our paid-tracking was live, or the
+ *     votes failed to ACK back to the server. In that case "N unpaid"
+ *     is false precision. Wait for the first real payment event to
+ *     arrive before chasing.
  */
 async function buildUnpaidTail(activityId: string): Promise<string | null> {
   const lastCompleted = await db.match.findFirst({
@@ -196,13 +202,17 @@ async function buildUnpaidTail(activityId: string): Promise<string | null> {
     orderBy: { date: "desc" },
     include: {
       attendances: {
-        where: { status: "CONFIRMED", paidAt: null },
+        where: { status: "CONFIRMED" },
         include: { user: { select: { name: true } } },
       },
     },
   });
   if (!lastCompleted) return null;
-  const unpaid = lastCompleted.attendances;
+  const confirmed = lastCompleted.attendances;
+  const paid = confirmed.filter((a) => a.paidAt != null);
+  const unpaid = confirmed.filter((a) => a.paidAt == null);
+  // Don't chase when we have no signal — false precision is worse than silence.
+  if (paid.length === 0) return null;
   if (unpaid.length === 0) return null;
   const names = unpaid
     .map((a) => a.user.name)

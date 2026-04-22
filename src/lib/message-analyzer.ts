@@ -266,17 +266,50 @@ function buildMatchContextBlock(args: {
   const dropped = m.attendances.filter((a) => a.status === "DROPPED");
   const need = Math.max(0, m.maxPlayers - confirmed.length);
   const hoursToKickoff = (m.date.getTime() - Date.now()) / (1000 * 60 * 60);
+  const daysToKickoff = Math.floor(hoursToKickoff / 24);
   const kickoffHint =
     hoursToKickoff > 0
       ? `${hoursToKickoff.toFixed(1)}h until kickoff`
       : `${Math.abs(hoursToKickoff).toFixed(1)}h since kickoff`;
+  // Pre-format the kickoff in London time so the LLM doesn't have to
+  // do TZ math and guess at BST/GMT. Format: "Tue 28 Apr at 21:30".
+  const kickoffLocal = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Europe/London",
+    weekday: "short",
+    day: "numeric",
+    month: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  })
+    .format(m.date)
+    .replace(/,/g, "");
+  // Proximity token drives how the LLM should title the roster block.
+  const proximity =
+    hoursToKickoff < 0
+      ? "past"
+      : hoursToKickoff <= 6
+      ? "tonight"
+      : hoursToKickoff <= 24
+      ? "tomorrow"
+      : daysToKickoff <= 7
+      ? "this-week"
+      : "future";
+  const rosterHeader = {
+    past: "*Squad:*",
+    tonight: "*Playing tonight:*",
+    tomorrow: "*Playing tomorrow:*",
+    "this-week": `*Playing ${kickoffLocal.split(" at ")[0]}:*`,
+    future: `*Playing ${kickoffLocal.split(" at ")[0]}:*`,
+  }[proximity];
   const lines = [
     `## Organisation`,
     args.orgName,
     ``,
     `## Current Match`,
     `Activity: ${m.activity.name}`,
-    `Date: ${m.date.toISOString()}  (${kickoffHint})`,
+    `Kickoff (London): ${kickoffLocal}  (${kickoffHint}, proximity=${proximity})`,
+    `Use roster header: ${rosterHeader}`,
     `Venue: ${m.activity.venue}`,
     `Status: ${m.status}`,
     `Confirmed: ${confirmed.length}/${m.maxPlayers}${need > 0 ? ` (need ${need} more)` : " ✅ full squad"}`,
@@ -598,7 +631,9 @@ Output is PLAIN WhatsApp-ready text (no JSON, no markdown fences). Return only t
 
 Use the same style as the reactive replies: WhatsApp-friendly formatting with *bold* via single asterisks, real line breaks, one or two emoji at most. Ground every name in the Match Context — never invent. Use "Kemal" / "Elvin" first names fine; for ambiguous repeats in the group, use fuller names ("Ibrahim Sahin" when needed to disambiguate).
 
-Every chase message MUST end with a numbered roster block titled "*Playing tonight:*" (or equivalent for a morning post). The roster has exactly maxPlayers rows; filled slots use names from the Confirmed list in order; any row above confirmedCount is 🥁 (single drum per row).
+Every chase message MUST end with a numbered roster block. Use the EXACT header from "Use roster header:" in the Match Context — do NOT invent your own. It'll be one of: "*Playing tonight:*" (same-day / within 6h), "*Playing tomorrow:*", or "*Playing <Weekday DD Mon>:*" for anything further out. Getting this wrong (e.g. saying "tonight" 6 days before the match) confuses the group — always use the pre-computed header. The roster has exactly maxPlayers rows; filled slots use names from the Confirmed list in order; any row above confirmedCount is 🥁 (single drum per row).
+
+NEVER write "tonight", "this evening", "tomorrow" or similar temporal references in the LEAD text unless "proximity=" in the Match Context confirms it. For any proximity other than "tonight"/"tomorrow", refer to the match by its day-and-date (e.g. "Tuesday 7-a-side on Tue 28 Apr at 21:30") rather than a vague relative time.
 
 If any player appears in the Dropped list AND the history or chat context suggests they'll still play if nobody replaces them, add a separate line *below* the roster: "Tentative: <Name> (will play if nobody steps in)". Do not put tentative players in a numbered slot.
 
