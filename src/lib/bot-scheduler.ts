@@ -185,6 +185,37 @@ function buildReminderText(args: {
   }
 }
 
+/**
+ * Compose a short "don't forget to pay" paragraph for the daily 17:00
+ * chase. Returns null when there's nothing to remind about — no recent
+ * completed match, or everyone has already ticked the payment poll.
+ */
+async function buildUnpaidTail(activityId: string): Promise<string | null> {
+  const lastCompleted = await db.match.findFirst({
+    where: { activityId, status: "COMPLETED", isHistorical: false },
+    orderBy: { date: "desc" },
+    include: {
+      attendances: {
+        where: { status: "CONFIRMED", paidAt: null },
+        include: { user: { select: { name: true } } },
+      },
+    },
+  });
+  if (!lastCompleted) return null;
+  const unpaid = lastCompleted.attendances;
+  if (unpaid.length === 0) return null;
+  const names = unpaid
+    .map((a) => a.user.name)
+    .filter(Boolean)
+    .slice(0, 8)
+    .join(", ");
+  const more = unpaid.length > 8 ? ` (+${unpaid.length - 8} more)` : "";
+  return (
+    `💳 Also — *${unpaid.length}* still haven't paid for last week's match. ` +
+    `Please *pay* asap 🙏\n\n${names}${more}`
+  );
+}
+
 /** Date-only key for "daily X" idempotency (YYYY-MM-DD in London). */
 function londonDateKey(at: Date = new Date()): string {
   return new Intl.DateTimeFormat("en-CA", {
@@ -462,7 +493,14 @@ async function computeForMatch(
           (confirmed.length > 0 ? list : "_nobody yet_")
         );
       });
-      out.push({ kind: "group-message", key, matchId, text });
+
+      // Append unpaid-pitch-fees reminder for the most recent completed
+      // match in the same activity, if anyone still owes. Runs only in
+      // this 17:00 slot (same daily message) so players see both nudges
+      // in one notification. Skips historical backfill matches.
+      const unpaidTail = await buildUnpaidTail(activity.id);
+      const combined = unpaidTail ? `${text}\n\n${unpaidTail}` : text;
+      out.push({ kind: "group-message", key, matchId, text: combined });
     }
   }
 

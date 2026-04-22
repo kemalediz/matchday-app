@@ -39,8 +39,10 @@ export async function POST(request: Request) {
   });
   if (!sent) return NextResponse.json({ ok: true, ignored: "unknown-poll" });
 
-  if (!sent.kind.includes("mom-poll") && !sent.key.includes(":mom-poll")) {
-    return NextResponse.json({ ok: true, ignored: `non-mom-poll (${sent.kind})` });
+  const isMomPoll = sent.kind.includes("mom-poll") || sent.key.includes(":mom-poll");
+  const isPaymentPoll = sent.key.endsWith(":payment-poll");
+  if (!isMomPoll && !isPaymentPoll) {
+    return NextResponse.json({ ok: true, ignored: `unsupported-poll (${sent.kind})` });
   }
   if (!sent.matchId) return NextResponse.json({ ok: true, ignored: "no-matchId" });
 
@@ -51,6 +53,20 @@ export async function POST(request: Request) {
 
   const voter = await db.user.findUnique({ where: { phoneNumber: normalised } });
   if (!voter) return NextResponse.json({ ok: true, ignored: "unknown-voter" });
+
+  // Payment poll — any non-null option (either team) means "paid".
+  // Un-vote clears the flag.
+  if (isPaymentPoll) {
+    const existing = await db.attendance.findUnique({
+      where: { matchId_userId: { matchId, userId: voter.id } },
+    });
+    if (!existing) return NextResponse.json({ ok: true, ignored: "not-attending" });
+    await db.attendance.update({
+      where: { id: existing.id },
+      data: { paidAt: optionName ? new Date() : null },
+    });
+    return NextResponse.json({ ok: true, action: optionName ? "paid" : "unpaid" });
+  }
 
   // No option means the user un-voted — delete the MoMVote.
   if (!optionName) {

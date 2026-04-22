@@ -316,6 +316,13 @@ model Attendance {
   status      AttendanceStatus @default(CONFIRMED)
   position    Int              @default(0)
   respondedAt DateTime         @default(now())
+  /// Non-null when the player has marked themselves as paid for this
+  /// match. Populated by the bot when the voter ticks their team's
+  /// option in the WhatsApp payment poll; can also be toggled from
+  /// the admin match page. Scheduler uses this to chase unpaid players
+  /// on the daily 17:00 squad nudge. Nullable = additive, zero impact
+  /// on historical attendance rows.
+  paidAt      DateTime?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
