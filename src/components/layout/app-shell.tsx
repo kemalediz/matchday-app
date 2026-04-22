@@ -24,7 +24,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const isAuthRoute =
     pathname?.startsWith("/login") ||
     pathname?.startsWith("/signup") ||
-    pathname?.startsWith("/verify-email");
+    pathname?.startsWith("/verify-email") ||
+    pathname === "/signup";
 
   const isMagicLink = pathname?.startsWith("/r/");
   const isJoinLink = pathname?.startsWith("/join/");

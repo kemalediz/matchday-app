@@ -6,6 +6,7 @@ import { parseWhatsAppChat, type ParsedChat } from "@/lib/whatsapp-parser";
 import { SPORT_PRESETS, findPreset } from "@/lib/sport-presets";
 import { setCurrentOrgId } from "@/lib/org";
 import { normalisePhone } from "@/lib/phone";
+import { analyzeForOnboarding, type OnboardingAnalysis } from "@/lib/onboarding-analyzer";
 import { revalidatePath } from "next/cache";
 
 /**
@@ -268,4 +269,34 @@ export async function listSportPresets() {
     name: p.name,
     playersPerTeam: p.playersPerTeam,
   }));
+}
+
+/**
+ * Step 3. Optional LLM analysis — reads the chat text (client sends the
+ * same file contents back) and returns per-player position + seed rating
+ * suggestions with evidence, plus a best-guess schedule.
+ *
+ * Isolated from the main flow: if this fails, the wizard still works
+ * with the manual defaults. Nothing is persisted yet.
+ */
+export async function analyzeOnboardingChat(
+  fileText: string,
+  sportKey: string,
+  candidateNames: string[],
+): Promise<OnboardingAnalysis | null> {
+  const session = await auth();
+  if (!session?.user?.id) throw new Error("Not authenticated");
+  if (fileText.length > 5 * 1024 * 1024) {
+    throw new Error("Chat export too large");
+  }
+  const preset = findPreset(sportKey);
+  if (!preset) throw new Error("Unknown sport");
+
+  const parsed = parseWhatsAppChat(fileText, { recentMessageLimit: 15_000 });
+  return analyzeForOnboarding({
+    parsed,
+    sportName: preset.name,
+    validPositions: [...preset.positions],
+    candidateNames,
+  });
 }

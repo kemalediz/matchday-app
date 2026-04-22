@@ -270,6 +270,27 @@ model SentNotification {
  * picks up rows with `sentAt == null`, emits matching instructions, and
  * marks `sentAt` on ACK so they don't repeat.
  */
+/**
+ * Short-lived one-time passcodes used by the phone-number signup flow.
+ * Owner delivers codes via WhatsApp DM (using the shared MatchTime
+ * bot) and verifies them at /signup/verify.
+ *
+ * Rate-limiting: we keep rows around past usedAt/expiresAt briefly to
+ * throttle resends — a separate sweep drops them after 24h.
+ */
+model PhoneOtp {
+  id        String   @id @default(cuid())
+  /// Normalised phone number (no "+" prefix; purely digits).
+  phone     String
+  code      String   // 6 digits, zero-padded
+  expiresAt DateTime
+  usedAt    DateTime?
+  attempts  Int      @default(0)
+  createdAt DateTime @default(now())
+
+  @@index([phone, createdAt])
+}
+
 model BotJob {
   id       String   @id @default(cuid())
   orgId    String

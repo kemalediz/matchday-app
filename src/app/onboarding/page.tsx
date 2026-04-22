@@ -20,11 +20,13 @@ import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import {
   parseChatUpload,
+  analyzeOnboardingChat,
   createOrgFromWizard,
   type ParsedChatSummary,
   type WizardSubmission,
 } from "@/app/actions/onboarding";
-import { SPORT_PRESETS } from "@/lib/sport-presets";
+import type { OnboardingAnalysis } from "@/lib/onboarding-analyzer";
+import { SPORT_PRESETS, findPreset } from "@/lib/sport-presets";
 import {
   Upload,
   Users,
@@ -35,9 +37,11 @@ import {
   Loader2,
   Trash2,
   X,
+  Sparkles,
+  Quote,
 } from "lucide-react";
 
-type Step = "upload" | "players" | "activity" | "confirm";
+type Step = "upload" | "players" | "insights" | "activity" | "confirm";
 
 interface PlayerDraft {
   name: string;
@@ -52,8 +56,13 @@ export default function OnboardingWizard() {
   const [busy, setBusy] = useState(false);
 
   const [parsed, setParsed] = useState<ParsedChatSummary | null>(null);
+  // Kept client-side only so we can rerun the LLM analysis on demand
+  // without re-uploading. Never leaves this component.
+  const [chatText, setChatText] = useState<string>("");
   const [orgName, setOrgName] = useState("");
   const [players, setPlayers] = useState<PlayerDraft[]>([]);
+  const [analysis, setAnalysis] = useState<OnboardingAnalysis | null>(null);
+  const [analysisSkipped, setAnalysisSkipped] = useState(false);
   const [activity, setActivity] = useState<WizardSubmission["activity"]>({
     sportKey: "football-7aside",
     name: "",
@@ -69,6 +78,7 @@ export default function OnboardingWizard() {
       const text = await file.text();
       const summary = await parseChatUpload(text);
       setParsed(summary);
+      setChatText(text);
       setOrgName(summary.groupName ?? guessNameFromFilename(file.name) ?? "");
       // Seed the player list from detected authors.
       setPlayers(
@@ -86,6 +96,53 @@ export default function OnboardingWizard() {
       setStep("players");
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Parse failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function runAnalysis() {
+    if (!chatText) {
+      toast.error("No chat loaded");
+      return;
+    }
+    setBusy(true);
+    try {
+      const active = players.filter((p) => !p.excluded && p.name.trim());
+      const result = await analyzeOnboardingChat(
+        chatText,
+        activity.sportKey,
+        active.map((p) => p.name),
+      );
+      if (!result) {
+        toast.error("Analysis failed — you can still continue with defaults.");
+        setAnalysisSkipped(true);
+      } else {
+        setAnalysis(result);
+        // Pre-fill schedule + seed ratings from the LLM suggestions.
+        if (result.schedule.dayOfWeek != null)
+          setActivity((a) => ({ ...a, dayOfWeek: result.schedule.dayOfWeek! }));
+        if (result.schedule.time) setActivity((a) => ({ ...a, time: result.schedule.time! }));
+        if (result.schedule.venue && !activity.venue)
+          setActivity((a) => ({ ...a, venue: result.schedule.venue! }));
+        // Apply LLM-suggested seed ratings where the admin hasn't set one.
+        setPlayers((prev) =>
+          prev.map((p) => {
+            if (p.excluded || !p.name.trim()) return p;
+            const suggestion = result.players.find(
+              (sp) => sp.name.toLowerCase() === p.name.toLowerCase(),
+            );
+            if (!suggestion) return p;
+            return {
+              ...p,
+              seedRating: p.seedRating ?? suggestion.seedRating ?? null,
+            };
+          }),
+        );
+      }
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Analysis failed");
+      setAnalysisSkipped(true);
     } finally {
       setBusy(false);
     }
@@ -138,6 +195,23 @@ export default function OnboardingWizard() {
               players={players}
               setPlayers={setPlayers}
               onBack={() => setStep("upload")}
+              onNext={() => setStep("insights")}
+            />
+          )}
+          {step === "insights" && (
+            <InsightsStep
+              busy={busy}
+              analysis={analysis}
+              analysisSkipped={analysisSkipped}
+              players={players}
+              setPlayers={setPlayers}
+              sportKey={activity.sportKey}
+              onRun={runAnalysis}
+              onSkip={() => {
+                setAnalysisSkipped(true);
+                setStep("activity");
+              }}
+              onBack={() => setStep("players")}
               onNext={() => setStep("activity")}
             />
           )}
@@ -172,6 +246,7 @@ function Stepper({ current }: { current: Step }) {
   const steps: Array<{ key: Step; label: string; icon: React.ReactNode }> = [
     { key: "upload", label: "Upload", icon: <Upload className="w-4 h-4" /> },
     { key: "players", label: "Players", icon: <Users className="w-4 h-4" /> },
+    { key: "insights", label: "Insights", icon: <Sparkles className="w-4 h-4" /> },
     { key: "activity", label: "Schedule", icon: <Calendar className="w-4 h-4" /> },
     { key: "confirm", label: "Confirm", icon: <Check className="w-4 h-4" /> },
   ];
@@ -393,7 +468,185 @@ function PlayersStep(props: {
   );
 }
 
-// ─── Step 3: activity ────────────────────────────────────────────────
+// ─── Step 3: insights (LLM-assisted) ─────────────────────────────────
+
+function InsightsStep(props: {
+  busy: boolean;
+  analysis: OnboardingAnalysis | null;
+  analysisSkipped: boolean;
+  players: PlayerDraft[];
+  setPlayers: React.Dispatch<React.SetStateAction<PlayerDraft[]>>;
+  sportKey: string;
+  onRun: () => void;
+  onSkip: () => void;
+  onBack: () => void;
+  onNext: () => void;
+}) {
+  const { busy, analysis, players, setPlayers, sportKey, onRun, onSkip, onBack, onNext } = props;
+  const preset = findPreset(sportKey);
+  const validPositions = preset?.positions ?? [];
+  const days = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+
+  const hasAnalysis = !!analysis;
+
+  function updateRating(idx: number, value: number | null) {
+    setPlayers((prev) => prev.map((p, i) => (i === idx ? { ...p, seedRating: value } : p)));
+  }
+
+  if (!hasAnalysis) {
+    return (
+      <div className="space-y-6">
+        <div className="bg-white rounded-2xl border border-slate-200 p-8 text-center">
+          <div className="w-12 h-12 rounded-full bg-blue-100 mx-auto flex items-center justify-center mb-4">
+            <Sparkles className="w-5 h-5 text-blue-600" />
+          </div>
+          <h2 className="text-lg font-semibold text-slate-900 mb-2">
+            Let MatchTime read your chat
+          </h2>
+          <p className="text-sm text-slate-500 max-w-md mx-auto mb-6">
+            Optional — analyses the messages to suggest each player&apos;s
+            position and skill rating, plus your likely match day/time/venue.
+            Takes ~15-30 seconds. You can edit everything after.
+          </p>
+          <div className="flex items-center justify-center gap-3">
+            <button
+              onClick={onSkip}
+              disabled={busy}
+              className="px-4 py-2.5 rounded-lg border border-slate-200 text-slate-700 hover:bg-slate-50 disabled:opacity-40"
+            >
+              Skip
+            </button>
+            <button
+              onClick={onRun}
+              disabled={busy}
+              className="inline-flex items-center gap-2 px-5 py-2.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-medium disabled:opacity-40"
+            >
+              {busy ? (
+                <>
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                  Analysing…
+                </>
+              ) : (
+                <>
+                  <Sparkles className="w-4 h-4" />
+                  Analyse chat
+                </>
+              )}
+            </button>
+          </div>
+        </div>
+        <WizardNav onBack={onBack} onNext={onNext} />
+      </div>
+    );
+  }
+
+  // Analysis loaded.
+  const schedule = analysis!.schedule;
+  const playerSuggestions = new Map(
+    analysis!.players.map((p) => [p.name.toLowerCase(), p]),
+  );
+
+  return (
+    <div className="space-y-6">
+      <div className="bg-white rounded-2xl border border-slate-200 p-6">
+        <div className="flex items-center gap-2 mb-3">
+          <Sparkles className="w-4 h-4 text-blue-600" />
+          <h2 className="font-semibold text-slate-900">Suggested schedule</h2>
+          {schedule.confidence > 0 && (
+            <span className="text-xs text-slate-400">
+              · {Math.round(schedule.confidence * 100)}% confident
+            </span>
+          )}
+        </div>
+        {schedule.dayOfWeek != null || schedule.time || schedule.venue ? (
+          <div className="grid grid-cols-3 gap-4 text-sm">
+            <div>
+              <p className="text-xs text-slate-500 mb-0.5">Day</p>
+              <p className="font-medium">
+                {schedule.dayOfWeek != null ? days[schedule.dayOfWeek] : "—"}
+              </p>
+            </div>
+            <div>
+              <p className="text-xs text-slate-500 mb-0.5">Kickoff</p>
+              <p className="font-medium">{schedule.time ?? "—"}</p>
+            </div>
+            <div>
+              <p className="text-xs text-slate-500 mb-0.5">Venue</p>
+              <p className="font-medium truncate">{schedule.venue ?? "—"}</p>
+            </div>
+          </div>
+        ) : (
+          <p className="text-sm text-slate-500">
+            No clear match pattern detected — set manually on the next step.
+          </p>
+        )}
+      </div>
+
+      <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden">
+        <div className="px-6 py-4 border-b border-slate-100">
+          <h2 className="font-semibold text-slate-900">Suggested positions &amp; ratings</h2>
+          <p className="text-xs text-slate-500 mt-0.5">
+            Click a position to change it. Adjust ratings inline. Evidence
+            quotes help you sanity-check.
+          </p>
+        </div>
+        <div className="divide-y divide-slate-100">
+          {players
+            .filter((p) => !p.excluded && p.name.trim())
+            .map((p) => {
+              const idx = players.indexOf(p);
+              const sug = playerSuggestions.get(p.name.toLowerCase());
+              const rating = p.seedRating ?? sug?.seedRating ?? null;
+              return (
+                <div key={p.name} className="px-6 py-4 space-y-2">
+                  <div className="flex items-center justify-between gap-3">
+                    <p className="font-medium text-slate-800 truncate">{p.name}</p>
+                    <div className="flex items-center gap-3 shrink-0">
+                      {sug?.position && validPositions.length > 0 && (
+                        <span className="inline-flex px-2 py-0.5 rounded bg-blue-50 text-blue-700 text-xs font-semibold">
+                          {sug.position}
+                        </span>
+                      )}
+                      <div className="flex items-center gap-1.5">
+                        <label className="text-xs text-slate-500">Rating</label>
+                        <input
+                          type="number"
+                          min={1}
+                          max={10}
+                          step={1}
+                          value={rating ?? ""}
+                          onChange={(e) => {
+                            const n = parseInt(e.target.value, 10);
+                            updateRating(idx, isNaN(n) ? null : Math.min(10, Math.max(1, n)));
+                          }}
+                          className="w-14 h-8 px-1.5 rounded-md border border-slate-200 text-sm text-center focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        />
+                      </div>
+                      {sug && sug.confidence > 0 && (
+                        <span className="text-[10px] text-slate-400 tabular-nums">
+                          {Math.round(sug.confidence * 100)}%
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                  {sug?.evidence && (
+                    <div className="flex items-start gap-2 text-xs text-slate-500">
+                      <Quote className="w-3.5 h-3.5 shrink-0 mt-0.5 text-slate-300" />
+                      <p className="italic leading-relaxed">{sug.evidence}</p>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+        </div>
+      </div>
+
+      <WizardNav onBack={onBack} onNext={onNext} />
+    </div>
+  );
+}
+
+// ─── Step 4: activity ────────────────────────────────────────────────
 
 function ActivityStep(props: {
   busy: boolean;
