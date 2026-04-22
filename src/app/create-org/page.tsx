@@ -40,6 +40,18 @@ export default function CreateOrgPage() {
           <p className="text-sm text-slate-500 mt-1">Set up your club, team, or group</p>
         </div>
 
+        <Link
+          href="/onboarding"
+          className="block mb-6 p-4 rounded-xl border-2 border-blue-200 bg-blue-50 hover:border-blue-300 hover:bg-blue-100 transition-colors"
+        >
+          <p className="font-semibold text-blue-900 text-sm">
+            ✨ Already running a WhatsApp group? Try the setup wizard →
+          </p>
+          <p className="text-xs text-blue-800/80 mt-1">
+            Import your chat history to auto-detect players and get set up in a couple of minutes.
+          </p>
+        </Link>
+
         <form onSubmit={handleSubmit} className="space-y-4">
           <div>
             <label className="block text-sm font-medium text-slate-700 mb-1.5">

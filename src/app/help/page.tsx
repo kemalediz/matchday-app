@@ -8,7 +8,7 @@ export default function HelpLandingPage() {
     <>
       <h2 className="!mt-0">Welcome</h2>
       <p>
-        MatchTime runs your group&apos;s matches from WhatsApp. The bot handles
+        MatchTime runs your group&apos;s matches from WhatsApp. It handles
         attendance, reminds people before kickoff, balances the teams,
         records scores and collects ratings — you just play.
       </p>
@@ -45,7 +45,7 @@ export default function HelpLandingPage() {
         </Link>
       </div>
 
-      <h2>What the bot does, in one minute</h2>
+      <h2>What MatchTime does, in one minute</h2>
       <ul>
         <li>
           <strong>Reads your group chat</strong> — detects <code>IN</code>,{" "}

@@ -17,37 +17,25 @@ export default function AdminGuidePage() {
       <p>
         After signing in, hit <strong>Create organisation</strong>. Give it
         the same name as your WhatsApp group so it&apos;s obvious when the
-        bot posts there (e.g. &quot;Sutton FC&quot;).
+        MatchTime posts there (e.g. &quot;Sutton FC&quot;).
       </p>
 
-      <h3>Connect the WhatsApp bot</h3>
+      <h3>Connect MatchTime to your group chat</h3>
       <p>
-        Each org needs a bot instance linked to its WhatsApp group. The
-        bot is a small program that:
+        MatchTime reads and posts in your group chat on your behalf — that&apos;s
+        how attendance, reminders, scores and team line-ups all flow through
+        the chat everyone already uses. Nothing else changes.
       </p>
       <ul>
-        <li>Reads messages in your group (nothing else)</li>
-        <li>Posts group messages and DMs on a schedule</li>
+        <li>Reads messages in your group (and nothing else)</li>
+        <li>Posts reminders and DMs on a schedule you configure</li>
         <li>Reacts to attendance messages with slot-number emojis</li>
       </ul>
       <p>
-        Two deployment options today:
-      </p>
-      <ul>
-        <li>
-          <strong>Self-hosted on a Raspberry Pi</strong> (current Sutton
-          FC setup) — cheapest, runs 24/7. Requires scanning a QR code
-          once to pair with WhatsApp.
-        </li>
-        <li>
-          <strong>Managed by MatchTime</strong> — coming soon. You tell
-          us your group, we host the bot.
-        </li>
-      </ul>
-      <p>
-        While the bot is disabled, scheduled posts still get <em>computed</em>
-        — they just aren&apos;t sent. Enable the bot once per org in{" "}
-        <code>/admin/settings</code>.
+        Setup is a one-time handshake with your group, done from{" "}
+        <code>/admin/settings</code>. You can pause MatchTime any time —
+        it keeps tracking your matches internally but stops posting to the
+        group.
       </p>
 
       {/* ───────────────────────────────────────────────── */}
@@ -68,8 +56,8 @@ export default function AdminGuidePage() {
       <h3>Alternative formats</h3>
       <p>
         If you run 7-a-side on Tuesdays but occasionally switch to 5-a-side
-        when numbers are short, set up <strong>both</strong> activities. The
-        bot then automatically proposes the switch when confirmed players
+        when numbers are short, set up <strong>both</strong> activities.
+        MatchTime then automatically proposes the switch when confirmed players
         drop below the 7-a-side max and there&apos;s enough for a smaller
         game. You — the admin — do the actual rebooking (e.g. call Goals)
         and flip the match in the app.
@@ -95,7 +83,7 @@ export default function AdminGuidePage() {
           seed rating.
         </li>
         <li>
-          <strong>They post in the group</strong> and the bot auto-creates
+          <strong>They post in the group</strong> and MatchTime auto-creates
           them as a <em>provisional</em> member (see below).
         </li>
         <li>
@@ -107,7 +95,7 @@ export default function AdminGuidePage() {
 
       <h3>Provisional members</h3>
       <p>
-        When an unknown WhatsApp name posts in your group, the bot creates
+        When an unknown WhatsApp name posts in your group, MatchTime creates
         a lightweight user + membership flagged as <strong>provisional</strong>.
         Their attendance lands immediately so the message isn&apos;t lost, and
         your dashboard shows:
@@ -150,7 +138,7 @@ export default function AdminGuidePage() {
 
       <h3>Phones</h3>
       <p>
-        Optional but recommended — the bot uses phone numbers to send
+        Optional but recommended — MatchTime uses phone numbers to send
         personal DMs (rating links, reminders, admin nudges). Without a
         phone, a player can still sign up via the group but won&apos;t
         receive DMs.
@@ -190,13 +178,13 @@ export default function AdminGuidePage() {
       <h3>Tuesday morning: roll-call + teams</h3>
       <p>
         Morning check-in. When someone types{" "}
-        <code>@MatchTime generate teams</code> (or similar), the bot
+        <code>@MatchTime generate teams</code> (or similar), MatchTime
         balances and posts Red vs Yellow with positions.
       </p>
 
       <h3>Tuesday ~19:00: gear reminder</h3>
       <p>
-        Bot posts a short reminder with kickoff time + venue, asks people
+        MatchTime posts a short reminder with kickoff time + venue, asks people
         to bring goalie gloves, a ball, and spare bibs.
       </p>
 
@@ -239,7 +227,7 @@ export default function AdminGuidePage() {
 
       <h3>Sunday 15:00: Man of the Match announcement</h3>
       <p>
-        Bot announces the winner(s) based on peer votes + a short
+        MatchTime announces the winner(s) based on peer votes + a short
         well-done post.
       </p>
 
@@ -264,8 +252,8 @@ export default function AdminGuidePage() {
 
       <h3>Recording the score</h3>
       <p>
-        Any player can post the score in the group and the bot records
-        it automatically. If the bot can&apos;t resolve the sender to a
+        Any player can post the score in the group and MatchTime records
+        it automatically. If MatchTime can&apos;t resolve the sender to a
         real user (rare — WhatsApp hides some phones), it still writes
         the score. You can correct it in{" "}
         <code>/admin/matches/[id]</code> if needed.
@@ -323,7 +311,7 @@ export default function AdminGuidePage() {
       <h3>Add a missed player</h3>
       <p>
         Go to <code>/admin/players</code> → Add player. Or: ask someone
-        to say &quot;[Name] is IN&quot; in the group — the bot resolves or
+        to say &quot;[Name] is IN&quot; in the group — MatchTime resolves or
         auto-provisions them.
       </p>
 
@@ -342,13 +330,13 @@ export default function AdminGuidePage() {
       <h3>Switch format</h3>
       <p>
         Match detail → <strong>Switch format</strong>. Pick the smaller
-        activity, confirm who goes to the bench. The bot announces the
+        activity, confirm who goes to the bench. MatchTime announces the
         switch to the group.
       </p>
 
       <h3>Cancel a match</h3>
       <p>
-        Match detail → <strong>Cancel</strong>. Bot posts the cancellation
+        Match detail → <strong>Cancel</strong>. MatchTime posts the cancellation
         and any pending rating/MoM flows are skipped.
       </p>
 
@@ -376,12 +364,11 @@ export default function AdminGuidePage() {
 
       <h3>Someone&apos;s name didn&apos;t resolve — why?</h3>
       <p>
-        The bot tries (1) phone match, (2) exact name match, (3) fuzzy
-        first-name match (handles nicknames &amp; truncated pushnames like
-        &quot;Kara&quot; → &quot;Karahan&quot;). If none work it
-        auto-provisions a new member. Short pushnames (&lt;3 chars) are
-        treated as abbreviations and never provision; they silently map
-        or drop.
+        MatchTime tries phone match first, then exact name match, then a
+        fuzzy first-name match (which handles nicknames and short display
+        names — &quot;Kara&quot; will resolve to &quot;Karahan&quot; for
+        example). If none of those match, it creates a provisional entry
+        for you to review.
       </p>
 
       <h3>Duplicate player?</h3>
@@ -399,10 +386,10 @@ export default function AdminGuidePage() {
         the link while wrapping up. Adjustable per-org in the future.
       </p>
 
-      <h3>Can I stop the bot for a week?</h3>
+      <h3>Can I pause MatchTime for a week?</h3>
       <p>
-        Yes — disable it in <code>/admin/settings</code>. Existing matches
-        stay in the DB; scheduled posts don&apos;t fire while disabled.
+        Yes — pause it in <code>/admin/settings</code>. Existing matches
+        stay put; scheduled posts don&apos;t go out while paused.
       </p>
     </>
   );

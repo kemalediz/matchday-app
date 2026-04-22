@@ -28,13 +28,14 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   const isMagicLink = pathname?.startsWith("/r/");
   const isJoinLink = pathname?.startsWith("/join/");
+  const isOnboarding = pathname?.startsWith("/onboarding");
 
   // Treat "loading" as signed-in-for-now so we don't flash the marketing
   // layout for half a second on a signed-in user's hard refresh.
   const isPublicMarketing =
     pathname === "/" && !hasUser && status !== "loading";
 
-  const showSidebar = !isAuthRoute && !isMagicLink && !isJoinLink && !isPublicMarketing;
+  const showSidebar = !isAuthRoute && !isMagicLink && !isJoinLink && !isPublicMarketing && !isOnboarding;
 
   return (
     <>

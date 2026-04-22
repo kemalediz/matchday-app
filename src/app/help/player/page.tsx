@@ -22,14 +22,14 @@ export default function PlayerGuidePage() {
       </ul>
 
       <p>
-        The bot reacts to your message with your squad number: <strong>1️⃣</strong>{" "}
+        MatchTime reacts to your message with your squad number: <strong>1️⃣</strong>{" "}
         if you&apos;re the first in, <strong>2️⃣</strong> second, and so on.
         If the squad is already full you get <strong>🪑</strong> (bench).
       </p>
 
       <h3>Tentative</h3>
       <p>
-        If you&apos;re not 100%, say so — the bot keeps you off the
+        If you&apos;re not 100%, say so — MatchTime keeps you off the
         confirmed list but tracks you as a backstop:
       </p>
       <ul>
@@ -50,7 +50,7 @@ export default function PlayerGuidePage() {
       </ul>
       <p>
         If the named person is already in the group, their squad spot is
-        taken. If they aren&apos;t yet, the bot provisionally adds them
+        taken. If they aren&apos;t yet, MatchTime provisionally adds them
         and the admin reviews later.
       </p>
 
@@ -67,7 +67,7 @@ export default function PlayerGuidePage() {
 
       <h3>Asking for a replacement</h3>
       <p>
-        When you drop with a reason, the bot names you in the chase
+        When you drop with a reason, MatchTime names you in the chase
         post so others know who&apos;s looking for cover:
       </p>
       <ul>
@@ -84,7 +84,7 @@ export default function PlayerGuidePage() {
         <li><code>anyone else who can replace me too? If not I&apos;ll still join</code></li>
       </ul>
       <p>
-        The bot keeps you on the roster as a <strong>Tentative</strong>{" "}
+        MatchTime keeps you on the roster as a <strong>Tentative</strong>{" "}
         under the numbered list. Reaction: <strong>🤔</strong>.
       </p>
 
@@ -95,9 +95,9 @@ export default function PlayerGuidePage() {
       </ul>
 
       {/* ───────────────────────────────────────────────── */}
-      <h2 id="questions">3. Asking the bot questions</h2>
+      <h2 id="questions">3. Asking MatchTime questions</h2>
 
-      <p>The bot answers short questions about the next match:</p>
+      <p>MatchTime answers short questions about the next match:</p>
       <ul>
         <li><code>how many are we?</code></li>
         <li><code>who&apos;s playing?</code></li>
@@ -115,7 +115,7 @@ export default function PlayerGuidePage() {
 
       <p>
         If numbers are short and an alternative format exists for your
-        group, the bot proactively proposes it — for example:
+        group, MatchTime proactively proposes it — for example:
       </p>
       <blockquote>
         <p>
@@ -129,20 +129,20 @@ export default function PlayerGuidePage() {
       </p>
       <p>
         The <strong>admin</strong> makes the actual call (rebooking the
-        venue) — the bot only recommends and displays.
+        venue) — MatchTime only recommends and displays.
       </p>
 
       {/* ───────────────────────────────────────────────── */}
       <h2 id="teams">5. Team generation</h2>
 
-      <p>Ask the bot to split the confirmed squad:</p>
+      <p>Ask MatchTime to split the confirmed squad:</p>
       <ul>
         <li><code>@MatchTime generate teams</code></li>
         <li><code>teams please</code></li>
         <li><code>balance the teams</code></li>
       </ul>
       <p>
-        The bot considers everyone&apos;s rating + preferred position,
+        MatchTime considers everyone&apos;s rating + preferred position,
         runs a balancing algorithm, and posts Red vs Yellow.
       </p>
       <p>
@@ -155,7 +155,7 @@ export default function PlayerGuidePage() {
 
       {/* ───────────────────────────────────────────────── */}
       <h2 id="match-day">6. Match day</h2>
-      <p>The bot posts:</p>
+      <p>MatchTime posts:</p>
       <ul>
         <li>
           <strong>Morning check-in</strong> — if the squad is short, asks
@@ -174,7 +174,7 @@ export default function PlayerGuidePage() {
 
       <h3>Score</h3>
       <p>
-        As soon as the match time-window ends, the bot asks for the
+        As soon as the match time-window ends, MatchTime asks for the
         score. Any confirmed player can type:
       </p>
       <ul>
@@ -183,14 +183,14 @@ export default function PlayerGuidePage() {
         <li><code>Final 2:1</code></li>
       </ul>
       <p>
-        The bot records it, updates everyone&apos;s rating (Elo with
+        MatchTime records it, updates everyone&apos;s rating (Elo with
         margin-of-victory — 7-3 shifts more than 5-4), and thanks the
         group.
       </p>
 
       <h3>Payment poll</h3>
       <p>
-        Right after the match ends (not at midnight), the bot posts a
+        Right after the match ends (not at midnight), MatchTime posts a
         payment poll so people can pay pitch fees while it&apos;s fresh.
       </p>
 
@@ -230,13 +230,13 @@ export default function PlayerGuidePage() {
         <li><strong>⚽</strong> — confirmed, but past slot 10 (squad is huge)</li>
         <li><strong>🪑</strong> — bench (squad was full)</li>
         <li><strong>👋</strong> — you dropped out</li>
-        <li><strong>🤔</strong> — tentative, bot is keeping an eye on you</li>
+        <li><strong>🤔</strong> — tentative, MatchTime is keeping an eye on you</li>
         <li><strong>⚽</strong> on a &quot;generate teams&quot; message — balancer is running</li>
         <li><strong>👍</strong> — acknowledged (often replaced by the actual slot a few seconds later once the batch runs)</li>
       </ul>
 
       <p>
-        Reactions can lag by up to ~10 minutes because the bot batches
+        Reactions can lag by up to ~10 minutes because MatchTime batches
         messages to save cost. Don&apos;t re-send — your message is
         already queued.
       </p>
@@ -266,17 +266,17 @@ export default function PlayerGuidePage() {
         </li>
         <li>
           <strong>One message is enough</strong> — don&apos;t repeat
-          &quot;count me in&quot; then &quot;IN&quot;. The bot will pick
+          &quot;count me in&quot; then &quot;IN&quot;. MatchTime will pick
           it up on the next batch.
         </li>
         <li>
           <strong>Use real words, not codes</strong> — &quot;I&apos;ll
           play&quot;, &quot;can&apos;t make it&quot;, &quot;who&apos;s in
-          tonight?&quot; all work. The LLM behind the bot understands
-          natural language.
+          tonight?&quot; all work. MatchTime understands natural
+          language.
         </li>
         <li>
-          <strong>Nicknames are fine</strong> — the bot fuzzy-matches
+          <strong>Nicknames are fine</strong> — MatchTime fuzzy-matches
           first names, so &quot;Kara&quot; resolves to &quot;Karahan&quot;
           if they&apos;re already in the roster.
         </li>
