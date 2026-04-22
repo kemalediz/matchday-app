@@ -21,6 +21,10 @@ export interface MagicLinkPayload {
   userId: string;
   purpose: MagicLinkPurpose;
   matchId?: string; // required for purpose "rate-match"
+  /** Optional deep-link path to forward to after sign-in (e.g. "/admin/players").
+   *  Must start with "/" and be same-origin — the landing page ignores anything
+   *  that doesn't match. Used by admin DMs that link to specific review pages. */
+  nextPath?: string;
   exp: number;     // Unix seconds
 }
 

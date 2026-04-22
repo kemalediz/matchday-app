@@ -239,6 +239,7 @@ export async function computeDuePosts(groupId: string): Promise<DuePostsResult |
         const token = signMagicLinkToken({
           userId: admin.id,
           purpose: "sign-in",
+          nextPath: "/admin/players",
           ttlSeconds: MAGIC_LINK_TTL.signIn,
         });
         const signInUrl = buildMagicLinkUrl(token);

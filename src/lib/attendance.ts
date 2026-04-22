@@ -9,6 +9,34 @@ export async function registerAttendance(userId: string, matchId: string) {
     throw new Error("Attendance deadline has passed");
   }
 
+  // Idempotency: if the user is already CONFIRMED or BENCH for this
+  // match, don't touch position/status. Without this guard, calling
+  // registerAttendance twice (e.g. manual add followed by a matching
+  // WhatsApp message) would bump the user's position to maxPos+1,
+  // leaving a gap in the slot numbering.
+  const existing = await db.attendance.findUnique({
+    where: { matchId_userId: { matchId, userId } },
+  });
+  if (existing && (existing.status === "CONFIRMED" || existing.status === "BENCH")) {
+    const all = await db.attendance.findMany({
+      where: { matchId, status: { in: ["CONFIRMED", "BENCH"] } },
+      orderBy: { position: "asc" },
+    });
+    const confirmed = all.filter((a) => a.status === "CONFIRMED");
+    const bench = all.filter((a) => a.status === "BENCH");
+    const slot =
+      existing.status === "CONFIRMED"
+        ? confirmed.findIndex((a) => a.userId === userId) + 1
+        : bench.findIndex((a) => a.userId === userId) + 1;
+    return {
+      status: existing.status,
+      position: existing.position,
+      slot,
+      confirmedCount: confirmed.length,
+      maxPlayers: match.maxPlayers,
+    };
+  }
+
   const maxPos = await db.attendance.aggregate({
     where: { matchId },
     _max: { position: true },

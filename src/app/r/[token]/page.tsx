@@ -24,6 +24,7 @@ import Link from "next/link";
 interface PayloadPreview {
   purpose: "rate-match" | "sign-in";
   matchId?: string;
+  nextPath?: string;
 }
 
 export default function MagicLinkLandingPage() {
@@ -52,7 +53,7 @@ export default function MagicLinkLandingPage() {
             body.replace(/-/g, "+").replace(/_/g, "/") +
             "=".repeat((4 - (body.length % 4)) % 4);
           const json = JSON.parse(atob(padded));
-          preview = { purpose: json.purpose, matchId: json.matchId };
+          preview = { purpose: json.purpose, matchId: json.matchId, nextPath: json.nextPath };
         }
       } catch {
         // No preview — continue, server will reject if invalid.
@@ -76,6 +77,16 @@ export default function MagicLinkLandingPage() {
       // Redirect based on intent.
       if (preview?.purpose === "rate-match" && preview.matchId) {
         router.replace(`/matches/${preview.matchId}/rate`);
+      } else if (
+        // Deep-link support for admin-specific DMs ("review provisional
+        // members", "switch format", etc.). Only accept same-origin paths
+        // that start with "/" — don't trust arbitrary URLs from token payloads.
+        preview?.nextPath &&
+        typeof preview.nextPath === "string" &&
+        preview.nextPath.startsWith("/") &&
+        !preview.nextPath.startsWith("//")
+      ) {
+        router.replace(preview.nextPath);
       } else {
         router.replace("/");
       }
