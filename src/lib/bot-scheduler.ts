@@ -216,6 +216,53 @@ export async function computeDuePosts(groupId: string): Promise<DuePostsResult |
     }
   }
 
+  // ── Provisional-member review DM for admins ─────────────────────────
+  // When the analyzer auto-creates Memberships for unknown group senders
+  // (see api/whatsapp/analyze/route.ts createProvisionalByName), admins
+  // need to review them — set phone, position, seed rating, or remove if
+  // not a player. DM each admin once per day while there are unresolved
+  // provisional members pending. Idempotency key includes the date and
+  // the admin ID so tomorrow's DM fires fresh.
+  {
+    const provisional = await db.membership.findMany({
+      where: { orgId: org.id, provisionallyAddedAt: { not: null }, leftAt: null },
+      include: { user: { select: { name: true } } },
+      orderBy: { provisionallyAddedAt: "desc" },
+      take: 10,
+    });
+    if (provisional.length > 0) {
+      const admins = await findOrgAdminsWithPhone(org.id);
+      const todayKey = formatLondon(now, "yyyy-MM-dd");
+      for (const admin of admins) {
+        const key = `org-${org.id}:provisional-review:${admin.id}:${todayKey}`;
+        if (sentKeys.has(key)) continue;
+        const token = signMagicLinkToken({
+          userId: admin.id,
+          purpose: "sign-in",
+          ttlSeconds: MAGIC_LINK_TTL.signIn,
+        });
+        const signInUrl = buildMagicLinkUrl(token);
+        const names = provisional
+          .map((p) => p.user.name)
+          .filter(Boolean)
+          .slice(0, 5)
+          .join(", ");
+        const more = provisional.length > 5 ? ` (+${provisional.length - 5} more)` : "";
+        out.push({
+          kind: "dm",
+          key,
+          targetUser: admin.id,
+          phone: admin.phoneNumber.replace(/^\+/, ""),
+          text:
+            `✨ *New players to review* — ${provisional.length} ${provisional.length === 1 ? "person was" : "people were"} auto-added after posting in the group:\n\n` +
+            `${names}${more}\n\n` +
+            `Tap to review and set phone/position/rating, or remove:\n${signInUrl}\n\n` +
+            `Or navigate manually: /admin/players`,
+        });
+      }
+    }
+  }
+
   // ── Ad-hoc admin-queued BotJobs (test DMs, one-off messages) ────────
   // Any unsent row is emitted as a matching instruction; idempotency key
   // is `botjob-${id}` so ACK marks sentAt via the existing flow + our

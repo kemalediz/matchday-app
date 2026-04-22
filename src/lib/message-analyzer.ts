@@ -80,6 +80,14 @@ export interface AnalysisVerdict {
    *  Ehtisham as IN"). Server resolves names against the current match
    *  roster; unmatched names are ignored. */
   includeNames: string[] | null;
+  /** Third-party attendance registrations.
+   *  Populated when the sender signs up / drops out OTHER people on their
+   *  behalf ("my dad Najib is also in", "Ibrahim can't make it tonight",
+   *  "bringing Ahmet with me"). The SENDER's own attendance is handled by
+   *  `registerAttendance` — this field is strictly for others named in the
+   *  same message. Server fuzzy-matches each name to an org member; if no
+   *  match, a provisional member is created so attendance still lands. */
+  registerFor: Array<{ name: string; action: "IN" | "OUT" }> | null;
   reasoning: string;
 }
 
@@ -106,6 +114,7 @@ Output schema:
       "scoreRed": <number> | null,
       "scoreYellow": <number> | null,
       "includeNames": [<string>, ...] | null,
+      "registerFor": [{"name": "<string>", "action": "IN" | "OUT"}, ...] | null,
       "reasoning": "<short internal explanation>"
     }
   ]
@@ -136,6 +145,28 @@ Intent rules:
 - "noise": Social chat, jokes, memes, photos, links, tangential banter, off-topic questions (recipe links, memes, sports trivia).
   → Everything null.
 - "unclear": Genuinely can't tell. Everything null — bot stays silent.
+
+THIRD-PARTY REGISTRATIONS (registerFor):
+Players frequently sign up or drop OTHER people — friends/family/teammates who can't message right now. Detect these and populate registerFor with one entry per named person. The author's OWN attendance is still controlled by registerAttendance; registerFor is ONLY for other names mentioned.
+
+Examples:
+- "my dad Najib is also in, he's busy right now"
+    → intent "in", registerAttendance: "IN" (author is also joining? only if they said so — here they didn't, so null), registerFor: [{"name":"Najib","action":"IN"}]
+- "Ibrahim can't make it tonight, work ran late"
+    → intent "out" (relaying a drop), registerAttendance: null, registerFor: [{"name":"Ibrahim","action":"OUT"}]
+- "me and Ahmet both in"
+    → intent "in", registerAttendance: "IN" (author is in), registerFor: [{"name":"Ahmet","action":"IN"}]
+- "bringing Mike and Steve with me, I'm in too"
+    → intent "in", registerAttendance: "IN", registerFor: [{"name":"Mike","action":"IN"},{"name":"Steve","action":"IN"}]
+- "Karahan just told me he can't play"
+    → intent "out", registerAttendance: null, registerFor: [{"name":"Karahan","action":"OUT"}]
+
+Rules:
+- Only include third-party entries when the relationship to the target is clear (possessive "my dad Najib", "bringing X", "X can't make it"). If it's ambiguous gossip ("someone said Najib might come"), skip — don't guess.
+- First-name is fine ("Najib"). The server fuzzy-matches.
+- Do NOT put the author themselves in registerFor — use registerAttendance for them.
+- If registerFor has entries, react: "👍" still (server overrides with slot emoji of the newly-added player).
+- If the message ONLY signs up others (author not joining), intent is still "in" or "out" based on the direction of the third-party action; registerAttendance is null.
 
 CHASE behaviour (important):
 - When someone drops (intent "out" or "replacement_request") AND the resulting squad is short (confirmed < maxPlayers per the Match Context), you should nudge the group.
@@ -629,6 +660,7 @@ function offlineVerdict(waMessageId: string, reason: string): AnalysisVerdict {
     scoreRed: null,
     scoreYellow: null,
     includeNames: null,
+    registerFor: null,
     reasoning: reason,
   };
 }
@@ -711,6 +743,18 @@ function normaliseVerdict(waMessageId: string, raw: Record<string, unknown>): An
           .filter((n): n is string => typeof n === "string" && n.trim().length > 0)
           .map((n) => n.trim())
       : null;
+  const registerFor = Array.isArray(raw.registerFor)
+    ? (raw.registerFor as unknown[])
+        .map((e) => {
+          if (!e || typeof e !== "object") return null;
+          const o = e as Record<string, unknown>;
+          const name = typeof o.name === "string" ? o.name.trim() : "";
+          const action = o.action === "IN" || o.action === "OUT" ? o.action : null;
+          if (!name || !action) return null;
+          return { name, action };
+        })
+        .filter((e): e is { name: string; action: "IN" | "OUT" } => e !== null)
+    : null;
   const reasoning = typeof raw.reasoning === "string" ? raw.reasoning : "";
 
   // Low-confidence downgrade: wipe all actions so the bot stays silent.
@@ -725,6 +769,7 @@ function normaliseVerdict(waMessageId: string, raw: Record<string, unknown>): An
       scoreRed: null,
       scoreYellow: null,
       includeNames: null,
+      registerFor: null,
       reasoning: `[low-confidence downgrade] ${reasoning}`,
     };
   }
@@ -739,6 +784,7 @@ function normaliseVerdict(waMessageId: string, raw: Record<string, unknown>): An
     scoreRed,
     scoreYellow,
     includeNames,
+    registerFor: registerFor && registerFor.length > 0 ? registerFor : null,
     reasoning,
   };
 }

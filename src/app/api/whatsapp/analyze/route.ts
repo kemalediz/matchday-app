@@ -354,14 +354,79 @@ async function createProvisionalMember(
   orgId: string,
   msg: InboundMessage,
 ): Promise<ResolvedSender | null> {
-  const name = msg.authorName?.trim();
+  return createProvisionalByName(orgId, msg.authorName?.trim() ?? null, msg.authorPhone);
+}
+
+/**
+ * Fuzzy-match a free-text name against the org's roster, or create a
+ * provisional member if no unique match. Used for:
+ *   - the message sender themselves (resolveSender fallback)
+ *   - third-party registrations ("my dad Najib is also in" → lookup
+ *     "Najib" in org, else provision)
+ *
+ * Returns null only when the name is empty / obviously not a person.
+ */
+async function resolveOrProvisionByName(
+  orgId: string,
+  rawName: string,
+): Promise<{ userId: string; name: string | null } | null> {
+  const name = rawName.trim();
+  if (!name || name.length < 2) return null;
+
+  // 1. Fuzzy lookup against existing members.
+  const candidates = await db.membership.findMany({
+    where: { orgId, leftAt: null },
+    include: { user: { select: { id: true, name: true } } },
+  });
+  const norm = (s: string) =>
+    s.trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  const pushTokens = norm(name).split(/\s+/).filter(Boolean);
+  const pushFirst = pushTokens[0] ?? "";
+
+  const equalsMatches = candidates.filter(
+    (c) => c.user.name && norm(c.user.name) === norm(name),
+  );
+  if (equalsMatches.length === 1) {
+    return { userId: equalsMatches[0].user.id, name: equalsMatches[0].user.name };
+  }
+
+  const firstNameMatches = candidates.filter((c) => {
+    if (!c.user.name) return false;
+    const dbTokens = norm(c.user.name).split(/\s+/).filter(Boolean);
+    const dbFirst = dbTokens[0] ?? "";
+    return (
+      dbFirst === pushFirst ||
+      (dbFirst.length >= 3 &&
+        pushFirst.length >= 3 &&
+        (dbFirst.startsWith(pushFirst) || pushFirst.startsWith(dbFirst)))
+    );
+  });
+  if (firstNameMatches.length === 1) {
+    return {
+      userId: firstNameMatches[0].user.id,
+      name: firstNameMatches[0].user.name,
+    };
+  }
+
+  // 2. No unique match → provision. No phone known (third party).
+  const provisioned = await createProvisionalByName(orgId, name, null);
+  if (provisioned) return { userId: provisioned.userId!, name: provisioned.name };
+  return null;
+}
+
+async function createProvisionalByName(
+  orgId: string,
+  rawName: string | null,
+  rawPhone: string | null,
+): Promise<ResolvedSender | null> {
+  const name = rawName?.trim();
   if (!name || name.length < 2) return null;
   // Skip obvious non-player authors (bot itself, group admin system messages).
   const blocked = /^(match time|matchtime|whatsapp|system)$/i;
   if (blocked.test(name)) return null;
 
-  const normPhone = msg.authorPhone
-    ? normalisePhone(msg.authorPhone.startsWith("+") ? msg.authorPhone : `+${msg.authorPhone}`)
+  const normPhone = rawPhone
+    ? normalisePhone(rawPhone.startsWith("+") ? rawPhone : `+${rawPhone}`)
     : null;
 
   // Synthetic email keeps the User.email unique constraint happy — users
@@ -480,6 +545,55 @@ async function executeVerdict(args: {
         }
       } catch (err) {
         console.error("[analyze] attendance update failed:", err);
+      }
+    }
+  }
+
+  // ── Third-party attendance registrations ────────────────────────
+  //    "my dad Najib is in" / "Ibrahim can't make it" — the message
+  //    signs up/drops someone OTHER than the sender. Fuzzy-match the
+  //    named person against the org's roster; create a provisional
+  //    member if no match. The react on the SENDER's message reflects
+  //    the slot of the last newly-added player, so the group can see
+  //    the registration landed.
+  if (verdict.registerFor && verdict.registerFor.length > 0) {
+    const matchForOrg = await db.match.findFirst({
+      where: {
+        activity: { orgId },
+        status: { in: ["UPCOMING", "TEAMS_GENERATED", "TEAMS_PUBLISHED"] },
+        attendanceDeadline: { gt: new Date() },
+      },
+      orderBy: { date: "asc" },
+    });
+    if (matchForOrg) {
+      for (const entry of verdict.registerFor) {
+        try {
+          const target = await resolveOrProvisionByName(orgId, entry.name);
+          if (!target) continue;
+          // Don't double-register the sender if the LLM mistakenly
+          // put them in registerFor as well.
+          if (user && target.userId === user.id) continue;
+          if (entry.action === "IN") {
+            const result = await registerAttendance(target.userId, matchForOrg.id);
+            const attendances = await db.attendance.findMany({
+              where: { matchId: matchForOrg.id, status: { in: ["CONFIRMED", "BENCH"] } },
+              orderBy: { position: "asc" },
+            });
+            const confirmed = attendances.filter((a) => a.status === "CONFIRMED");
+            const bench = attendances.filter((a) => a.status === "BENCH");
+            if (result.status === "CONFIRMED") {
+              const slot = confirmed.findIndex((a) => a.userId === target.userId) + 1;
+              finalReact = KEYCAP[slot] ?? "⚽";
+            } else {
+              finalReact = "🪑";
+            }
+          } else {
+            await cancelAttendance(target.userId, matchForOrg.id);
+            finalReact = "👋";
+          }
+        } catch (err) {
+          console.error(`[analyze] third-party registration failed for "${entry.name}":`, err);
+        }
       }
     }
   }
