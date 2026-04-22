@@ -4,7 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useSession, signOut } from "next-auth/react";
 import { useState } from "react";
-import { Home, CalendarDays, User, Shield, Menu, X, LogOut, LogIn } from "lucide-react";
+import { Home, CalendarDays, User, Shield, Menu, X, LogOut, LogIn, HelpCircle } from "lucide-react";
 import { OrgSwitcher } from "./org-switcher";
 
 type NavItem = {
@@ -41,6 +41,12 @@ const NAV: NavItem[] = [
     icon: <Shield className="w-5 h-5 shrink-0" />,
     activeColor: "bg-amber-600 text-white",
     adminOnly: true,
+  },
+  {
+    label: "Help",
+    href: "/help",
+    icon: <HelpCircle className="w-5 h-5 shrink-0" />,
+    activeColor: "bg-slate-600 text-white",
   },
 ];
 
