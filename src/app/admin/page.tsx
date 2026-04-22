@@ -3,7 +3,8 @@ import { db } from "@/lib/db";
 import { getUserOrg } from "@/lib/org";
 import { redirect } from "next/navigation";
 import Link from "next/link";
-import { Users, Calendar, Clock, CheckCircle, ChevronRight } from "lucide-react";
+import { Users, Calendar, Clock, CheckCircle, ChevronRight, Star } from "lucide-react";
+import { format } from "date-fns";
 
 const TILE = {
   blue: "bg-blue-50 text-blue-700 border-blue-200",
@@ -21,7 +22,7 @@ export default async function AdminDashboardPage() {
 
   const orgId = membership.orgId;
 
-  const [playerCount, activeActivities, upcomingMatches, completedMatches] = await Promise.all([
+  const [playerCount, activeActivities, upcomingMatches, completedMatches, latestMatch] = await Promise.all([
     db.membership.count({ where: { orgId, leftAt: null } }),
     db.activity.count({ where: { orgId, isActive: true } }),
     db.match.count({
@@ -33,7 +34,29 @@ export default async function AdminDashboardPage() {
     db.match.count({
       where: { activity: { orgId }, status: "COMPLETED", isHistorical: false },
     }),
+    db.match.findFirst({
+      where: { activity: { orgId }, status: "COMPLETED", isHistorical: false },
+      orderBy: { date: "desc" },
+      include: {
+        activity: { select: { name: true } },
+        attendances: {
+          where: { status: { in: ["CONFIRMED", "BENCH"] } },
+          include: { user: { select: { id: true, name: true } } },
+        },
+        ratings: { select: { raterId: true } },
+      },
+    }),
   ]);
+
+  const ratingProgress = latestMatch
+    ? (() => {
+        const raters = new Set(latestMatch.ratings.map((r) => r.raterId));
+        const players = latestMatch.attendances;
+        const submitted = players.filter((a) => raters.has(a.user.id));
+        const pending = players.filter((a) => !raters.has(a.user.id));
+        return { match: latestMatch, submitted, pending, total: players.length };
+      })()
+    : null;
 
   return (
     <div className="space-y-6">
@@ -67,6 +90,71 @@ export default async function AdminDashboardPage() {
           <p className="text-3xl font-bold mt-2">{completedMatches}</p>
         </div>
       </div>
+
+      {ratingProgress && (
+        <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-sm">
+          <div className="flex items-center justify-between gap-3 mb-3">
+            <div className="flex items-center gap-2">
+              <Star className="w-4 h-4 text-amber-500" />
+              <h2 className="font-semibold text-slate-800">Rating progress</h2>
+              <span className="text-sm text-slate-500">
+                · {ratingProgress.match.activity.name}, {format(ratingProgress.match.date, "EEE d MMM")}
+              </span>
+            </div>
+            <span className="text-sm font-medium text-slate-700">
+              {ratingProgress.submitted.length}/{ratingProgress.total} submitted
+            </span>
+          </div>
+          <div className="h-2 bg-slate-100 rounded-full overflow-hidden mb-4">
+            <div
+              className="h-full bg-amber-500"
+              style={{
+                width: `${ratingProgress.total ? Math.round((ratingProgress.submitted.length / ratingProgress.total) * 100) : 0}%`,
+              }}
+            />
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm">
+            <div>
+              <p className="text-xs font-medium uppercase tracking-wider text-slate-400 mb-2">
+                ✅ Submitted ({ratingProgress.submitted.length})
+              </p>
+              <div className="flex flex-wrap gap-1.5">
+                {ratingProgress.submitted.length === 0 ? (
+                  <span className="text-slate-400 italic">None yet</span>
+                ) : (
+                  ratingProgress.submitted.map((a) => (
+                    <span
+                      key={a.user.id}
+                      className="inline-flex px-2 py-0.5 rounded-md bg-green-50 text-green-700 text-xs"
+                    >
+                      {a.user.name}
+                    </span>
+                  ))
+                )}
+              </div>
+            </div>
+            <div>
+              <p className="text-xs font-medium uppercase tracking-wider text-slate-400 mb-2">
+                ⏳ Pending ({ratingProgress.pending.length})
+              </p>
+              <div className="flex flex-wrap gap-1.5">
+                {ratingProgress.pending.length === 0 ? (
+                  <span className="text-slate-400 italic">All done 🎉</span>
+                ) : (
+                  ratingProgress.pending.map((a) => (
+                    <span
+                      key={a.user.id}
+                      className="inline-flex px-2 py-0.5 rounded-md bg-slate-100 text-slate-600 text-xs"
+                    >
+                      {a.user.name}
+                    </span>
+                  ))
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="flex flex-wrap gap-3">
         <Link
