@@ -134,6 +134,57 @@ function londonHour(at: Date = new Date()): number {
   return parseInt(h, 10);
 }
 
+/**
+ * Copy for the daily 17:00 rating-reminder DM. Varies tone by day so five
+ * nudges in a row don't all read the same. Each message:
+ *   - Opens warmly (first name if we have it).
+ *   - Names the match so they remember which one.
+ *   - Reminds them why ratings matter (better-balanced teams next week).
+ *   - Signs off with the personal magic link.
+ * Never guilty or whiny — the goal is to make it feel like a teammate
+ * tapping them on the shoulder, not a debt collector.
+ */
+function buildReminderText(args: {
+  dayNum: number;
+  playerName: string | null;
+  activityName: string;
+  mvpLabel: string;
+  url: string;
+}): string {
+  const { dayNum, playerName, activityName, mvpLabel, url } = args;
+  const first = playerName?.split(/\s+/)[0] ?? "mate";
+  const sig = `\n${url}`;
+  switch (dayNum) {
+    case 1:
+      return (
+        `Hey ${first} 👋 — hope last night's *${activityName}* was a good one.\n\n` +
+        `When you have a sec, tap here to rate your teammates and pick ${mvpLabel}. ` +
+        `The more of us vote, the better the teams balance next week 🙌${sig}`
+      );
+    case 2:
+      return (
+        `${first}, friendly nudge 🙂 — still waiting on your ratings for *${activityName}*.\n\n` +
+        `Literally 30 seconds, promise. Helps everyone get fairer teams next week ⚽${sig}`
+      );
+    case 3:
+      return (
+        `Halfway through the rating window, ${first} ⏳\n\n` +
+        `Your vote for *${activityName}* actually moves ratings a lot when half the squad has voted ` +
+        `and you haven't. Quick tap:${sig}`
+      );
+    case 4:
+      return (
+        `${first} — two days left to rate *${activityName}* and lock in ${mvpLabel} 🏆\n\n` +
+        `30 seconds, then you're done:${sig}`
+      );
+    default: // day 5 — last chance
+      return (
+        `Last call ${first} 🔔 — the rating window for *${activityName}* closes tomorrow.\n\n` +
+        `Drop a rating + ${mvpLabel} pick before it shuts. Your voice counts:${sig}`
+      );
+  }
+}
+
 /** Date-only key for "daily X" idempotency (YYYY-MM-DD in London). */
 function londonDateKey(at: Date = new Date()): string {
   return new Intl.DateTimeFormat("en-CA", {
@@ -765,11 +816,13 @@ async function computeForMatch(
       }
     }
 
-    // 6d. Daily 18:00 rating reminder DM for any confirmed player who hasn't
+    // 6d. Daily 17:00 rating reminder DM for any confirmed player who hasn't
     //     voted yet (stops when they vote or after the 5-day window).
+    //     Kemal: "people are wrapping up the workday at 5pm, good time to tap
+    //     a quick rating link before dinner."
     {
       const hourNow = londonHour(now);
-      const isReminderHour = hourNow >= 18 && hourNow < 19;
+      const isReminderHour = hourNow >= 17 && hourNow < 18;
       const withinWindow = hoursSinceMatch <= 5 * 24;
       if (isReminderHour && withinWindow) {
         // Figure out who has already rated (MoMVote OR at least 1 Rating).
@@ -801,15 +854,22 @@ async function computeForMatch(
             matchId,
             ttlSeconds: MAGIC_LINK_TTL.rateMatch,
           });
+          // Vary tone by day so repeats don't feel like spam.
+          const dayNum = Math.min(5, Math.max(1, Math.ceil(hoursSinceMatch / 24)));
+          const text = buildReminderText({
+            dayNum,
+            playerName: a.user.name,
+            activityName: activity.name,
+            mvpLabel: sport.mvpLabel,
+            url: buildMagicLinkUrl(token),
+          });
           out.push({
             kind: "dm",
             key,
             matchId,
             targetUser: a.userId,
             phone: a.user.phoneNumber.replace(/^\+/, ""),
-            text:
-              `👋 Quick nudge — you haven't rated *${activity.name}* yet.\n\n` +
-              `Takes under a minute:\n${buildMagicLinkUrl(token)}`,
+            text,
           });
         }
       }
