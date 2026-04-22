@@ -326,8 +326,13 @@ async function resolveSender(orgId: string, msg: InboundMessage): Promise<Resolv
       const dbFirst = dbTokens[0] ?? "";
       return (
         dbFirst === pushFirst ||
-        (dbFirst.length >= 3 && pushFirst.length >= 3 &&
-          (dbFirst.startsWith(pushFirst) || pushFirst.startsWith(dbFirst)))
+        // Relaxed prefix match: as long as one side is ≥3 chars and the
+        // other is ≥2, accept a startsWith. Handles short pushnames like
+        // "ba" → "Baki" and nicknames like "Kara" → "Karahan". The
+        // uniqueness check above still blocks ambiguous cases ("Ed" when
+        // both "Ediz" and "Edward" are in the org).
+        ((dbFirst.length >= 3 && pushFirst.length >= 2 && dbFirst.startsWith(pushFirst)) ||
+          (pushFirst.length >= 3 && dbFirst.length >= 2 && pushFirst.startsWith(dbFirst)))
       );
     });
     if (firstNameMatches.length === 1) {
@@ -420,7 +425,12 @@ async function createProvisionalByName(
   rawPhone: string | null,
 ): Promise<ResolvedSender | null> {
   const name = rawName?.trim();
-  if (!name || name.length < 2) return null;
+  // Require ≥3 chars: 2-char pushnames like "ba" are almost always
+  // truncations of a real name we already have (e.g. "Baki Sutton") and
+  // provisioning them creates duplicate ghost users. The relaxed fuzzy
+  // matcher (see firstNameMatches) now resolves short pushnames to
+  // existing members; provisioning is reserved for genuinely new names.
+  if (!name || name.length < 3) return null;
   // Skip obvious non-player authors (bot itself, group admin system messages).
   const blocked = /^(match time|matchtime|whatsapp|system)$/i;
   if (blocked.test(name)) return null;
