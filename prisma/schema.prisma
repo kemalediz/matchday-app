@@ -152,6 +152,13 @@ model Membership {
   /// from roster queries. A `group_join` later will null this back out.
   leftAt DateTime?
 
+  /// Non-null when this membership was auto-created by the analyzer
+  /// because an unknown sender posted in the org's monitored group.
+  /// The admin dashboard surfaces these so owners can fill in phone,
+  /// position, seed rating, or remove them if they're not a player.
+  /// Cleared once an admin edits the player (confirming they're real).
+  provisionallyAddedAt DateTime?
+
   createdAt DateTime @default(now())
 
   @@unique([userId, orgId])

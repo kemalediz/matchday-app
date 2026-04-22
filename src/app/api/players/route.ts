@@ -63,6 +63,7 @@ export async function GET(request: Request) {
     seedRating: m.user.seedRating,
     isActive: m.user.isActive,
     leftAt: m.leftAt ? m.leftAt.toISOString() : null,
+    provisionallyAddedAt: m.provisionallyAddedAt ? m.provisionallyAddedAt.toISOString() : null,
     _count: m.user._count,
   }));
 

@@ -167,6 +167,45 @@ export async function seedPlayerRating(userId: string, orgId: string, rating: nu
   revalidatePath("/admin/players");
 }
 
+/**
+ * Admin: confirm that an auto-provisioned player is real. Clears the
+ * provisionallyAddedAt flag so the "NEW" badge disappears. Does not
+ * touch anything else — phone/positions/rating are edited via the
+ * usual inputs on the same row.
+ */
+export async function confirmProvisionalPlayer(userId: string, orgId: string) {
+  const session = await auth();
+  if (!session?.user?.id) throw new Error("Not authenticated");
+  await requireOrgAdmin(session.user.id, orgId);
+
+  await db.membership.update({
+    where: { userId_orgId: { userId, orgId } },
+    data: { provisionallyAddedAt: null },
+  });
+
+  revalidatePath("/admin/players");
+  revalidatePath("/admin");
+}
+
+/**
+ * Admin: remove a player who was auto-provisioned but shouldn't have
+ * been (e.g. non-playing group member). Sets leftAt, preserving any
+ * attendance/rating history.
+ */
+export async function removeProvisionalPlayer(userId: string, orgId: string) {
+  const session = await auth();
+  if (!session?.user?.id) throw new Error("Not authenticated");
+  await requireOrgAdmin(session.user.id, orgId);
+
+  await db.membership.update({
+    where: { userId_orgId: { userId, orgId } },
+    data: { leftAt: new Date(), provisionallyAddedAt: null },
+  });
+
+  revalidatePath("/admin/players");
+  revalidatePath("/admin");
+}
+
 export async function updatePlayerPhone(userId: string, orgId: string, phone: string) {
   const session = await auth();
   if (!session?.user?.id) throw new Error("Not authenticated");

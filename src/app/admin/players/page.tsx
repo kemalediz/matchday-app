@@ -2,9 +2,14 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { Phone, Star, Shield } from "lucide-react";
+import { Phone, Star, Shield, Check, X, Sparkles } from "lucide-react";
 import { toast } from "sonner";
-import { updatePlayerRole, seedPlayerRating } from "@/app/actions/players";
+import {
+  updatePlayerRole,
+  seedPlayerRating,
+  confirmProvisionalPlayer,
+  removeProvisionalPlayer,
+} from "@/app/actions/players";
 
 interface Player {
   id: string;
@@ -17,6 +22,7 @@ interface Player {
   phoneNumber: string | null;
   isActive: boolean;
   leftAt: string | null;
+  provisionallyAddedAt: string | null;
   _count: { attendances: number };
 }
 
@@ -74,10 +80,34 @@ export default function PlayersPage() {
     }
   }
 
+  async function handleConfirm(userId: string) {
+    if (!orgId) return;
+    try {
+      await confirmProvisionalPlayer(userId, orgId);
+      toast.success("Player confirmed");
+      loadPlayers(includeFormer);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed");
+    }
+  }
+
+  async function handleRemove(userId: string) {
+    if (!orgId) return;
+    if (!confirm("Remove this player? Their attendance/rating history is preserved, but they won't appear in future matches.")) return;
+    try {
+      await removeProvisionalPlayer(userId, orgId);
+      toast.success("Player removed");
+      loadPlayers(includeFormer);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed");
+    }
+  }
+
   if (loading) return <div className="p-10 text-center text-slate-400">Loading…</div>;
 
   const withPhoneCount = players.filter((p) => p.phoneNumber).length;
   const leftCount = players.filter((p) => p.leftAt).length;
+  const provisionalPlayers = players.filter((p) => p.provisionallyAddedAt && !p.leftAt);
 
   return (
     <div className="space-y-6">
@@ -133,6 +163,20 @@ export default function PlayersPage() {
         accumulated enough peer ratings from completed matches.
       </p>
 
+      {provisionalPlayers.length > 0 && (
+        <div className="bg-amber-50 border border-amber-200 rounded-xl p-4">
+          <div className="flex items-center gap-2 mb-2">
+            <Sparkles className="w-4 h-4 text-amber-600" />
+            <p className="font-semibold text-amber-900">
+              {provisionalPlayers.length} new {provisionalPlayers.length === 1 ? "player" : "players"} joined via WhatsApp
+            </p>
+          </div>
+          <p className="text-sm text-amber-800">
+            {provisionalPlayers.map((p) => p.name).filter(Boolean).join(", ")} posted in the group and got auto-added. Review phone, position and seed rating below, then hit ✓ to confirm — or ✕ to remove if they&apos;re not a player.
+          </p>
+        </div>
+      )}
+
       <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
         <div className="hidden sm:grid grid-cols-[1fr_auto_auto] gap-4 px-6 py-3 border-b border-slate-100 bg-slate-50 text-xs font-semibold uppercase tracking-wider text-slate-500">
           <span>Player</span>
@@ -144,11 +188,13 @@ export default function PlayersPage() {
             <div
               key={p.id}
               className={`grid grid-cols-[1fr_auto_auto] gap-4 px-6 py-4 items-center ${
-                p.leftAt ? "bg-slate-50/70 opacity-70" : ""
+                p.leftAt ? "bg-slate-50/70 opacity-70" : p.provisionallyAddedAt ? "bg-amber-50/50" : ""
               }`}
             >
               <div className="flex items-center gap-3 min-w-0">
-                <div className="w-10 h-10 rounded-full bg-blue-50 text-blue-700 flex items-center justify-center text-sm font-semibold shrink-0">
+                <div className={`w-10 h-10 rounded-full flex items-center justify-center text-sm font-semibold shrink-0 ${
+                  p.provisionallyAddedAt ? "bg-amber-100 text-amber-700" : "bg-blue-50 text-blue-700"
+                }`}>
                   {(p.name ?? p.email).charAt(0).toUpperCase()}
                 </div>
                 <div className="min-w-0">
@@ -158,6 +204,29 @@ export default function PlayersPage() {
                       <span className="inline-flex shrink-0 px-1.5 py-0.5 rounded bg-slate-200 text-slate-600 text-[10px] font-semibold uppercase tracking-wider">
                         Left
                       </span>
+                    )}
+                    {p.provisionallyAddedAt && !p.leftAt && (
+                      <span className="inline-flex shrink-0 items-center gap-1 px-1.5 py-0.5 rounded bg-amber-100 text-amber-800 text-[10px] font-semibold uppercase tracking-wider">
+                        <Sparkles className="w-3 h-3" /> New
+                      </span>
+                    )}
+                    {p.provisionallyAddedAt && !p.leftAt && (
+                      <button
+                        onClick={() => handleConfirm(p.id)}
+                        className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-green-600 hover:bg-green-700 text-white text-[10px] font-semibold"
+                        title="Confirm this is a real player"
+                      >
+                        <Check className="w-3 h-3" /> Confirm
+                      </button>
+                    )}
+                    {p.provisionallyAddedAt && !p.leftAt && (
+                      <button
+                        onClick={() => handleRemove(p.id)}
+                        className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-slate-200 hover:bg-slate-300 text-slate-700 text-[10px] font-semibold"
+                        title="Not a player — remove"
+                      >
+                        <X className="w-3 h-3" /> Remove
+                      </button>
                     )}
                   </div>
                   <div className="flex items-center gap-1.5 text-xs text-slate-500 mt-0.5">

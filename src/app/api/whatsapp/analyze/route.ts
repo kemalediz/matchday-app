@@ -338,7 +338,77 @@ async function resolveSender(orgId: string, msg: InboundMessage): Promise<Resolv
       };
     }
   }
+  // Auto-create a provisional member when we couldn't match.
+  //   Rationale: the message came from the org's monitored WhatsApp
+  //   group, so by construction the sender is in the roster. Silently
+  //   dropping their IN/OUT is a worse failure mode than occasionally
+  //   creating a duplicate that an admin has to merge. Admin dashboard
+  //   surfaces provisional members (via Membership.provisionallyAddedAt)
+  //   so they can set phone/position/rating or remove them.
+  const provisional = await createProvisionalMember(orgId, msg);
+  if (provisional) return provisional;
   return { userId: null, name: msg.authorName, phone: null };
+}
+
+async function createProvisionalMember(
+  orgId: string,
+  msg: InboundMessage,
+): Promise<ResolvedSender | null> {
+  const name = msg.authorName?.trim();
+  if (!name || name.length < 2) return null;
+  // Skip obvious non-player authors (bot itself, group admin system messages).
+  const blocked = /^(match time|matchtime|whatsapp|system)$/i;
+  if (blocked.test(name)) return null;
+
+  const normPhone = msg.authorPhone
+    ? normalisePhone(msg.authorPhone.startsWith("+") ? msg.authorPhone : `+${msg.authorPhone}`)
+    : null;
+
+  // Synthetic email keeps the User.email unique constraint happy — users
+  // can claim their account later via a real email address when they
+  // log in (onboarding flow overwrites this placeholder).
+  const emailSlug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "player";
+  const syntheticEmail = `provisional+${emailSlug}-${Date.now().toString(36)}@matchtime.local`;
+
+  try {
+    // Phone is unique globally, so if a user with that phone already
+    // exists (from another org), reuse them rather than failing.
+    let user = normPhone
+      ? await db.user.findUnique({ where: { phoneNumber: normPhone } })
+      : null;
+    if (!user) {
+      user = await db.user.create({
+        data: {
+          name,
+          email: syntheticEmail,
+          phoneNumber: normPhone,
+          onboarded: false,
+          isActive: true,
+        },
+      });
+    }
+
+    // Upsert membership: if user already exists in this org (e.g. re-joined),
+    // just clear leftAt and mark as provisional again.
+    await db.membership.upsert({
+      where: { userId_orgId: { userId: user.id, orgId } },
+      create: {
+        userId: user.id,
+        orgId,
+        role: "PLAYER",
+        provisionallyAddedAt: new Date(),
+      },
+      update: {
+        leftAt: null,
+        provisionallyAddedAt: new Date(),
+      },
+    });
+    console.log(`[analyze] auto-created provisional member ${user.id} (${name}) in org ${orgId}`);
+    return { userId: user.id, name: user.name, phone: normPhone };
+  } catch (err) {
+    console.error("[analyze] provisional member creation failed:", err);
+    return null;
+  }
 }
 
 /**
