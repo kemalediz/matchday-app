@@ -225,25 +225,23 @@ async function buildUnpaidTail(
   if (paid.length === 0) return null;
   if (unpaid.length === 0) return null;
 
-  // Build inline @-tags. For players with a phone number we use @<phone>
-  // format which whatsapp-web.js converts to a real mention when the bot
-  // passes the matching JID in the mentions array. Players without a
-  // phone fall back to @<FirstName> as plain text.
-  const mentions: string[] = [];
-  const tags = unpaid.slice(0, 14).map((a) => {
-    const name = a.user.name ?? "player";
-    const first = name.split(/\s+/)[0];
-    if (a.user.phoneNumber) {
-      const digits = a.user.phoneNumber.replace(/^\+/, "");
-      mentions.push(digits);
-      return `@${digits}`;
-    }
-    return `@${first}`;
-  });
+  // Plain names in text; no @-tags. Until the Pi bot is redeployed with
+  // mention support, @<phone> would surface as raw digits in the chat
+  // which is worse UX than a readable name. We still return a mentions
+  // array though — once the bot passes it through, we can add a richer
+  // tagged variant here.
+  const names = unpaid
+    .map((a) => a.user.name)
+    .filter(Boolean)
+    .slice(0, 14)
+    .join(", ");
   const more = unpaid.length > 14 ? ` (+${unpaid.length - 14} more)` : "";
+  const mentions: string[] = unpaid
+    .map((a) => a.user.phoneNumber?.replace(/^\+/, ""))
+    .filter((p): p is string => !!p);
   const text =
     `💳 Also — *${unpaid.length}* still haven't paid for last week's match. ` +
-    `Please *pay* asap 🙏\n\n${tags.join(" ")}${more}`;
+    `Please *pay* asap 🙏\n\n${names}${more}`;
   return { text, mentions };
 }
 
