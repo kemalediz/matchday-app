@@ -117,7 +117,7 @@ export function OrgSwitcher() {
             })}
           </div>
           <Link
-            href="/create-org"
+            href="/onboarding"
             onClick={() => setOpen(false)}
             className="flex items-center gap-2 px-3 py-2.5 border-t border-slate-700 text-sm text-blue-400 hover:text-blue-300 hover:bg-slate-700"
           >
