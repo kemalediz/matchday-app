@@ -362,6 +362,19 @@ function PlayersStep(props: {
 
   const activeCount = players.filter((p) => !p.excluded && p.name.trim()).length;
 
+  // Flag duplicate names across active (non-excluded) rows so the admin
+  // notices and disambiguates them before commit. Two "Ibrahim"s with no
+  // phone will confuse the live matcher later.
+  const nameCounts = new Map<string, number>();
+  for (const p of players) {
+    if (p.excluded || !p.name.trim()) continue;
+    const k = p.name.trim().toLowerCase();
+    nameCounts.set(k, (nameCounts.get(k) ?? 0) + 1);
+  }
+  const duplicateNames = new Set(
+    [...nameCounts.entries()].filter(([, n]) => n > 1).map(([k]) => k),
+  );
+
   return (
     <div className="space-y-6">
       <div className="bg-white rounded-2xl border border-slate-200 p-6">
@@ -391,6 +404,20 @@ function PlayersStep(props: {
         )}
       </div>
 
+      {duplicateNames.size > 0 && (
+        <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 text-sm text-amber-900">
+          <p className="font-medium mb-1">
+            ⚠️ Two or more players share the same name
+          </p>
+          <p className="text-amber-800/90">
+            Rename one (e.g. &quot;Ibrahim S.&quot; vs &quot;Ibrahim M.&quot;)
+            or add their phone number so MatchTime can tell them apart
+            later. Without disambiguation, &quot;Ibrahim is in&quot; in
+            the chat would be ambiguous and skipped.
+          </p>
+        </div>
+      )}
+
       <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden">
         <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100">
           <div>
@@ -407,11 +434,16 @@ function PlayersStep(props: {
           </button>
         </div>
         <div className="divide-y divide-slate-100">
-          {players.map((p, i) => (
+          {players.map((p, i) => {
+            const isDup =
+              !p.excluded &&
+              p.name.trim() &&
+              duplicateNames.has(p.name.trim().toLowerCase());
+            return (
             <div
               key={i}
               className={`grid grid-cols-1 sm:grid-cols-[1fr_160px_90px_auto] gap-3 px-6 py-3 items-center ${
-                p.excluded ? "opacity-50 bg-slate-50" : ""
+                p.excluded ? "opacity-50 bg-slate-50" : isDup ? "bg-amber-50/60" : ""
               }`}
             >
               <input
@@ -419,7 +451,9 @@ function PlayersStep(props: {
                 value={p.name}
                 placeholder="Name"
                 onChange={(e) => updatePlayer(i, { name: e.target.value })}
-                className="h-9 px-2.5 rounded-md border border-slate-200 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                className={`h-9 px-2.5 rounded-md border text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 ${
+                  isDup ? "border-amber-300" : "border-slate-200"
+                }`}
               />
               <input
                 type="tel"
@@ -450,7 +484,8 @@ function PlayersStep(props: {
                 {p.excluded ? <Check className="w-4 h-4" /> : <X className="w-4 h-4" />}
               </button>
             </div>
-          ))}
+            );
+          })}
           {players.length === 0 && (
             <div className="px-6 py-8 text-center text-sm text-slate-400">
               No players detected. Add them manually.

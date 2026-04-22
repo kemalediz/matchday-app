@@ -156,27 +156,51 @@ export function parseWhatsAppChat(text: string, opts: { recentMessageLimit?: num
   const nonSystem = messages.filter((m) => !m.system && m.author);
   const systemMessageCount = messages.length - nonSystem.length;
 
-  // Aggregate authors.
+  // Aggregate authors. Key by (name, phone) so two players with the
+  // same display name but different numbers stay separate. Within a
+  // name, a row without a phone merges into any existing same-name row
+  // that does have one (WhatsApp occasionally shows the bare name for
+  // one message and the ~name + phone format for the next).
   const byAuthor = new Map<string, ParsedAuthor>();
   for (const m of nonSystem) {
     const { name, phone } = extractPhoneFromAuthor(m.author!);
     if (!name) continue;
-    const key = name.toLowerCase();
-    const cur = byAuthor.get(key);
-    if (cur) {
-      cur.messageCount += 1;
-      if (m.timestamp < cur.firstSeen) cur.firstSeen = m.timestamp;
-      if (m.timestamp > cur.lastSeen) cur.lastSeen = m.timestamp;
-      if (!cur.phone && phone) cur.phone = phone;
-    } else {
-      byAuthor.set(key, {
-        name,
-        phone,
-        messageCount: 1,
-        firstSeen: m.timestamp,
-        lastSeen: m.timestamp,
-      });
+    const nameKey = name.toLowerCase();
+    const key = phone ? `${nameKey}|${phone}` : nameKey;
+
+    // Case 1: exact (name, phone) key exists.
+    const exact = byAuthor.get(key);
+    if (exact) {
+      exact.messageCount += 1;
+      if (m.timestamp < exact.firstSeen) exact.firstSeen = m.timestamp;
+      if (m.timestamp > exact.lastSeen) exact.lastSeen = m.timestamp;
+      continue;
     }
+
+    // Case 2: no phone on this row — merge into existing same-name row
+    // that has a phone (ambiguous fallback is fine when there's exactly
+    // one phone-bearing row for this name).
+    if (!phone) {
+      const candidates = [...byAuthor.values()].filter(
+        (a) => a.name.toLowerCase() === nameKey,
+      );
+      if (candidates.length === 1) {
+        const c = candidates[0];
+        c.messageCount += 1;
+        if (m.timestamp < c.firstSeen) c.firstSeen = m.timestamp;
+        if (m.timestamp > c.lastSeen) c.lastSeen = m.timestamp;
+        continue;
+      }
+    }
+
+    // Case 3: brand-new (name, phone) row.
+    byAuthor.set(key, {
+      name,
+      phone,
+      messageCount: 1,
+      firstSeen: m.timestamp,
+      lastSeen: m.timestamp,
+    });
   }
   const authors = Array.from(byAuthor.values()).sort(
     (a, b) => b.messageCount - a.messageCount,

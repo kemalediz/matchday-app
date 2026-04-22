@@ -342,6 +342,18 @@ async function resolveSender(orgId: string, msg: InboundMessage): Promise<Resolv
         phone: null,
       };
     }
+    // Multiple first-name matches (e.g. two Ibrahims) — DO NOT provision
+    // a third user. Ambiguous cases should surface to the admin, not
+    // silently grow the roster. Return unresolved and let the verdict
+    // either silently drop OR (future) ask the group to disambiguate.
+    if (firstNameMatches.length > 1) {
+      console.warn(
+        `[analyze] ambiguous fuzzy match for "${pushname}" in org ${orgId} — ${firstNameMatches.length} candidates: ${firstNameMatches
+          .map((m) => m.user.name)
+          .join(", ")}`,
+      );
+      return { userId: null, name: pushname, phone: null };
+    }
   }
   // Auto-create a provisional member when we couldn't match.
   //   Rationale: the message came from the org's monitored WhatsApp
@@ -412,8 +424,19 @@ async function resolveOrProvisionByName(
       name: firstNameMatches[0].user.name,
     };
   }
+  // Ambiguous: multiple players match the given name ("Ibrahim" when
+  // there are two). Don't silently grow the roster with a third. The
+  // verdict-execution block silently skips; admin can add the correct
+  // attendance from the dashboard. Future: surface a disambiguation
+  // reply to the group.
+  if (firstNameMatches.length > 1) {
+    console.warn(
+      `[analyze] third-party name "${name}" is ambiguous in org ${orgId} (${firstNameMatches.length} candidates). Skipping registration.`,
+    );
+    return null;
+  }
 
-  // 2. No unique match → provision. No phone known (third party).
+  // 2. No unique match and no ambiguity → provision. No phone known (third party).
   const provisioned = await createProvisionalByName(orgId, name, null);
   if (provisioned) return { userId: provisioned.userId!, name: provisioned.name };
   return null;
