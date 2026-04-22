@@ -816,13 +816,11 @@ async function computeForMatch(
       }
     }
 
-    // 6d. Daily 17:00 rating reminder DM for any confirmed player who hasn't
+    // 6d. Daily 18:00 rating reminder DM for any confirmed player who hasn't
     //     voted yet (stops when they vote or after the 5-day window).
-    //     Kemal: "people are wrapping up the workday at 5pm, good time to tap
-    //     a quick rating link before dinner."
     {
       const hourNow = londonHour(now);
-      const isReminderHour = hourNow >= 17 && hourNow < 18;
+      const isReminderHour = hourNow >= 18 && hourNow < 19;
       const withinWindow = hoursSinceMatch <= 5 * 24;
       if (isReminderHour && withinWindow) {
         // Figure out who has already rated (MoMVote OR at least 1 Rating).
