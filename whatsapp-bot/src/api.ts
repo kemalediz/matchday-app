@@ -120,6 +120,9 @@ export async function postReaction(params: {
 export async function postPollVote(params: {
   waMessageId: string;
   voterPhone: string;
+  /** Optional voter pushname — useful when WhatsApp's @lid privacy hides
+   *  the phone. Server uses it as a fuzzy-match fallback. */
+  voterName?: string;
   optionName: string | null;
 }): Promise<void> {
   const res = await fetch(`${config.apiUrl}/api/whatsapp/poll-vote`, {

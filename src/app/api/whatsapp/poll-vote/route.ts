@@ -23,9 +23,10 @@ export async function POST(request: Request) {
   }
 
   const body = await request.json();
-  const { waMessageId, voterPhone, optionName } = body as {
+  const { waMessageId, voterPhone, voterName, optionName } = body as {
     waMessageId: string;
     voterPhone: string;
+    voterName?: string; // optional — bot forwards the pushname when @lid hides the phone
     optionName: string | null;
   };
 
@@ -48,10 +49,58 @@ export async function POST(request: Request) {
 
   const matchId = sent.matchId;
 
+  // 1. Try phone match (most accurate).
+  let voter: { id: string; name: string | null } | null = null;
   const normalised = normalisePhone(voterPhone);
-  if (!normalised) return NextResponse.json({ ok: true, ignored: "bad-phone" });
+  if (normalised) {
+    voter = await db.user.findUnique({
+      where: { phoneNumber: normalised },
+      select: { id: true, name: true },
+    });
+  }
 
-  const voter = await db.user.findUnique({ where: { phoneNumber: normalised } });
+  // 2. Fallback: when WhatsApp hides the voter's phone via @lid privacy,
+  //    the bot can still forward their pushname. Fuzzy-match against
+  //    the match's org roster — same logic as the analyze route so
+  //    "Kara" resolves to "Karahan", "ba" to "Baki", etc.
+  if (!voter && voterName && voterName.trim().length >= 2) {
+    // Find the match's org via the SentNotification → Match chain.
+    const match = await db.match.findUnique({
+      where: { id: matchId },
+      include: { activity: { select: { orgId: true } } },
+    });
+    if (match) {
+      const orgId = match.activity.orgId;
+      const candidates = await db.membership.findMany({
+        where: { orgId, leftAt: null },
+        include: { user: { select: { id: true, name: true } } },
+      });
+      const norm = (s: string) =>
+        s.trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+      const pushFirst = norm(voterName).split(/\s+/).filter(Boolean)[0] ?? "";
+      const exact = candidates.filter(
+        (c) => c.user.name && norm(c.user.name) === norm(voterName),
+      );
+      let match2: typeof candidates[number] | null = null;
+      if (exact.length === 1) match2 = exact[0];
+      else {
+        const byFirst = candidates.filter((c) => {
+          if (!c.user.name) return false;
+          const dbFirst = norm(c.user.name).split(/\s+/).filter(Boolean)[0] ?? "";
+          return (
+            dbFirst === pushFirst ||
+            (dbFirst.length >= 3 && pushFirst.length >= 2 && dbFirst.startsWith(pushFirst)) ||
+            (pushFirst.length >= 3 && dbFirst.length >= 2 && pushFirst.startsWith(dbFirst))
+          );
+        });
+        if (byFirst.length === 1) match2 = byFirst[0];
+      }
+      if (match2) {
+        voter = { id: match2.user.id, name: match2.user.name };
+      }
+    }
+  }
+
   if (!voter) return NextResponse.json({ ok: true, ignored: "unknown-voter" });
 
   // Payment poll — any non-null option (either team) means "paid".

@@ -158,7 +158,20 @@ async function main() {
         const phone = voterId.replace("@c.us", "").replace(/^\+/, "");
         // selectedOptions can be empty (un-vote).
         const picked = vote.selectedOptions?.[0]?.name ?? null;
-        await postPollVote({ waMessageId, voterPhone: phone, optionName: picked });
+        // Pull the voter's pushname so the server can fuzzy-match as a
+        // fallback when WhatsApp's @lid privacy hides the phone.
+        let voterName: string | undefined;
+        try {
+          const contact = await client!.getContactById(voterId);
+          voterName =
+            contact?.pushname ||
+            contact?.name ||
+            (contact as unknown as { verifiedName?: string })?.verifiedName ||
+            undefined;
+        } catch {
+          // best-effort — server falls back to phone match if unavailable
+        }
+        await postPollVote({ waMessageId, voterPhone: phone, voterName, optionName: picked });
       } catch (err) {
         console.error("Error forwarding poll vote:", err);
       }
