@@ -568,6 +568,40 @@ async function computeForMatch(
         mentions: unpaidTail.mentions,
       });
     }
+
+    // 2c. Squad-full but bench thin. Even when confirmed == max, one drop
+    //     leaves us short again. Remind the group at 17:00 to pad the
+    //     bench if fewer than 3 people are currently on it. Kemal's rule:
+    //     "post unless the bench size is 3", i.e. fire for bench 0/1/2,
+    //     skip for 3+. Only applies when the squad is actually full —
+    //     otherwise the squad chase already drives sign-ups.
+    const benchThinKey = `${matchId}:bench-thin:${dayKey}`;
+    if (
+      !sentKeys.has(benchThinKey) &&
+      isEvening &&
+      beforeDeadline &&
+      need === 0 &&
+      bench.length < 3 &&
+      m.status === "UPCOMING"
+    ) {
+      const benchCount = bench.length;
+      const gap = 3 - benchCount;
+      const benchLine =
+        benchCount === 0
+          ? "*nobody* on the bench"
+          : benchCount === 1
+          ? "only *1* on the bench"
+          : `only *${benchCount}* on the bench`;
+      out.push({
+        kind: "group-message",
+        key: benchThinKey,
+        matchId,
+        text:
+          `🪑 Squad is locked at *${m.maxPlayers}/${m.maxPlayers}* for *${activity.name}* ` +
+          `but we've got ${benchLine}. ` +
+          `If anyone drops, we're short again. Say *IN* to pad the bench — ${gap} more would be ideal 🙌`,
+      });
+    }
   }
 
   // ── 3. Bench prompt for any unresolved PendingBenchConfirmation ──────
