@@ -45,6 +45,7 @@ export type AnalysisIntent =
   | "question"
   | "score"
   | "generate_teams_request"
+  | "bring_guests_vague"
   | "noise"
   | "unclear";
 
@@ -106,7 +107,7 @@ Output schema:
   "verdicts": [
     {
       "waMessageId": "<string>",
-      "intent": "in" | "out" | "replacement_request" | "conditional_in" | "question" | "score" | "generate_teams_request" | "noise" | "unclear",
+      "intent": "in" | "out" | "replacement_request" | "conditional_in" | "question" | "score" | "generate_teams_request" | "bring_guests_vague" | "noise" | "unclear",
       "confidence": 0..1,
       "react": "<emoji>" | null,
       "reply": "<text>" | null,
@@ -142,9 +143,37 @@ Intent rules:
      "teams please, count Baki in"                                     → includeNames: ["Baki"]
      "generate teams"                                                   → includeNames: []
   → Only classify as this intent if the request is CLEAR. If the person is just wondering who'd be on which team ("who'd be in red?"), that's "question", not this.
+- "bring_guests_vague": Someone commits to bringing additional players but DOESN'T name them ("two of my guys can play next week", "I'll bring 2 friends", "my mate wants to come", "can I bring someone?").
+  → registerAttendance: null (can't register without names). registerFor: null. react: null. reply: short, warm question asking for the names so we can add them. Format the reply as: "thanks @<firstName>, could you share their names so I can add them to the list? 🙌". Ground the author's first name from the Match Context/sender. Use their display-name first token, no fabrication.
+  → Example: Amir posts "Two of my guys can play next week. They played once here 2 weeks ago" → reply: "thanks @Amir, could you share their names so I can add them to the list? 🙌"
+  → Only classify as this when count + no names. If they give names in the same message ("bringing Faris and Shaz"), use "in" with registerFor instead.
 - "noise": Social chat, jokes, memes, photos, links, tangential banter, off-topic questions (recipe links, memes, sports trivia).
   → Everything null.
 - "unclear": Genuinely can't tell. Everything null — bot stays silent.
+
+REPOSTED ROSTER AS ANSWER (important):
+Sometimes a member answers the bot's "who else?" by forwarding / copy-pasting the bot's own roster message with extra names appended to the open slots. For example MatchTime posts:
+
+*Squad (7-a-side):*
+1. Sait
+...
+9. Karahan
+10. 🥁
+11. 🥁
+...
+
+Then Amir reposts the same roster but with:
+
+10. Faris
+11. Shaz
+
+Rules for recognising this:
+- The message body contains numbered roster lines "<N>. <Name>" consistent with the bot's format.
+- Lines with N > confirmedCount (per Match Context) that name NEW people are registrations from the author.
+- Each such name becomes an entry in registerFor: [{"name": "<Name>", "action": "IN"}, ...]. Mark intent "in". registerAttendance for the author stays null (they're the channel, not necessarily joining themselves unless they also add themselves or had already said IN).
+- Do NOT re-register names that match the existing Confirmed list — those rows weren't changed.
+- Do NOT register 🥁 (drum) rows — those are still open slots.
+- Keep reply: null for this — the server will react with the slot emoji of the last newly-added player, same as regular third-party registrations.
 
 THIRD-PARTY REGISTRATIONS (registerFor):
 Players frequently sign up or drop OTHER people — friends/family/teammates who can't message right now. Detect these and populate registerFor with one entry per named person. The author's OWN attendance is still controlled by registerAttendance; registerFor is ONLY for other names mentioned.
@@ -833,6 +862,7 @@ function normaliseVerdict(waMessageId: string, raw: Record<string, unknown>): An
     "question",
     "score",
     "generate_teams_request",
+    "bring_guests_vague",
     "noise",
     "unclear",
   ];
