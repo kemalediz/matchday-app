@@ -61,6 +61,52 @@ async function main() {
   });
   const nameById = new Map(users.map((u) => [u.id, u.name ?? ""]));
 
+  // Build a history window: recent AnalyzedMessage rows + SentNotification
+  // group posts that preceded the target messages. The LLM needs this
+  // context for rules like "short confirmation after pending-list" where
+  // the previous bot message defines the referent.
+  const earliestTarget = rows[0].createdAt;
+  const windowStart = new Date(earliestTarget.getTime() - 2 * 60 * 60 * 1000);
+  const [histRows, histBotPosts] = await Promise.all([
+    db.analyzedMessage.findMany({
+      where: {
+        groupId,
+        createdAt: { gte: windowStart, lt: earliestTarget },
+        NOT: { waMessageId: { in: ids } },
+      },
+      orderBy: { createdAt: "asc" },
+      take: 30,
+    }),
+    db.sentNotification.findMany({
+      where: {
+        kind: "group-message",
+        createdAt: { gte: windowStart, lt: earliestTarget },
+        match: { activity: { orgId: org.id } },
+      },
+      orderBy: { createdAt: "asc" },
+      take: 30,
+    }),
+  ]);
+  const histUsers = await db.user.findMany({
+    where: { id: { in: [...new Set(histRows.map((h) => h.authorUserId).filter(Boolean))] as string[] } },
+    select: { id: true, name: true },
+  });
+  const histNameById = new Map(histUsers.map((u) => [u.id, u.name ?? ""]));
+
+  type H = { authorName: string; body: string; timestamp: string };
+  const history: H[] = [
+    ...histRows.map((r) => ({
+      authorName: r.authorUserId ? histNameById.get(r.authorUserId) ?? "unknown" : "unknown",
+      body: r.body ?? "",
+      timestamp: r.createdAt.toISOString(),
+    })),
+    ...histBotPosts.map((s) => ({
+      authorName: "MatchTime",
+      body: "", // SentNotification doesn't store the rendered text; use the key as a hint
+      timestamp: s.createdAt.toISOString(),
+    })),
+  ].sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+
   const payload = {
     groupId,
     messages: rows.map((r) => ({
@@ -70,7 +116,7 @@ async function main() {
       authorName: r.authorUserId ? nameById.get(r.authorUserId) ?? null : null,
       timestamp: r.createdAt.toISOString(),
     })),
-    history: [], // keep empty — the analyzer will still have Match Context
+    history,
   };
 
   console.log(`Clearing ${rows.length} AnalyzedMessage rows for reprocessing...`);
