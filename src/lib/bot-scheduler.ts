@@ -516,13 +516,22 @@ async function computeForMatch(
   }
 
   // ── 2. Daily 17:00 "need Y more" if not full ─────────────────────────
+  //     Two separate posts now, same 17:00 slot but independent gates:
+  //       2a. Squad chase — only fires when need > 0. Appends the unpaid
+  //           tail for continuity (one post, two pieces of info).
+  //       2b. Standalone unpaid reminder — fires when the squad IS full,
+  //           so players with outstanding fees still get chased. Without
+  //           this the reminder was silently coupled to squad shortage.
   {
     const dayKey = londonDateKey(now);
-    const key = `${matchId}:daily-in-list:${dayKey}`;
     const isEvening = londonHour(now) >= 17 && londonHour(now) < 18;
     const beforeDeadline = now < m.attendanceDeadline;
+    const chaseKey = `${matchId}:daily-in-list:${dayKey}`;
+    const unpaidOnlyKey = `${matchId}:unpaid-reminder:${dayKey}`;
+    const unpaidTail = isEvening ? await buildUnpaidTail(activity.id) : null;
+
     if (
-      !sentKeys.has(key) &&
+      !sentKeys.has(chaseKey) &&
       isEvening &&
       beforeDeadline &&
       need > 0 &&
@@ -537,19 +546,26 @@ async function computeForMatch(
           (confirmed.length > 0 ? list : "_nobody yet_")
         );
       });
-
-      // Append unpaid-pitch-fees reminder for the most recent completed
-      // match in the same activity, if anyone still owes. Runs only in
-      // this 17:00 slot (same daily message) so players see both nudges
-      // in one notification. Skips historical backfill matches.
-      const unpaidTail = await buildUnpaidTail(activity.id);
       const combined = unpaidTail ? `${text}\n\n${unpaidTail.text}` : text;
       out.push({
         kind: "group-message",
-        key,
+        key: chaseKey,
         matchId,
         text: combined,
         mentions: unpaidTail?.mentions,
+      });
+    } else if (
+      // Squad's full (or chase already ran) — still chase unpaid folks.
+      !sentKeys.has(unpaidOnlyKey) &&
+      isEvening &&
+      unpaidTail
+    ) {
+      out.push({
+        kind: "group-message",
+        key: unpaidOnlyKey,
+        matchId,
+        text: unpaidTail.text,
+        mentions: unpaidTail.mentions,
       });
     }
   }
