@@ -211,14 +211,29 @@ async function buildUnpaidTail(
     where: { activityId, status: "COMPLETED", isHistorical: false },
     orderBy: { date: "desc" },
     include: {
+      activity: {
+        select: {
+          orgId: true,
+          org: { select: { paymentHolderId: true } },
+        },
+      },
       attendances: {
         where: { status: "CONFIRMED" },
-        include: { user: { select: { name: true, phoneNumber: true } } },
+        include: { user: { select: { id: true, name: true, phoneNumber: true } } },
       },
     },
   });
   if (!lastCompleted) return null;
-  const confirmed = lastCompleted.attendances;
+
+  // Exclude the payment holder — they're the one collecting fees from
+  // others, including them in the unpaid chase would be embarrassing.
+  // If the org hasn't set one (null), we don't exclude anyone and let
+  // the admin configure it in /admin/settings or during onboarding.
+  const payerId = lastCompleted.activity.org.paymentHolderId ?? null;
+
+  const confirmed = payerId
+    ? lastCompleted.attendances.filter((a) => a.userId !== payerId)
+    : lastCompleted.attendances;
   const paid = confirmed.filter((a) => a.paidAt != null);
   const unpaid = confirmed.filter((a) => a.paidAt == null);
   // Don't chase when we have no signal — false precision is worse than silence.

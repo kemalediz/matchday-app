@@ -108,6 +108,16 @@ model Organisation {
   whatsappGroupId    String?
   whatsappBotEnabled Boolean  @default(false)
 
+  /// The player who collects match fees on behalf of the group.
+  /// Often a trusted long-serving member, not always the OWNER
+  /// (e.g. Sutton FC — Kemal owns the org, Elvin collects payments).
+  /// When non-null, this user is excluded from the "who hasn't paid"
+  /// chase because they're the one being paid. Derived at onboarding
+  /// by the LLM from chat patterns ("send me £7", "paid you back")
+  /// and overridable in admin settings. Nullable — falls back to no
+  /// exclusion if we can't determine.
+  paymentHolderId String?
+
   memberships Membership[]
   activities  Activity[]
   sports      Sport[]

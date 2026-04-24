@@ -63,6 +63,7 @@ export default function OnboardingWizard() {
   const [players, setPlayers] = useState<PlayerDraft[]>([]);
   const [analysis, setAnalysis] = useState<OnboardingAnalysis | null>(null);
   const [analysisSkipped, setAnalysisSkipped] = useState(false);
+  const [paymentHolderName, setPaymentHolderName] = useState<string>("");
   const [activity, setActivity] = useState<WizardSubmission["activity"]>({
     sportKey: "football-7aside",
     name: "",
@@ -125,6 +126,10 @@ export default function OnboardingWizard() {
         if (result.schedule.time) setActivity((a) => ({ ...a, time: result.schedule.time! }));
         if (result.schedule.venue && !activity.venue)
           setActivity((a) => ({ ...a, venue: result.schedule.venue! }));
+        // Payment holder — auto-apply when LLM is confident enough.
+        if (result.paymentHolder.name && result.paymentHolder.confidence >= 0.5) {
+          setPaymentHolderName(result.paymentHolder.name);
+        }
         // Apply LLM-suggested seed ratings where the admin hasn't set one.
         setPlayers((prev) =>
           prev.map((p) => {
@@ -154,6 +159,7 @@ export default function OnboardingWizard() {
       const active = players.filter((p) => !p.excluded && p.name.trim());
       const res = await createOrgFromWizard({
         orgName,
+        paymentHolderName: paymentHolderName.trim() || undefined,
         players: active.map((p) => ({
           name: p.name.trim(),
           phone: p.phone.trim() || undefined,
@@ -206,6 +212,8 @@ export default function OnboardingWizard() {
               players={players}
               setPlayers={setPlayers}
               sportKey={activity.sportKey}
+              paymentHolderName={paymentHolderName}
+              setPaymentHolderName={setPaymentHolderName}
               onRun={runAnalysis}
               onSkip={() => {
                 setAnalysisSkipped(true);
@@ -512,12 +520,26 @@ function InsightsStep(props: {
   players: PlayerDraft[];
   setPlayers: React.Dispatch<React.SetStateAction<PlayerDraft[]>>;
   sportKey: string;
+  paymentHolderName: string;
+  setPaymentHolderName: (s: string) => void;
   onRun: () => void;
   onSkip: () => void;
   onBack: () => void;
   onNext: () => void;
 }) {
-  const { busy, analysis, players, setPlayers, sportKey, onRun, onSkip, onBack, onNext } = props;
+  const {
+    busy,
+    analysis,
+    players,
+    setPlayers,
+    sportKey,
+    paymentHolderName,
+    setPaymentHolderName,
+    onRun,
+    onSkip,
+    onBack,
+    onNext,
+  } = props;
   const preset = findPreset(sportKey);
   const validPositions = preset?.positions ?? [];
   const days = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
@@ -614,6 +636,42 @@ function InsightsStep(props: {
           <p className="text-sm text-slate-500">
             No clear match pattern detected — set manually on the next step.
           </p>
+        )}
+      </div>
+
+      <div className="bg-white rounded-2xl border border-slate-200 p-6">
+        <div className="flex items-center gap-2 mb-3">
+          <Sparkles className="w-4 h-4 text-blue-600" />
+          <h2 className="font-semibold text-slate-900">Payment holder</h2>
+          {analysis!.paymentHolder.confidence > 0 && (
+            <span className="text-xs text-slate-400">
+              · {Math.round(analysis!.paymentHolder.confidence * 100)}% confident
+            </span>
+          )}
+        </div>
+        <p className="text-xs text-slate-500 mb-3">
+          The player who collects pitch fees from everyone else. They
+          won&apos;t be chased in the &quot;who hasn&apos;t paid&quot; reminder.
+        </p>
+        <select
+          value={paymentHolderName}
+          onChange={(e) => setPaymentHolderName(e.target.value)}
+          className="w-full h-11 px-3 rounded-lg border border-slate-200 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+        >
+          <option value="">— Not set (nobody excluded) —</option>
+          {players
+            .filter((p) => !p.excluded && p.name.trim())
+            .map((p) => (
+              <option key={p.name} value={p.name}>
+                {p.name}
+              </option>
+            ))}
+        </select>
+        {analysis!.paymentHolder.evidence && (
+          <div className="flex items-start gap-2 text-xs text-slate-500 mt-3">
+            <Quote className="w-3.5 h-3.5 shrink-0 mt-0.5 text-slate-300" />
+            <p className="italic leading-relaxed">{analysis!.paymentHolder.evidence}</p>
+          </div>
         )}
       </div>
 

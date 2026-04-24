@@ -72,6 +72,10 @@ function summariseForClient(parsed: ParsedChat): ParsedChatSummary {
 
 export interface WizardSubmission {
   orgName: string;
+  /** Optional — name (from the player list) of the player who collects
+   *  match fees. Resolved to a userId during commit and written to
+   *  Organisation.paymentHolderId so the unpaid-tail chase skips them. */
+  paymentHolderName?: string;
   players: Array<{
     name: string;
     phone?: string;
@@ -238,6 +242,36 @@ export async function createOrgFromWizard(data: WizardSubmission): Promise<Wizar
           where: { userId_orgId: { userId: player.id, orgId: org.id } },
           create: { userId: player.id, orgId: org.id, role: "PLAYER" },
           update: {},
+        });
+      }
+
+      // Resolve paymentHolderName → userId (if the admin picked one
+      // in the Insights step). Case-insensitive match against the
+      // player list we just committed.
+      let paymentHolderId: string | null = null;
+      if (data.paymentHolderName) {
+        const want = data.paymentHolderName.trim().toLowerCase();
+        const matchUser = await tx.user.findFirst({
+          where: {
+            memberships: { some: { orgId: org.id, leftAt: null } },
+          },
+          select: { id: true, name: true },
+        }).then(async () => {
+          // Broader look: any member whose name case-insensitively matches.
+          const memberships = await tx.membership.findMany({
+            where: { orgId: org.id, leftAt: null },
+            include: { user: { select: { id: true, name: true } } },
+          });
+          return memberships.find(
+            (m) => (m.user.name ?? "").toLowerCase() === want,
+          )?.user;
+        });
+        if (matchUser) paymentHolderId = matchUser.id;
+      }
+      if (paymentHolderId) {
+        await tx.organisation.update({
+          where: { id: org.id },
+          data: { paymentHolderId },
         });
       }
 

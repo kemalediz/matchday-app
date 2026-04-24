@@ -615,14 +615,100 @@ export async function composeChaseText(input: {
     const raw = textBlock?.text?.trim();
     if (!raw) return null;
     // Strip any accidental fences / leading labels.
-    return raw
+    const cleaned = raw
       .replace(/^```(?:text|markdown)?\s*/i, "")
       .replace(/\s*```$/i, "")
       .trim();
+    // Defence-in-depth: even with "Use roster header: ..." in the Match
+    // Context, the LLM sometimes still writes "*Playing tonight:*" out
+    // of habit. Rewrite any "*Playing <anything>:*" header AND any loose
+    // "tonight"/"this evening" in the lead text to match the actual
+    // proximity. Regex is narrow: it only fires when we're confident
+    // the LLM got it wrong.
+    return enforceProximity(cleaned, match.date);
   } catch (err) {
     console.error("[analyzer] composeChaseText Claude call failed:", err);
     return null;
   }
+}
+
+function computeProximity(date: Date): {
+  proximity: "past" | "tonight" | "tomorrow" | "this-week" | "future";
+  rosterHeader: string;
+  friendlyDay: string; // "tonight" | "tomorrow" | "on Tue 28 Apr"
+} {
+  const hoursToKickoff = (date.getTime() - Date.now()) / (1000 * 60 * 60);
+  const daysToKickoff = Math.floor(hoursToKickoff / 24);
+  const kickoffLocal = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Europe/London",
+    weekday: "short",
+    day: "numeric",
+    month: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  })
+    .format(date)
+    .replace(/,/g, "");
+  const dayPart = kickoffLocal.split(" at ")[0];
+  const proximity =
+    hoursToKickoff < 0
+      ? "past"
+      : hoursToKickoff <= 6
+      ? "tonight"
+      : hoursToKickoff <= 24
+      ? "tomorrow"
+      : daysToKickoff <= 7
+      ? "this-week"
+      : "future";
+  const rosterHeader = {
+    past: "*Squad:*",
+    tonight: "*Playing tonight:*",
+    tomorrow: "*Playing tomorrow:*",
+    "this-week": `*Playing ${dayPart}:*`,
+    future: `*Playing ${dayPart}:*`,
+  }[proximity];
+  const friendlyDay = {
+    past: `on ${dayPart}`,
+    tonight: "tonight",
+    tomorrow: "tomorrow",
+    "this-week": `on ${dayPart}`,
+    future: `on ${dayPart}`,
+  }[proximity];
+  return { proximity, rosterHeader, friendlyDay };
+}
+
+/**
+ * Post-process an LLM-composed chase message to guarantee it doesn't
+ * say "tonight" when the match is days away (or vice versa).
+ *
+ *   - Replaces any "*Playing <word>:*" header with the correct one.
+ *   - Rewrites loose "tonight"/"this evening" in the lead text to the
+ *     friendly day form when proximity isn't tonight. Leaves "tomorrow"
+ *     alone unless proximity is further out.
+ */
+export function enforceProximity(text: string, matchDate: Date): string {
+  const { proximity, rosterHeader, friendlyDay } = computeProximity(matchDate);
+
+  // Swap any "*Playing …:*" roster header to the correct one.
+  let out = text.replace(/\*Playing [^*\n]+?:\*/gi, rosterHeader);
+  // If that didn't match, also try a variant without asterisks (in case
+  // the LLM returned plain-text header).
+  if (!out.includes(rosterHeader)) {
+    out = out.replace(/Playing (tonight|tomorrow|this (?:evening|week))\s*:/i, rosterHeader);
+  }
+
+  if (proximity !== "tonight") {
+    // Replace "tonight" / "this evening" with friendly-day phrasing
+    // ONLY in the lead text (not inside the roster itself, which
+    // shouldn't contain either word at this point).
+    out = out.replace(/\btonight\b/gi, friendlyDay);
+    out = out.replace(/\bthis evening\b/gi, friendlyDay);
+  }
+  if (proximity !== "tomorrow" && proximity !== "tonight") {
+    out = out.replace(/\btomorrow\b/gi, friendlyDay);
+  }
+  return out;
 }
 
 const CHASE_SYSTEM_PROMPT = `You are MatchTime, composing a SCHEDULED group message — not a reply to anyone. The bot's scheduler is firing a chase/announcement at a fixed time because the squad is in a certain state.

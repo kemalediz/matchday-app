@@ -39,6 +39,7 @@ Your job:
   2. For each candidate player, propose a SEED RATING 1-10 based on how other players refer to them in the chat. Signals: praise ("best in the game", "Man of the Match again"), leadership mentions, complaints ("he scored an own goal"), how often they're named. Default to 6 (neutral) when no signal. Never go above 9 for anyone unless the chat has overwhelming praise, and never below 3.
   3. For each player, provide a one-sentence EVIDENCE QUOTE — a direct or near-direct quote from the chat that supports the position + rating assessment. Admin will read this to sanity-check. If no evidence exists, use the string "No clear signal in chat — defaulting to neutral".
   4. Identify the likely MATCH SCHEDULE: day-of-week (0-6, 0 = Sunday), kickoff time in HH:MM 24h London wall-clock, and the VENUE if the chat repeatedly names one. These come from repeat patterns like "Tuesday 21:30 at Goals". Leave fields null if the chat doesn't establish a pattern.
+  5. Identify the likely PAYMENT HOLDER — the person who collects match fees from everyone else. Strongest signals: messages like "send me £7", "paid you back", "£7 each, send to Elvin", "Monzo: <name>", "here's my bank". They're usually mentioned by others asking for bank details / confirming payment. Return the exact player name from the candidate list, or null if unclear.
 
 Output STRICT JSON — nothing else, no prose around it, no markdown fences:
 
@@ -47,6 +48,11 @@ Output STRICT JSON — nothing else, no prose around it, no markdown fences:
     "dayOfWeek": <0-6 or null>,
     "time": "HH:MM" or null,
     "venue": "<string>" or null,
+    "confidence": 0..1
+  },
+  "paymentHolder": {
+    "name": "<exact name from the candidate list>" or null,
+    "evidence": "<short quote showing the fee-collection signal or null>",
     "confidence": 0..1
   },
   "players": [
@@ -72,6 +78,11 @@ export interface OnboardingAnalysis {
     dayOfWeek: number | null;
     time: string | null;
     venue: string | null;
+    confidence: number;
+  };
+  paymentHolder: {
+    name: string | null;
+    evidence: string | null;
     confidence: number;
   };
   players: Array<{
@@ -186,6 +197,18 @@ function normaliseAnalysis(rawText: string, args: AnalyzeArgs): OnboardingAnalys
         : 0,
   };
 
+  // Payment holder — only accept a name that's in the candidate list.
+  const ph = (obj.paymentHolder ?? {}) as Record<string, unknown>;
+  const phCandidates = new Set(args.candidateNames.map((n) => n.toLowerCase()));
+  const phName = typeof ph.name === "string" ? ph.name.trim() : "";
+  const paymentHolder = {
+    name: phName && phCandidates.has(phName.toLowerCase()) ? phName : null,
+    evidence:
+      typeof ph.evidence === "string" && ph.evidence.trim() ? ph.evidence.trim().slice(0, 200) : null,
+    confidence:
+      typeof ph.confidence === "number" ? Math.max(0, Math.min(1, ph.confidence)) : 0,
+  };
+
   // Players.
   const validPositions = new Set(args.validPositions);
   const candidateSet = new Set(args.candidateNames.map((n) => n.toLowerCase()));
@@ -231,5 +254,5 @@ function normaliseAnalysis(rawText: string, args: AnalyzeArgs): OnboardingAnalys
     }
   }
 
-  return { schedule, players };
+  return { schedule, paymentHolder, players };
 }
