@@ -528,6 +528,81 @@ const KEYCAP: Record<number, string> = {
   10: "🔟",
 };
 
+/**
+ * Fire a one-off group announcement when the squad JUST reached its
+ * maximum confirmed count. Called after any attendance write in this
+ * route. Idempotent via SentNotification with key
+ * `<matchId>:squad-locked`; the bot picks up the BotJob on its next
+ * due-posts poll and sends it to the group.
+ */
+async function announceSquadFullIfJustFilled(args: {
+  orgId: string;
+  matchId: string;
+  maxPlayers: number;
+  activityName: string;
+  confirmedCount: number;
+  kickoffLondon: string;
+}) {
+  if (args.confirmedCount < args.maxPlayers) return;
+  const key = `${args.matchId}:squad-locked`;
+  const already = await db.sentNotification.findFirst({ where: { key } });
+  if (already) return;
+
+  // Record intent to send — the bot's next due-posts cycle will emit
+  // the group message. Using BotJob + SentNotification mirror pattern
+  // so the admin-panel view + idempotency both work.
+  await db.botJob.create({
+    data: {
+      orgId: args.orgId,
+      kind: "group",
+      text:
+        `✅ *Squad locked!* We're full at *${args.maxPlayers}/${args.maxPlayers}* for *${args.activityName}* on ${args.kickoffLondon}.\n\n` +
+        `See you all there 🙌⚽`,
+    },
+  });
+  await db.sentNotification.create({
+    data: {
+      matchId: args.matchId,
+      kind: "group-message",
+      key,
+    },
+  });
+}
+
+/** Thin wrapper that loads match + activity + confirmed count before
+ *  delegating to announceSquadFullIfJustFilled. Gated by a dedupe row
+ *  so if multiple people get registered in the same batch and push the
+ *  count to max, only one announcement fires. */
+async function announceSquadFullIfJustFilledFor(orgId: string, matchId: string) {
+  const m = await db.match.findUnique({
+    where: { id: matchId },
+    include: {
+      activity: { select: { name: true } },
+      attendances: { where: { status: "CONFIRMED" }, select: { id: true } },
+    },
+  });
+  if (!m) return;
+  const kickoffLondon = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Europe/London",
+    weekday: "short",
+    day: "numeric",
+    month: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  })
+    .format(m.date)
+    .replace(/,/g, "");
+  await announceSquadFullIfJustFilled({
+    orgId,
+    matchId: m.id,
+    maxPlayers: m.maxPlayers,
+    activityName: m.activity.name,
+    confirmedCount: m.attendances.length,
+    kickoffLondon,
+  });
+}
+
 async function executeVerdict(args: {
   verdict: AnalysisVerdict;
   user: { id: string; name: string | null } | null;
@@ -572,6 +647,7 @@ async function executeVerdict(args: {
             const slot = bench.findIndex((a) => a.userId === user.id) + 1;
             finalReact = slot > 0 ? "🪑" : "🪑";
           }
+          await announceSquadFullIfJustFilledFor(orgId, matchForOrg.id);
         } else {
           await cancelAttendance(user.id, matchForOrg.id);
           finalReact = "👋";
@@ -620,6 +696,7 @@ async function executeVerdict(args: {
             } else {
               finalReact = "🪑";
             }
+            await announceSquadFullIfJustFilledFor(orgId, matchForOrg.id);
           } else {
             await cancelAttendance(target.userId, matchForOrg.id);
             finalReact = "👋";
