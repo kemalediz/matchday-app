@@ -42,6 +42,7 @@ import { db } from "@/lib/db";
 import { normalisePhone } from "@/lib/phone";
 import {
   analyzeBatch,
+  enforceProximity,
   type AnalysisVerdict,
   type BatchInputMessage,
 } from "@/lib/message-analyzer";
@@ -157,6 +158,20 @@ export async function POST(request: Request) {
     senderById.set(m.waMessageId, await resolveSender(org.id, m));
   }
 
+  // Pre-load the next upcoming match so we can post-process LLM replies
+  // through enforceProximity — guards against "20:30 vs 21:30" style
+  // BST/UTC mistakes the LLM occasionally makes when it tries to
+  // helpfully convert times.
+  const nextMatchForReply = await db.match.findFirst({
+    where: {
+      activity: { orgId: org.id },
+      status: { in: ["UPCOMING", "TEAMS_GENERATED", "TEAMS_PUBLISHED"] },
+      attendanceDeadline: { gt: new Date() },
+    },
+    orderBy: { date: "asc" },
+    select: { date: true },
+  });
+
   const history = (body.history ?? []).map((h) => ({
     authorName: h.authorName,
     body: h.body,
@@ -191,6 +206,11 @@ export async function POST(request: Request) {
         user: sender.userId ? { id: sender.userId, name: sender.name } : null,
         orgId: org.id,
       });
+      // Apply the same proximity post-processor the chase composer uses
+      // so reactive replies also rewrite "tonight" → "Tue 28 Apr" and
+      // any 20:30/21:30-style UTC-vs-BST mistakes.
+      const cleanReply =
+        reply && nextMatchForReply ? enforceProximity(reply, nextMatchForReply.date) : reply;
       await recordAnalysis({
         orgId: org.id,
         groupId: body.groupId,
@@ -199,7 +219,7 @@ export async function POST(request: Request) {
         intent: verdict.intent,
         action:
           verdict.registerAttendance ??
-          (react || reply ? (react ? "react" : "reply") : "none"),
+          (react || cleanReply ? (react ? "react" : "reply") : "none"),
         confidence: verdict.confidence,
         reasoning: verdict.reasoning,
         authorUserId: sender.userId,
@@ -209,7 +229,7 @@ export async function POST(request: Request) {
         handledBy: "llm",
         intent: verdict.intent,
         react,
-        reply,
+        reply: cleanReply,
         reasoning: verdict.reasoning,
       });
     } catch (err) {

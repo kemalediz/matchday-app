@@ -132,8 +132,11 @@ Intent rules:
   Reply format depends on how short the squad actually is (see SHORT-SQUAD RESPONSE below).
 - "conditional_in": Tentative commitment ("in if my back holds up", "probably, will confirm later", "maybe").
   → registerAttendance: null (do NOT register; admin will chase). react: "🤔". reply: null.
-- "question": Asking about squad numbers, venue, kickoff time, who's in, match state ("do we have enough?", "where tonight?", "who's playing?").
-  → registerAttendance: null. react: null. reply: a short accurate answer grounded in the Match Context block (e.g. "We're 13/14 ✅ — need 1 more", "Tonight 21:30 at <venue>"). If the answer isn't in context, reply: null.
+- "question": Asking about squad numbers, venue, kickoff time, who's in, match state ("do we have enough?", "where tonight?", "who's playing?"), OR coordination questions about specific named players' attendance status ("let me know if the other 3 can play", "are Faris and Shaz in?", "did you accept Adam?", "what's the verdict on my friends?", "Amir's guys — confirmed?").
+  → registerAttendance: null. react: null. reply: a short accurate answer grounded in the Match Context block.
+  → For NUMERIC squad-state questions: e.g. "We're 13/14 ✅ — need 1 more", "21:30 at <venue>".
+  → For NAMED-PLAYERS questions: cross-reference the named people against the Confirmed list. If they ARE confirmed: "Yes, <Name>, <Name> and <Name> are all confirmed — we're at <N>/<max>". If some are confirmed and others aren't: name who's in and who's missing. If none are confirmed: "Not yet — they haven't been added. Want me to add them? Just say their names." NEVER stay silent on these — the asker is coordinating with people outside the chat and needs an answer.
+  → If the answer requires info outside the Match Context (long-term roster questions, "can these guys come every week?"), reply with what you DO know plus "the admin can answer the rest", rather than going silent.
 - "score": A final match result like "7-3", "Final 5:2", "we won 4-2" posted after the game.
   → Populate scoreRed + scoreYellow with the two numbers. Order: if the message explicitly names the team labels, align accordingly; otherwise emit the numbers in the order they appear in the message. react: "👍". registerAttendance: null.
 - "generate_teams_request": Someone asks the bot to set up / balance / post the teams for the next match ("generate teams", "@M Time teams please", "let's see the teams", "split us up", "balance the teams"). The request may optionally include overrides like "consider Ibrahim and Ehtisham as IN" / "include X and Y" / "treat Z as confirmed".
@@ -755,6 +758,28 @@ export function enforceProximity(text: string, matchDate: Date): string {
   }
   if (proximity !== "tomorrow" && proximity !== "tonight") {
     out = out.replace(/\btomorrow\b/gi, friendlyDay);
+  }
+
+  // Catch "off-by-1h" mistakes in HH:MM times. The LLM occasionally
+  // outputs the UTC offset (20:30) when it should output the London
+  // wall-clock (21:30) — usually because it "helpfully" applied the
+  // timezone offset itself. Replace the UTC HH:MM with the London one.
+  const londonHm = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Europe/London",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(matchDate);
+  const utcHm = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "UTC",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(matchDate);
+  if (londonHm !== utcHm) {
+    // Replace bare "20:30" instances (only when followed by non-digit
+    // boundary so we don't mangle other numbers).
+    out = out.replace(new RegExp(`\\b${utcHm.replace(":", ":")}\\b`, "g"), londonHm);
   }
   return out;
 }

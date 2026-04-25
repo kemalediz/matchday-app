@@ -4,6 +4,7 @@ import { getUserOrg } from "@/lib/org";
 import { redirect } from "next/navigation";
 import Link from "next/link";
 import { format, formatDistanceToNow, isBefore } from "date-fns";
+import { formatLondon } from "@/lib/london-time";
 import {
   Calendar,
   Trophy,
@@ -193,7 +194,7 @@ export default async function DashboardPage() {
               <div className="flex flex-col sm:flex-row sm:items-center gap-1 sm:gap-5 mt-2 text-sm text-slate-500">
                 <span className="flex items-center gap-1.5">
                   <Clock className="w-4 h-4" />
-                  {format(nextMatch.date, "EEEE, d MMM yyyy 'at' HH:mm")}
+                  {formatLondon(nextMatch.date, "EEEE, d MMM yyyy 'at' HH:mm")}
                 </span>
                 <span className="flex items-center gap-1.5">
                   <MapPin className="w-4 h-4" />

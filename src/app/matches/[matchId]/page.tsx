@@ -7,6 +7,7 @@ import { AttendanceList } from "@/components/match/attendance-list";
 import { TeamDisplay } from "@/components/match/team-display";
 import { isOrgAdmin } from "@/lib/org";
 import { format } from "date-fns";
+import { formatLondon } from "@/lib/london-time";
 import { Calendar, MapPin, Clock, Star, ChevronRight } from "lucide-react";
 
 export default async function MatchDetailPage({
@@ -110,7 +111,7 @@ export default async function MatchDetailPage({
           <div className="flex flex-col sm:flex-row sm:items-center gap-1 sm:gap-4 mt-2 text-sm text-slate-500">
             <span className="flex items-center gap-1.5">
               <Calendar className="w-4 h-4" />
-              {format(match.date, "EEEE, d MMMM yyyy 'at' HH:mm")}
+              {formatLondon(match.date, "EEEE, d MMMM yyyy 'at' HH:mm")}
             </span>
             <span className="flex items-center gap-1.5">
               <MapPin className="w-4 h-4" />
@@ -158,7 +159,7 @@ export default async function MatchDetailPage({
           {!isPastDeadline && (
             <p className="text-sm text-slate-500 flex items-center gap-1.5">
               <Clock className="w-4 h-4" />
-              Deadline: {format(match.attendanceDeadline, "EEE d MMM, HH:mm")}
+              Deadline: {formatLondon(match.attendanceDeadline, "EEE d MMM, HH:mm")}
             </p>
           )}
         </div>

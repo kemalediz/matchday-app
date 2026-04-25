@@ -6,15 +6,21 @@ import Link from "next/link";
 import { format, formatDistanceToNow, isToday, isTomorrow } from "date-fns";
 import { Calendar, MapPin, Users } from "lucide-react";
 import { MatchesTabs } from "@/components/match/matches-tabs";
+import { formatLondon } from "@/lib/london-time";
 
+// IMPORTANT: every user-facing time on this page is rendered in London
+// wall-clock via formatLondon. Plain date-fns format() uses the runtime's
+// local TZ which on Vercel is UTC — that's why kickoff at 21:30 BST was
+// rendering as 20:30 (the UTC equivalent). Date-only strings can stay on
+// date-fns since they don't carry a time component.
 function relativeLabel(date: Date): string {
-  if (isToday(date)) return `Today at ${format(date, "HH:mm")}`;
-  if (isTomorrow(date)) return `Tomorrow at ${format(date, "HH:mm")}`;
+  if (isToday(date)) return `Today at ${formatLondon(date, "HH:mm")}`;
+  if (isTomorrow(date)) return `Tomorrow at ${formatLondon(date, "HH:mm")}`;
   const dist = formatDistanceToNow(date, { addSuffix: false });
   if (dist.includes("day") && parseInt(dist) <= 7) {
-    return `${format(date, "EEE 'at' HH:mm")} (in ${dist})`;
+    return `${formatLondon(date, "EEE 'at' HH:mm")} (in ${dist})`;
   }
-  return format(date, "EEE, d MMM 'at' HH:mm");
+  return formatLondon(date, "EEE, d MMM 'at' HH:mm");
 }
 
 export default async function MatchesPage() {
