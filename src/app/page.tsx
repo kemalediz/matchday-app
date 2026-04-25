@@ -38,7 +38,7 @@ export default async function DashboardPage() {
   if (!session?.user?.id) return <LandingPage />;
 
   const user = await db.user.findUnique({ where: { id: session.user.id } });
-  if (!user?.onboarded) redirect("/onboarding");
+  if (!user?.onboarded) redirect("/welcome");
 
   const membership = await getUserOrg(session.user.id);
   if (!membership) redirect("/create-org");
