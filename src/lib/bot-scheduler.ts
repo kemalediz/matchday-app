@@ -521,79 +521,69 @@ async function computeForMatch(
     const dayKey = londonDateKey(now);
     const isEvening = londonHour(now) >= 17 && londonHour(now) < 18;
     const beforeDeadline = now < m.attendanceDeadline;
-    const chaseKey = `${matchId}:daily-in-list:${dayKey}`;
-    const benchThinKey = `${matchId}:bench-thin:${dayKey}`;
-    const unpaidOnlyKey = `${matchId}:unpaid-reminder:${dayKey}`;
-    const unpaidTail = isEvening ? await buildUnpaidTail(activity.id) : null;
     const isUpcoming = m.status === "UPCOMING";
 
-    if (
-      !sentKeys.has(chaseKey) &&
-      isEvening &&
-      beforeDeadline &&
-      isUpcoming &&
-      need > 0
-    ) {
-      // 2a. Short squad — chase + unpaid tail.
-      const text = await composeOrFallback("daily-in-list", () => {
-        const list = confirmed
-          .map((a, i) => `${i + 1}. ${a.user.name ?? "(unnamed)"}`)
-          .join("\n");
-        return (
-          `🗓 *${activity.name}* — need *${need} more*.\n\n` +
-          (confirmed.length > 0 ? list : "_nobody yet_")
-        );
-      });
-      const combined = unpaidTail ? `${text}\n\n${unpaidTail.text}` : text;
-      out.push({
-        kind: "group-message",
-        key: chaseKey,
-        matchId,
-        text: combined,
-        mentions: unpaidTail?.mentions,
-      });
-    } else if (
-      !sentKeys.has(benchThinKey) &&
-      isEvening &&
-      beforeDeadline &&
-      isUpcoming &&
-      need === 0 &&
-      bench.length < 3
-    ) {
-      // 2b. Full but bench is 0/1/2 — bench chase + unpaid tail.
-      const benchCount = bench.length;
-      const gap = 3 - benchCount;
-      const benchLine =
-        benchCount === 0
-          ? "*nobody* on the bench"
-          : benchCount === 1
-          ? "only *1* on the bench"
-          : `only *${benchCount}* on the bench`;
-      const text =
-        `🪑 Squad is locked at *${m.maxPlayers}/${m.maxPlayers}* for *${activity.name}* ` +
-        `but we've got ${benchLine}. ` +
-        `If anyone drops, we're short again. Say *IN* to pad the bench — ${gap} more would be ideal 🙌`;
-      const combined = unpaidTail ? `${text}\n\n${unpaidTail.text}` : text;
-      out.push({
-        kind: "group-message",
-        key: benchThinKey,
-        matchId,
-        text: combined,
-        mentions: unpaidTail?.mentions,
-      });
-    } else if (
-      !sentKeys.has(unpaidOnlyKey) &&
-      isEvening &&
-      unpaidTail
-    ) {
-      // 2c. Nothing squad-wise to chase, but someone still owes.
-      out.push({
-        kind: "group-message",
-        key: unpaidOnlyKey,
-        matchId,
-        text: unpaidTail.text,
-        mentions: unpaidTail.mentions,
-      });
+    // Single shared key for the entire 17:00 evening slot. Whichever
+    // branch fires first claims today; subsequent ticks see this key in
+    // sentKeys and skip the whole block. Prevents the previous bug where
+    // bench-thin firing at 17:04 didn't block unpaid-only firing at 17:09
+    // five minutes later. Also gated on isUpcoming so completed matches
+    // (still in the scheduler window for MoM/rating purposes) don't fire
+    // duplicate posts of their own.
+    const eveningKey = `${matchId}:evening-update:${dayKey}`;
+
+    if (isEvening && isUpcoming && !sentKeys.has(eveningKey)) {
+      const unpaidTail = await buildUnpaidTail(activity.id);
+      let text: string | null = null;
+      let mentions: string[] | undefined;
+
+      if (beforeDeadline && need > 0) {
+        // 2a. Short squad — chase + unpaid tail.
+        const chaseText = await composeOrFallback("daily-in-list", () => {
+          const list = confirmed
+            .map((a, i) => `${i + 1}. ${a.user.name ?? "(unnamed)"}`)
+            .join("\n");
+          return (
+            `🗓 *${activity.name}* — need *${need} more*.\n\n` +
+            (confirmed.length > 0 ? list : "_nobody yet_")
+          );
+        });
+        text = unpaidTail ? `${chaseText}\n\n${unpaidTail.text}` : chaseText;
+        mentions = unpaidTail?.mentions;
+      } else if (beforeDeadline && need === 0 && bench.length < 3) {
+        // 2b. Squad full + bench thin — bench chase + unpaid tail.
+        const benchCount = bench.length;
+        const gap = 3 - benchCount;
+        const benchLine =
+          benchCount === 0
+            ? "*nobody* on the bench"
+            : benchCount === 1
+            ? "only *1* on the bench"
+            : `only *${benchCount}* on the bench`;
+        const benchText =
+          `🪑 Squad is locked at *${m.maxPlayers}/${m.maxPlayers}* for *${activity.name}* ` +
+          `but we've got ${benchLine}. ` +
+          `If anyone drops, we're short again. Say *IN* to pad the bench — ${gap} more would be ideal 🙌`;
+        text = unpaidTail ? `${benchText}\n\n${unpaidTail.text}` : benchText;
+        mentions = unpaidTail?.mentions;
+      } else if (unpaidTail) {
+        // 2c. Squad fine, bench fine, but someone still owes.
+        text = unpaidTail.text;
+        mentions = unpaidTail.mentions;
+      }
+      // else: nothing worth posting today — leave the key un-sent so a
+      // later tick in the same window can still fire if state changes
+      // (e.g. someone drops out making bench thin).
+
+      if (text) {
+        out.push({
+          kind: "group-message",
+          key: eveningKey,
+          matchId,
+          text,
+          mentions,
+        });
+      }
     }
   }
 
