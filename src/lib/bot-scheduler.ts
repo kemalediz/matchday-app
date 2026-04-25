@@ -240,23 +240,16 @@ async function buildUnpaidTail(
   if (paid.length === 0) return null;
   if (unpaid.length === 0) return null;
 
-  // Plain names in text; no @-tags. Until the Pi bot is redeployed with
-  // mention support, @<phone> would surface as raw digits in the chat
-  // which is worse UX than a readable name. We still return a mentions
-  // array though — once the bot passes it through, we can add a richer
-  // tagged variant here.
-  const names = unpaid
-    .map((a) => a.user.name)
-    .filter(Boolean)
-    .slice(0, 14)
-    .join(", ");
-  const more = unpaid.length > 14 ? ` (+${unpaid.length - 14} more)` : "";
-  const mentions: string[] = unpaid
-    .map((a) => a.user.phoneNumber?.replace(/^\+/, ""))
-    .filter((p): p is string => !!p);
+  // Poll-only format per Sait's suggestion (2026-04-25). No naming,
+  // no shaming — point everyone at the original payment poll. Anyone
+  // who's already paid clears themselves by ticking their team. The
+  // poll-vote → paidAt wiring takes care of the rest.
   const text =
-    `💳 Also — *${unpaid.length}* still haven't paid for last week's match. ` +
-    `Please *pay* asap 🙏\n\n${names}${more}`;
+    unpaid.length === 1
+      ? `💳 1 payment still pending for last week's match — if you've already paid, tick your team in the poll above to clear it 🙏`
+      : `💳 *${unpaid.length}* payments still pending for last week's match — if you've already paid, just tick your team in the poll above to clear it 🙏`;
+  // No mentions needed — we don't tag anyone in the poll-only style.
+  const mentions: string[] = [];
   return { text, mentions };
 }
 
