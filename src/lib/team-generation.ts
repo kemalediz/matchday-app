@@ -13,6 +13,7 @@ import { db } from "./db";
 import { balanceTeams, type BalancingStrategy } from "./team-balancer";
 import type { PlayerWithRating } from "@/types";
 import { formatLondon } from "./london-time";
+import { adjustRatings, type AdjusterMessage } from "./rating-adjuster";
 
 export type GenerateTeamsResult =
   | { ok: true; groupPost: string; matchId: string }
@@ -43,7 +44,7 @@ export async function generateTeamsForMatch(matchId: string): Promise<GenerateTe
     };
   }
 
-  const players: PlayerWithRating[] = await Promise.all(
+  const basePlayers: PlayerWithRating[] = await Promise.all(
     match.attendances.map(async (a) => {
       const ratings = await db.rating.findMany({
         where: { playerId: a.userId },
@@ -64,6 +65,26 @@ export async function generateTeamsForMatch(matchId: string): Promise<GenerateTe
       };
     }),
   );
+
+  // Phase 4 — hybrid LLM rating adjuster. LLM reads the last week of
+  // group chat and proposes per-player deltas for tonight (sick,
+  // tentative, hot streak, rusty). Deltas clamped to [-2, +2] in the
+  // adjuster itself. Falls through silently to base ratings on any
+  // failure — team generation never blocks on the LLM.
+  const adjustments = await runRatingAdjuster({
+    matchId: match.id,
+    orgId: match.activity.org.id,
+    sportName: sport.name,
+    matchDate: match.date,
+    basePlayers,
+  });
+
+  const players: PlayerWithRating[] = basePlayers.map((p) => {
+    const adj = adjustments.get(p.id);
+    if (!adj || adj.delta === 0) return p;
+    const adjusted = Math.max(1, Math.min(10, p.rating + adj.delta));
+    return { ...p, rating: adjusted };
+  });
 
   const composition = sport.positionComposition as Record<string, number> | null;
   const result = balanceTeams({
@@ -96,4 +117,77 @@ export async function generateTeamsForMatch(matchId: string): Promise<GenerateTe
     `Objections? Reply \`swap X Y\` — admin will confirm.`;
 
   return { ok: true, groupPost, matchId };
+}
+
+async function runRatingAdjuster(args: {
+  matchId: string;
+  orgId: string;
+  sportName: string;
+  matchDate: Date;
+  basePlayers: PlayerWithRating[];
+}) {
+  const cutoff = new Date(args.matchDate.getTime() - 7 * 24 * 60 * 60 * 1000);
+  const recent = await db.analyzedMessage.findMany({
+    where: {
+      orgId: args.orgId,
+      createdAt: { gte: cutoff },
+      body: { not: null },
+    },
+    orderBy: { createdAt: "asc" },
+    take: 300,
+    select: { authorUserId: true, body: true, createdAt: true },
+  });
+
+  const userIds = recent
+    .map((r) => r.authorUserId)
+    .filter((id): id is string => !!id);
+  const userNames = new Map<string, string>();
+  if (userIds.length > 0) {
+    const users = await db.user.findMany({
+      where: { id: { in: [...new Set(userIds)] } },
+      select: { id: true, name: true },
+    });
+    for (const u of users) userNames.set(u.id, u.name ?? "Unknown");
+  }
+
+  const messages: AdjusterMessage[] = recent.map((r) => ({
+    authorName: r.authorUserId ? userNames.get(r.authorUserId) ?? null : null,
+    body: r.body ?? "",
+    timestamp: r.createdAt,
+  }));
+
+  const adjusterPlayers = args.basePlayers.map((p) => ({
+    id: p.id,
+    name: p.name,
+    baseRating: p.rating,
+  }));
+
+  const adjustments = await adjustRatings({
+    players: adjusterPlayers,
+    messages,
+    sportName: args.sportName,
+    matchDate: args.matchDate,
+  });
+
+  // Persist audit rows. Upsert so re-running team generation for the
+  // same match overwrites prior adjustments cleanly.
+  for (const adj of adjustments.values()) {
+    await db.ratingAdjustment.upsert({
+      where: { matchId_userId: { matchId: args.matchId, userId: adj.playerId } },
+      create: {
+        matchId: args.matchId,
+        userId: adj.playerId,
+        delta: adj.delta,
+        reason: adj.reason,
+        confidence: adj.confidence,
+      },
+      update: {
+        delta: adj.delta,
+        reason: adj.reason,
+        confidence: adj.confidence,
+      },
+    });
+  }
+
+  return adjustments;
 }

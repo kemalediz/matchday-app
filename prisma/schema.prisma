@@ -94,6 +94,7 @@ model User {
   momVotesReceived  MoMVote[]        @relation("MoMVotesReceived")
   teamAssignments   TeamAssignment[]
   activityPositions PlayerActivityPosition[]
+  ratingAdjustments RatingAdjustment[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -245,6 +246,7 @@ model Match {
   momVotes               MoMVote[]
   sentNotifications      SentNotification[]
   benchConfirmations     PendingBenchConfirmation[]
+  ratingAdjustments      RatingAdjustment[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -311,6 +313,32 @@ model BotJob {
   createdAt DateTime @default(now())
 
   @@index([orgId, sentAt])
+}
+
+/**
+ * Queued retroactive react updates.
+ *
+ * When a player's slot changes after their original IN message has
+ * already been reacted to (drop-and-shift, slot-emoji rule changes,
+ * historical fixes), the server queues a row here. The bot's next
+ * /due-posts tick picks up unsent rows, calls `msg.react(emoji)` on the
+ * existing WhatsApp message, and ACKs back to mark `sentAt`.
+ *
+ * Reaction replacement is in-place — whatsapp-web.js's react() swaps
+ * any existing reaction the bot account placed on that message, so we
+ * don't need a separate "clear" step.
+ */
+model RetroReaction {
+  id          String    @id @default(cuid())
+  orgId       String
+  waMessageId String
+  emoji       String
+  reason      String?                // optional debug note: "slot 5 → 4 after drop"
+  sentAt      DateTime?
+  createdAt   DateTime  @default(now())
+
+  @@index([orgId, sentAt])
+  @@index([waMessageId])
 }
 
 /**
@@ -433,4 +461,33 @@ model AnalyzedMessage {
 
   @@index([orgId, createdAt])
   @@index([groupId, createdAt])
+}
+
+/**
+ * Phase 4 hybrid LLM team-balancer audit trail.
+ *
+ * Before the deterministic balancer runs, an LLM reads the last ~7 days
+ * of group chat and proposes per-player rating deltas based on
+ * conditions for tonight (sick, tentative, hot streak, rusty). The
+ * balancer then runs with the adjusted ratings.
+ *
+ * One row per (match, user) — captures what the LLM said and why so an
+ * admin can audit balance decisions ("why was Wasim on Yellow?").
+ *
+ * Delta is clamped to [-2, +2] in the analyser so a single hallucination
+ * can't dominate the balance. Confidence < 0.3 is treated as no signal.
+ */
+model RatingAdjustment {
+  id         String   @id @default(cuid())
+  matchId    String
+  match      Match    @relation(fields: [matchId], references: [id], onDelete: Cascade)
+  userId     String
+  user       User     @relation(fields: [userId], references: [id])
+  delta      Float
+  reason     String   @db.Text
+  confidence Float
+  createdAt  DateTime @default(now())
+
+  @@unique([matchId, userId])
+  @@index([matchId])
 }
