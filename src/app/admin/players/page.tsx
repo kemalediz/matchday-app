@@ -9,6 +9,8 @@ import {
   seedPlayerRating,
   confirmProvisionalPlayer,
   removeProvisionalPlayer,
+  updatePlayerName,
+  updatePlayerPhone,
 } from "@/app/actions/players";
 
 interface Player {
@@ -75,6 +77,34 @@ export default function PlayersPage() {
         prev.map((p) => (p.id === userId ? { ...p, seedRating: num } : p)),
       );
       toast.success("Rating updated");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed");
+    }
+  }
+
+  async function handleRename(userId: string, name: string, original: string | null) {
+    if (!orgId) return;
+    const trimmed = name.trim();
+    if (!trimmed || trimmed === (original ?? "")) return; // no-op
+    try {
+      await updatePlayerName(userId, orgId, trimmed);
+      setPlayers((prev) => prev.map((p) => (p.id === userId ? { ...p, name: trimmed } : p)));
+      toast.success("Name updated");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed");
+    }
+  }
+
+  async function handlePhone(userId: string, phone: string, original: string | null) {
+    if (!orgId) return;
+    const trimmed = phone.trim();
+    if (trimmed === (original ?? "")) return; // no-op
+    try {
+      const res = await updatePlayerPhone(userId, orgId, trimmed);
+      setPlayers((prev) =>
+        prev.map((p) => (p.id === userId ? { ...p, phoneNumber: res.phoneNumber } : p)),
+      );
+      toast.success("Phone updated");
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed");
     }
@@ -197,9 +227,23 @@ export default function PlayersPage() {
                 }`}>
                   {(p.name ?? p.email).charAt(0).toUpperCase()}
                 </div>
-                <div className="min-w-0">
+                <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-2 min-w-0">
-                    <p className="font-semibold text-slate-800 truncate">{p.name ?? p.email}</p>
+                    <input
+                      type="text"
+                      defaultValue={p.name ?? ""}
+                      placeholder={p.email}
+                      onBlur={(e) => handleRename(p.id, e.target.value, p.name)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+                        if (e.key === "Escape") {
+                          (e.target as HTMLInputElement).value = p.name ?? "";
+                          (e.target as HTMLInputElement).blur();
+                        }
+                      }}
+                      className="font-semibold text-slate-800 bg-transparent border-0 border-b border-transparent hover:border-slate-200 focus:border-blue-500 focus:outline-none min-w-0 flex-1 px-0 py-0.5 rounded-none"
+                      title="Click to rename"
+                    />
                     {p.leftAt && (
                       <span className="inline-flex shrink-0 px-1.5 py-0.5 rounded bg-slate-200 text-slate-600 text-[10px] font-semibold uppercase tracking-wider">
                         Left
@@ -229,7 +273,7 @@ export default function PlayersPage() {
                       </button>
                     )}
                   </div>
-                  <div className="flex items-center gap-1.5 text-xs text-slate-500 mt-0.5">
+                  <div className="flex items-center gap-1.5 text-xs text-slate-500 mt-0.5 flex-wrap">
                     {p.positions.map((pos) => (
                       <span
                         key={pos}
@@ -238,7 +282,23 @@ export default function PlayersPage() {
                         {pos}
                       </span>
                     ))}
-                    <span>· {p._count.attendances} matches</span>
+                    <span>{p.positions.length > 0 ? "·" : ""} {p._count.attendances} matches</span>
+                    <span className="text-slate-300">·</span>
+                    <input
+                      type="tel"
+                      defaultValue={p.phoneNumber ?? ""}
+                      placeholder="+44 7…"
+                      onBlur={(e) => handlePhone(p.id, e.target.value, p.phoneNumber)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+                        if (e.key === "Escape") {
+                          (e.target as HTMLInputElement).value = p.phoneNumber ?? "";
+                          (e.target as HTMLInputElement).blur();
+                        }
+                      }}
+                      className="text-xs text-slate-500 bg-transparent border-0 border-b border-transparent hover:border-slate-200 focus:border-blue-500 focus:outline-none w-32 px-0 py-0.5 rounded-none"
+                      title="Phone number — used for personal DMs (rating links, reminders)"
+                    />
                   </div>
                 </div>
               </div>

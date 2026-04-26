@@ -168,6 +168,35 @@ export async function seedPlayerRating(userId: string, orgId: string, rating: nu
 }
 
 /**
+ * Admin: rename a player. Useful when an auto-provisioned member came
+ * in with a WhatsApp pushname that's not their real name (e.g.
+ * "MJA swthree" → "Michael"). Does NOT touch any other field —
+ * resolveSender will pick up the new name on the next message via
+ * fuzzy matching, so the existing user gets reused rather than a
+ * fresh ghost being created.
+ */
+export async function updatePlayerName(userId: string, orgId: string, name: string) {
+  const session = await auth();
+  if (!session?.user?.id) throw new Error("Not authenticated");
+  await requireOrgAdmin(session.user.id, orgId);
+
+  const trimmed = name.trim();
+  if (trimmed.length < 1) throw new Error("Name can't be empty");
+  if (trimmed.length > 100) throw new Error("Name too long");
+
+  // Confirm the player is in this org (stops cross-org renames).
+  const membership = await db.membership.findUnique({
+    where: { userId_orgId: { userId, orgId } },
+    select: { userId: true },
+  });
+  if (!membership) throw new Error("Player is not a member of this organisation");
+
+  await db.user.update({ where: { id: userId }, data: { name: trimmed } });
+
+  revalidatePath("/admin/players");
+}
+
+/**
  * Admin: confirm that an auto-provisioned player is real. Clears the
  * provisionallyAddedAt flag so the "NEW" badge disappears. Does not
  * touch anything else — phone/positions/rating are edited via the
