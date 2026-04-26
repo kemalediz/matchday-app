@@ -43,6 +43,7 @@ import { normalisePhone } from "@/lib/phone";
 import {
   analyzeBatch,
   enforceProximity,
+  enforceCanonicalRoster,
   type AnalysisVerdict,
   type BatchInputMessage,
 } from "@/lib/message-analyzer";
@@ -169,7 +170,13 @@ export async function POST(request: Request) {
       attendanceDeadline: { gt: new Date() },
     },
     orderBy: { date: "asc" },
-    select: { date: true },
+    include: {
+      attendances: {
+        where: { status: "CONFIRMED" },
+        include: { user: { select: { name: true } } },
+        orderBy: { position: "asc" },
+      },
+    },
   });
 
   const history = (body.history ?? []).map((h) => ({
@@ -208,9 +215,20 @@ export async function POST(request: Request) {
       });
       // Apply the same proximity post-processor the chase composer uses
       // so reactive replies also rewrite "tonight" → "Tue 28 Apr" and
-      // any 20:30/21:30-style UTC-vs-BST mistakes.
-      const cleanReply =
-        reply && nextMatchForReply ? enforceProximity(reply, nextMatchForReply.date) : reply;
+      // any 20:30/21:30-style UTC-vs-BST mistakes. Also enforce the
+      // canonical roster — the LLM has been observed to reorder/omit
+      // players (especially provisional ones), so any numbered roster
+      // in the reply gets overwritten with the truth from the DB.
+      let cleanReply = reply;
+      if (cleanReply && nextMatchForReply) {
+        cleanReply = enforceProximity(cleanReply, nextMatchForReply.date);
+        cleanReply = enforceCanonicalRoster(cleanReply, {
+          confirmed: nextMatchForReply.attendances.map(
+            (a) => a.user.name ?? "(unnamed)",
+          ),
+          maxPlayers: nextMatchForReply.maxPlayers,
+        });
+      }
       await recordAnalysis({
         orgId: org.id,
         groupId: body.groupId,

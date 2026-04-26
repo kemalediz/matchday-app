@@ -784,6 +784,76 @@ export function enforceProximity(text: string, matchDate: Date): string {
   return out;
 }
 
+/**
+ * Replace any LLM-generated numbered roster in a reply with the canonical
+ * roster built from the actual Match Context. The LLM has been observed
+ * to "helpfully" reorder players (putting late-joiners or provisional
+ * members at the bottom) or omit some, despite explicit prompt rules
+ * forbidding it. Don't rely on prompt discipline for something this
+ * visible — overwrite.
+ *
+ * Also patches stale "N/M" count claims in the lead text when they
+ * disagree with the truth from Match Context.
+ *
+ * The roster block is detected as 2+ consecutive lines starting with
+ * "<digits>." or "<digits>. 🥁". The header line "*Playing …:*" or
+ * "*Squad:*" right above is preserved (or rewritten by enforceProximity).
+ */
+export function enforceCanonicalRoster(
+  text: string,
+  truth: { confirmed: string[]; maxPlayers: number },
+): string {
+  // 1. Build the canonical roster lines.
+  const rows: string[] = [];
+  for (let i = 0; i < truth.maxPlayers; i++) {
+    rows.push(
+      i < truth.confirmed.length
+        ? `${i + 1}. ${truth.confirmed[i]}`
+        : `${i + 1}. 🥁`,
+    );
+  }
+  const canonical = rows.join("\n");
+
+  // 2. Find a roster block: 2+ consecutive lines matching "N. ..."
+  //    starting from anywhere in the message. Capture the whole run.
+  const lines = text.split("\n");
+  let start = -1;
+  let end = -1;
+  for (let i = 0; i < lines.length; i++) {
+    const isRosterLine = /^\s*\d+\.\s+\S/.test(lines[i]);
+    if (isRosterLine) {
+      if (start === -1) start = i;
+      end = i;
+    } else if (start !== -1 && end - start + 1 >= 2) {
+      break;
+    } else {
+      start = -1;
+      end = -1;
+    }
+  }
+  let out = text;
+  if (start !== -1 && end - start + 1 >= 2) {
+    const before = lines.slice(0, start).join("\n");
+    const after = lines.slice(end + 1).join("\n");
+    out = [before, canonical, after].filter((s) => s !== "").join("\n");
+  }
+
+  // 3. Fix "N/M" count claims to match truth. Only replace when the
+  //    denominator matches (so we don't clobber unrelated numbers).
+  const realCount = `${truth.confirmed.length}/${truth.maxPlayers}`;
+  out = out.replace(
+    new RegExp(`\\b\\d+/${truth.maxPlayers}\\b`, "g"),
+    realCount,
+  );
+  // 4. "need N more" claims — recompute from the truth.
+  const need = Math.max(0, truth.maxPlayers - truth.confirmed.length);
+  out = out.replace(
+    /\bneed\s+(?:\*)?\s*\d+\s*(?:\*)?\s+more\b/gi,
+    need > 0 ? `need *${need} more*` : "we're full",
+  );
+  return out;
+}
+
 const CHASE_SYSTEM_PROMPT = `You are MatchTime, composing a SCHEDULED group message — not a reply to anyone. The bot's scheduler is firing a chase/announcement at a fixed time because the squad is in a certain state.
 
 Output is PLAIN WhatsApp-ready text (no JSON, no markdown fences). Return only the message body — no preamble like "Here's the message:" and no closing commentary.
