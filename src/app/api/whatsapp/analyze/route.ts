@@ -313,6 +313,19 @@ export async function POST(request: Request) {
   });
 }
 
+/**
+ * Clear `leftAt` on a soft-removed membership when the player has
+ * resurfaced in the chat. Preserves history (rating, attendance) and
+ * silently re-activates them in the roster.
+ */
+async function restoreMembership(membershipId: string, name: string | null) {
+  await db.membership.update({
+    where: { id: membershipId },
+    data: { leftAt: null, provisionallyAddedAt: null },
+  });
+  console.log(`[analyze] restored soft-removed membership ${membershipId} (${name ?? "unknown"})`);
+}
+
 async function resolveSender(orgId: string, msg: InboundMessage): Promise<ResolvedSender> {
   // Phone first (most accurate). Accept raw digits — prepend '+' if the
   // bot didn't. @lid senders arrive with empty phone: that's the signal
@@ -338,8 +351,13 @@ async function resolveSender(orgId: string, msg: InboundMessage): Promise<Resolv
     // Both variants still require a UNIQUE match in the org to avoid
     // guessing between two players with the same first name.
     const pushname = msg.authorName.trim();
+    // Include soft-removed memberships in the candidate set: someone
+    // posting in the group is clearly back, so a unique match against a
+    // soft-removed member should restore them rather than provision a
+    // new ghost user. We track leftAt status per-candidate to apply the
+    // restore on the chosen match.
     const candidates = await db.membership.findMany({
-      where: { orgId, leftAt: null },
+      where: { orgId },
       include: { user: { select: { id: true, name: true } } },
     });
     const norm = (s: string) =>
@@ -351,11 +369,9 @@ async function resolveSender(orgId: string, msg: InboundMessage): Promise<Resolv
       (c) => c.user.name && norm(c.user.name) === norm(pushname),
     );
     if (equalsMatches.length === 1) {
-      return {
-        userId: equalsMatches[0].user.id,
-        name: equalsMatches[0].user.name,
-        phone: null,
-      };
+      const m = equalsMatches[0];
+      if (m.leftAt) await restoreMembership(m.id, m.user.name);
+      return { userId: m.user.id, name: m.user.name, phone: null };
     }
 
     const firstNameMatches = candidates.filter((c) => {
@@ -374,11 +390,9 @@ async function resolveSender(orgId: string, msg: InboundMessage): Promise<Resolv
       );
     });
     if (firstNameMatches.length === 1) {
-      return {
-        userId: firstNameMatches[0].user.id,
-        name: firstNameMatches[0].user.name,
-        phone: null,
-      };
+      const m = firstNameMatches[0];
+      if (m.leftAt) await restoreMembership(m.id, m.user.name);
+      return { userId: m.user.id, name: m.user.name, phone: null };
     }
     // Multiple first-name matches (e.g. two Ibrahims) — DO NOT provision
     // a third user. Ambiguous cases should surface to the admin, not
@@ -428,9 +442,11 @@ async function resolveOrProvisionByName(
   const name = rawName.trim();
   if (!name || name.length < 2) return null;
 
-  // 1. Fuzzy lookup against existing members.
+  // 1. Fuzzy lookup against existing members. Soft-removed members are
+  //    INCLUDED in the candidate set so we restore them rather than
+  //    creating a duplicate ghost when they get re-mentioned in chat.
   const candidates = await db.membership.findMany({
-    where: { orgId, leftAt: null },
+    where: { orgId },
     include: { user: { select: { id: true, name: true } } },
   });
   const norm = (s: string) =>
@@ -442,7 +458,9 @@ async function resolveOrProvisionByName(
     (c) => c.user.name && norm(c.user.name) === norm(name),
   );
   if (equalsMatches.length === 1) {
-    return { userId: equalsMatches[0].user.id, name: equalsMatches[0].user.name };
+    const m = equalsMatches[0];
+    if (m.leftAt) await restoreMembership(m.id, m.user.name);
+    return { userId: m.user.id, name: m.user.name };
   }
 
   const firstNameMatches = candidates.filter((c) => {
@@ -457,10 +475,9 @@ async function resolveOrProvisionByName(
     );
   });
   if (firstNameMatches.length === 1) {
-    return {
-      userId: firstNameMatches[0].user.id,
-      name: firstNameMatches[0].user.name,
-    };
+    const m = firstNameMatches[0];
+    if (m.leftAt) await restoreMembership(m.id, m.user.name);
+    return { userId: m.user.id, name: m.user.name };
   }
   // Ambiguous: multiple players match the given name ("Ibrahim" when
   // there are two). Don't silently grow the roster with a third. The
