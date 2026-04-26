@@ -531,9 +531,11 @@ async function createProvisionalByName(
 
 /**
  * Slot → emoji map for the bot's attendance reactions. Confirmed slots
- * 1-10 get the corresponding keycap; 11+ fall back to ⚽ (WhatsApp
- * reactions don't support multi-digit keycaps). Bench slots always get
- * 🪑. OUT always gets 👋.
+ * 1-10 get the corresponding keycap. 11+ get ✅ — Unicode doesn't have
+ * single-grapheme keycaps for 11+ and "1️⃣3️⃣" is two emojis (WhatsApp
+ * reactions are one grapheme), so ⚽ used to be the fallback but it
+ * camouflaged with player-emoji reactions. ✅ reads as "you're in" without
+ * looking like a generic football react. Bench slots get 🪑. OUT gets 👋.
  */
 const KEYCAP: Record<number, string> = {
   1: "1️⃣",
@@ -661,7 +663,7 @@ async function executeVerdict(args: {
           const bench = attendances.filter((a) => a.status === "BENCH");
           if (result.status === "CONFIRMED") {
             const slot = confirmed.findIndex((a) => a.userId === user.id) + 1;
-            finalReact = KEYCAP[slot] ?? "⚽";
+            finalReact = KEYCAP[slot] ?? "✅";
           } else {
             // BENCH
             const slot = bench.findIndex((a) => a.userId === user.id) + 1;
@@ -712,7 +714,7 @@ async function executeVerdict(args: {
             const bench = attendances.filter((a) => a.status === "BENCH");
             if (result.status === "CONFIRMED") {
               const slot = confirmed.findIndex((a) => a.userId === target.userId) + 1;
-              finalReact = KEYCAP[slot] ?? "⚽";
+              finalReact = KEYCAP[slot] ?? "✅";
             } else {
               finalReact = "🪑";
             }

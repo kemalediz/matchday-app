@@ -227,7 +227,7 @@ export default function PlayerGuidePage() {
 
       <ul>
         <li><strong>1️⃣ – 🔟</strong> — you&apos;re confirmed at that slot</li>
-        <li><strong>⚽</strong> — confirmed, but past slot 10 (squad is huge)</li>
+        <li><strong>✅</strong> — confirmed, past slot 10 (Unicode keycaps stop at 🔟)</li>
         <li><strong>🪑</strong> — bench (squad was full)</li>
         <li><strong>👋</strong> — you dropped out</li>
         <li><strong>🤔</strong> — tentative, MatchTime is keeping an eye on you</li>

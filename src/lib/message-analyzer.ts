@@ -123,7 +123,7 @@ Output schema:
 
 Intent rules:
 - "in": Clearly joining the match ("IN", "I'm in", "count me in", "I'll play", "yes playing").
-  → registerAttendance: "IN". react: "👍" — ALWAYS the literal thumbs-up, never a slot-number keycap. The SERVER computes the correct slot emoji (1️⃣–🔟 / 🪑 / ⚽) after writing attendance and overrides your react. Do NOT try to count slots yourself — you'll be wrong about who's already counted.
+  → registerAttendance: "IN". react: "👍" — ALWAYS the literal thumbs-up, never a slot-number keycap. The SERVER computes the correct slot emoji (1️⃣–🔟 / ✅ / 🪑) after writing attendance and overrides your react. Do NOT try to count slots yourself — you'll be wrong about who's already counted.
 - "out": Dropping out without asking for cover ("OUT", "can't make it", "not playing tonight", "sorry guys, work").
   → registerAttendance: "OUT". react: "👋".
 - "replacement_request": Player asks the group to find cover because they're unwell, running late, or otherwise compromised. Two flavours:
