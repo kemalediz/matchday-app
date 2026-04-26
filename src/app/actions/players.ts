@@ -175,6 +175,151 @@ export async function seedPlayerRating(userId: string, orgId: string, rating: nu
  * fuzzy matching, so the existing user gets reused rather than a
  * fresh ghost being created.
  */
+/**
+ * Admin: merge two duplicate user records into one. Keeps `keepUserId`,
+ * drops `dropUserId`. Re-attributes attendance, ratings, MoM votes,
+ * analyzed messages, and team assignments. Backfills `phoneNumber`,
+ * `seedRating`, and `matchRating` from the drop record only when the
+ * keep record is missing them. The drop user + memberships are deleted
+ * at the end. Transactional — partial failures roll back.
+ */
+export async function mergePlayers(
+  orgId: string,
+  keepUserId: string,
+  dropUserId: string,
+) {
+  const session = await auth();
+  if (!session?.user?.id) throw new Error("Not authenticated");
+  await requireOrgAdmin(session.user.id, orgId);
+
+  if (keepUserId === dropUserId) throw new Error("Pick two different players");
+
+  // Both must be members of THIS org so the merge can't reach across
+  // orgs the admin doesn't run.
+  const [keepMembership, dropMembership] = await Promise.all([
+    db.membership.findUnique({ where: { userId_orgId: { userId: keepUserId, orgId } } }),
+    db.membership.findUnique({ where: { userId_orgId: { userId: dropUserId, orgId } } }),
+  ]);
+  if (!keepMembership || !dropMembership) {
+    throw new Error("Both players must be members of this organisation");
+  }
+
+  const [keep, drop] = await Promise.all([
+    db.user.findUnique({ where: { id: keepUserId } }),
+    db.user.findUnique({ where: { id: dropUserId } }),
+  ]);
+  if (!keep || !drop) throw new Error("Player not found");
+
+  await db.$transaction(async (tx) => {
+    // 1. Backfill missing fields on `keep` from `drop`.
+    const patch: { phoneNumber?: string; seedRating?: number; matchRating?: number; name?: string } = {};
+    if (!keep.phoneNumber && drop.phoneNumber) patch.phoneNumber = drop.phoneNumber;
+    if (keep.seedRating == null && drop.seedRating != null) patch.seedRating = drop.seedRating;
+    if ((!keep.matchRating || keep.matchRating === 1000) && drop.matchRating && drop.matchRating !== 1000) {
+      patch.matchRating = drop.matchRating;
+    }
+    if (!keep.name && drop.name) patch.name = drop.name;
+
+    // 2. Free up the unique fields on `drop` so `keep` can take them.
+    await tx.user.update({
+      where: { id: dropUserId },
+      data: { phoneNumber: null, email: `merged-${dropUserId}-${Date.now()}@matchtime.local` },
+    });
+    if (Object.keys(patch).length > 0) {
+      await tx.user.update({ where: { id: keepUserId }, data: patch });
+    }
+
+    // 3. Re-attribute attendance, with conflict resolution: if both have
+    //    a row for the same match, keep whichever is more "active"
+    //    (CONFIRMED > BENCH > DROPPED), else delete the drop's row.
+    const dropAtts = await tx.attendance.findMany({ where: { userId: dropUserId } });
+    const ATT_RANK = { CONFIRMED: 3, BENCH: 2, DROPPED: 1 } as const;
+    for (const a of dropAtts) {
+      const existing = await tx.attendance.findUnique({
+        where: { matchId_userId: { matchId: a.matchId, userId: keepUserId } },
+      });
+      if (!existing) {
+        await tx.attendance.update({ where: { id: a.id }, data: { userId: keepUserId } });
+      } else {
+        const dropRank = ATT_RANK[a.status as keyof typeof ATT_RANK] ?? 0;
+        const keepRank = ATT_RANK[existing.status as keyof typeof ATT_RANK] ?? 0;
+        if (dropRank > keepRank) {
+          await tx.attendance.update({
+            where: { id: existing.id },
+            data: { status: a.status, position: a.position, paidAt: a.paidAt ?? existing.paidAt },
+          });
+        }
+        await tx.attendance.delete({ where: { id: a.id } });
+      }
+    }
+
+    // 4. Re-attribute ratings — rows the drop user GAVE may collide on
+    //    (matchId, raterId, playerId) with rows the keep user already
+    //    gave. Iterate manually with conflict pruning. Rows the drop
+    //    user RECEIVED never collide.
+    const dropGiven = await tx.rating.findMany({ where: { raterId: dropUserId } });
+    for (const r of dropGiven) {
+      const exists = await tx.rating.findUnique({
+        where: {
+          matchId_raterId_playerId: {
+            matchId: r.matchId,
+            raterId: keepUserId,
+            playerId: r.playerId,
+          },
+        },
+      });
+      if (exists) await tx.rating.delete({ where: { id: r.id } });
+      else await tx.rating.update({ where: { id: r.id }, data: { raterId: keepUserId } });
+    }
+    await tx.rating.updateMany({ where: { playerId: dropUserId }, data: { playerId: keepUserId } });
+
+    // 5. MoMVotes — same uniqueness handling.
+    const droppedMomGiven = await tx.moMVote.findMany({ where: { voterId: dropUserId } });
+    for (const v of droppedMomGiven) {
+      const exists = await tx.moMVote.findUnique({
+        where: { matchId_voterId: { matchId: v.matchId, voterId: keepUserId } },
+      });
+      if (exists) await tx.moMVote.delete({ where: { id: v.id } });
+      else await tx.moMVote.update({ where: { id: v.id }, data: { voterId: keepUserId } });
+    }
+    await tx.moMVote.updateMany({ where: { playerId: dropUserId }, data: { playerId: keepUserId } });
+
+    // 6. Team assignments — the (matchId, userId) pair is unique.
+    const dropTeams = await tx.teamAssignment.findMany({ where: { userId: dropUserId } });
+    for (const ta of dropTeams) {
+      const exists = await tx.teamAssignment.findFirst({
+        where: { matchId: ta.matchId, userId: keepUserId },
+      });
+      if (exists) await tx.teamAssignment.delete({ where: { id: ta.id } });
+      else await tx.teamAssignment.update({ where: { id: ta.id }, data: { userId: keepUserId } });
+    }
+
+    // 7. Per-activity positions.
+    const dropPositions = await tx.playerActivityPosition.findMany({ where: { userId: dropUserId } });
+    for (const pp of dropPositions) {
+      const exists = await tx.playerActivityPosition.findUnique({
+        where: { userId_activityId: { userId: keepUserId, activityId: pp.activityId } },
+      });
+      if (exists) await tx.playerActivityPosition.delete({ where: { id: pp.id } });
+      else await tx.playerActivityPosition.update({ where: { id: pp.id }, data: { userId: keepUserId } });
+    }
+
+    // 8. AnalyzedMessages — no uniqueness, just re-attribute.
+    await tx.analyzedMessage.updateMany({
+      where: { authorUserId: dropUserId },
+      data: { authorUserId: keepUserId },
+    });
+
+    // 9. Delete drop's memberships across ALL orgs (their identity is
+    //    being absorbed). Then delete the user.
+    await tx.membership.deleteMany({ where: { userId: dropUserId } });
+    await tx.user.delete({ where: { id: dropUserId } });
+  });
+
+  revalidatePath("/admin/players");
+  revalidatePath("/admin");
+}
+
 export async function updatePlayerName(userId: string, orgId: string, name: string) {
   const session = await auth();
   if (!session?.user?.id) throw new Error("Not authenticated");
