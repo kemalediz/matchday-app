@@ -2,8 +2,9 @@ import { auth } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { redirect } from "next/navigation";
 import Link from "next/link";
-import { getCurrentOrgId } from "@/lib/org";
+import { getCurrentOrgId, isSuperadmin } from "@/lib/org";
 import { Plus, Check, Users, Calendar, CalendarDays } from "lucide-react";
+import { DeleteOrgButton } from "./delete-org-button";
 
 /**
  * Lists every org the signed-in user is a member of (active memberships
@@ -16,6 +17,7 @@ export default async function OrganisationsPage() {
   if (!session?.user?.id) redirect("/login");
 
   const currentOrgId = await getCurrentOrgId();
+  const superuser = await isSuperadmin(session.user.id);
 
   const memberships = await db.membership.findMany({
     where: { userId: session.user.id, leftAt: null },
@@ -153,6 +155,13 @@ export default async function OrganisationsPage() {
                     >
                       Manage
                     </Link>
+                  )}
+                  {(superuser || m.role === "OWNER") && (
+                    <DeleteOrgButton
+                      orgId={m.org.id}
+                      orgName={m.org.name}
+                      orgSlug={m.org.slug}
+                    />
                   )}
                 </div>
               </div>

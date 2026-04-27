@@ -62,6 +62,58 @@ export async function joinOrganisation(inviteCode: string) {
   return { orgId: org.id, alreadyMember: false };
 }
 
+/**
+ * Permanently delete an organisation and everything attached to it.
+ *
+ * Authorised for: superadmin OR the org's OWNER. The caller must
+ * additionally pass the org's slug as a typed confirmation so a stray
+ * click on the UI button can't fire this — frontend collects it via a
+ * confirm dialog.
+ *
+ * Used by the delete button on /admin/organisations.
+ */
+export async function deleteOrganisation(orgId: string, confirmSlug: string) {
+  const session = await auth();
+  if (!session?.user?.id) throw new Error("Not authenticated");
+
+  const org = await db.organisation.findUnique({
+    where: { id: orgId },
+    select: { id: true, name: true, slug: true },
+  });
+  if (!org) throw new Error("Organisation not found");
+  if (org.slug !== confirmSlug) {
+    throw new Error("Slug confirmation didn't match");
+  }
+
+  const { isSuperadmin } = await import("@/lib/org");
+  const superuser = await isSuperadmin(session.user.id);
+  if (!superuser) {
+    const membership = await db.membership.findUnique({
+      where: { userId_orgId: { userId: session.user.id, orgId } },
+      select: { role: true, leftAt: true },
+    });
+    if (!membership || membership.leftAt !== null || membership.role !== "OWNER") {
+      throw new Error("Only the org owner can delete an organisation");
+    }
+  }
+
+  const { wipeOrg } = await import("@/lib/wipe-org");
+  await wipeOrg(orgId);
+
+  // If the deleted org was the current one, clear the cookie so the
+  // next page load doesn't try to load a missing org.
+  const { getCurrentOrgId } = await import("@/lib/org");
+  const currentId = await getCurrentOrgId();
+  if (currentId === orgId) {
+    const { cookies } = await import("next/headers");
+    const cookieStore = await cookies();
+    cookieStore.delete("orgId");
+  }
+
+  revalidatePath("/admin/organisations");
+  revalidatePath("/");
+}
+
 export async function switchOrg(orgId: string) {
   const session = await auth();
   if (!session?.user?.id) throw new Error("Not authenticated");
