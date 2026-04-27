@@ -267,6 +267,38 @@ async function buildUnpaidTail(
   return { text, mentions };
 }
 
+/**
+ * Render a numbered "Confirmed (N/M):" + "Bench (N):" block for the
+ * daily 17:00 announcement. Goal: every day at 5pm, every player can
+ * scan the message and see their own name on the list — confirms
+ * they're playing without anyone needing to scroll up. Bench gets its
+ * own numbered sub-list so the gap to the squad is obvious.
+ */
+function buildSquadRosterBlock(args: {
+  confirmed: { user: { name: string | null } }[];
+  bench: { user: { name: string | null } }[];
+  maxPlayers: number;
+}): string {
+  const { confirmed, bench, maxPlayers } = args;
+  const lines: string[] = [];
+  lines.push(`*Confirmed (${confirmed.length}/${maxPlayers}):*`);
+  if (confirmed.length === 0) {
+    lines.push("_nobody yet_");
+  } else {
+    confirmed.forEach((a, i) => {
+      lines.push(`${i + 1}. ${a.user.name ?? "(unnamed)"}`);
+    });
+  }
+  if (bench.length > 0) {
+    lines.push("");
+    lines.push(`*Bench (${bench.length}):*`);
+    bench.forEach((a, i) => {
+      lines.push(`${i + 1}. ${a.user.name ?? "(unnamed)"}`);
+    });
+  }
+  return lines.join("\n");
+}
+
 /** Date-only key for "daily X" idempotency (YYYY-MM-DD in London). */
 function londonDateKey(at: Date = new Date()): string {
   return new Intl.DateTimeFormat("en-CA", {
@@ -569,12 +601,36 @@ async function computeForMatch(
     const eveningKey = `${matchId}:evening-update:${dayKey}`;
 
     if (isEvening && isUpcoming && !sentKeys.has(eveningKey)) {
-      const unpaidTail = await buildUnpaidTail(activity.id);
+      // Stop the unpaid-chase tail once we're in the final day before
+      // kickoff. Whoever has paid has paid; ~5 reminders (Wed → Sun for
+      // a Tue match) is enough. From the day-before-match onward, drop
+      // the tail entirely so the focus shifts to "tonight's match".
+      const matchDayKey = londonDateKey(m.date);
+      const dayBeforeMatchKey = londonDateKey(
+        new Date(m.date.getTime() - 24 * 60 * 60 * 1000),
+      );
+      const skipUnpaidChase =
+        dayKey === matchDayKey || dayKey === dayBeforeMatchKey;
+      const unpaidTail = skipUnpaidChase ? null : await buildUnpaidTail(activity.id);
+
+      // Roster block listed under every branch — daily reminder so each
+      // player sees their own name without scrolling up. Bench gets its
+      // own numbered list when populated.
+      const rosterBlock = buildSquadRosterBlock({
+        confirmed,
+        bench,
+        maxPlayers: m.maxPlayers,
+      });
+
       let text: string | null = null;
       let mentions: string[] | undefined;
 
       if (beforeDeadline && need > 0) {
-        // 2a. Short squad — chase + unpaid tail.
+        // 2a. Short squad — chase + unpaid tail. Chase template (LLM
+        // or fallback) produces its own numbered list; the
+        // enforceCanonicalRoster post-processor on the analyze path
+        // already keeps that list in sync, so we leave it untouched
+        // here rather than appending a duplicate roster block.
         const chaseText = await composeOrFallback("daily-in-list", () => {
           const list = confirmed
             .map((a, i) => `${i + 1}. ${a.user.name ?? "(unnamed)"}`)
@@ -587,7 +643,7 @@ async function computeForMatch(
         text = unpaidTail ? `${chaseText}\n\n${unpaidTail.text}` : chaseText;
         mentions = unpaidTail?.mentions;
       } else if (beforeDeadline && need === 0 && bench.length < 3) {
-        // 2b. Squad full + bench thin — bench chase + unpaid tail.
+        // 2b. Squad full + bench thin — bench chase + roster + unpaid.
         const benchCount = bench.length;
         const gap = 3 - benchCount;
         const benchLine =
@@ -600,16 +656,25 @@ async function computeForMatch(
           `🪑 Squad is locked at *${m.maxPlayers}/${m.maxPlayers}* for *${activity.name}* ` +
           `but we've got ${benchLine}. ` +
           `If anyone drops, we're short again. Say *IN* to pad the bench — ${gap} more would be ideal 🙌`;
-        text = unpaidTail ? `${benchText}\n\n${unpaidTail.text}` : benchText;
+        const parts = [benchText, rosterBlock];
+        if (unpaidTail) parts.push(unpaidTail.text);
+        text = parts.join("\n\n");
         mentions = unpaidTail?.mentions;
-      } else if (unpaidTail) {
-        // 2c. Squad fine, bench fine, but someone still owes.
-        text = unpaidTail.text;
-        mentions = unpaidTail.mentions;
+      } else if (beforeDeadline && need === 0) {
+        // 2c. Squad full, bench healthy. Daily roster reminder + (if
+        // still in the chase window) an unpaid tail. We post even
+        // without an unpaid tail so the daily 5pm always confirms
+        // "you're playing tonight/this week".
+        const intro =
+          `🗓 *${activity.name}* — full squad, ready to go ⚽`;
+        const parts = [intro, rosterBlock];
+        if (unpaidTail) parts.push(unpaidTail.text);
+        text = parts.join("\n\n");
+        mentions = unpaidTail?.mentions;
       }
-      // else: nothing worth posting today — leave the key un-sent so a
-      // later tick in the same window can still fire if state changes
-      // (e.g. someone drops out making bench thin).
+      // else: deadline passed but match not yet happened — leave the
+      // key un-sent so a later tick in the same window can still fire
+      // if state changes (e.g. someone drops out making bench thin).
 
       if (text) {
         out.push({
