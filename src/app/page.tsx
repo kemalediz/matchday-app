@@ -95,11 +95,32 @@ export default async function DashboardPage() {
       match: { status: "COMPLETED", isHistorical: false },
     },
   });
-  const momWins = await db.moMVote.groupBy({
+  // "MoM wins" = matches where this user had the highest vote count
+  // (ties count as a shared win for everyone tied at the top). Plain
+  // count-of-matches-with-any-vote was misleading — a single sympathy
+  // vote shouldn't show up as a "win".
+  const myVotedMatches = await db.moMVote.groupBy({
     by: ["matchId"],
     where: { playerId: session.user.id },
-    _count: true,
+    _count: { playerId: true },
   });
+  const myVotedMatchIds = myVotedMatches.map((v) => v.matchId);
+  const allTallies = myVotedMatchIds.length
+    ? await db.moMVote.groupBy({
+        by: ["matchId", "playerId"],
+        where: { matchId: { in: myVotedMatchIds } },
+        _count: { playerId: true },
+      })
+    : [];
+  const topByMatch = new Map<string, number>();
+  for (const t of allTallies) {
+    const cur = topByMatch.get(t.matchId) ?? 0;
+    if (t._count.playerId > cur) topByMatch.set(t.matchId, t._count.playerId);
+  }
+  let momWinsCount = 0;
+  for (const v of myVotedMatches) {
+    if (v._count.playerId === topByMatch.get(v.matchId)) momWinsCount += 1;
+  }
 
   const confirmedCount = nextMatch?.attendances.filter((a) => a.status === "CONFIRMED").length ?? 0;
   const benchCount = nextMatch?.attendances.filter((a) => a.status === "BENCH").length ?? 0;
@@ -149,7 +170,7 @@ export default async function DashboardPage() {
             <Trophy className="w-4 h-4" />
             <p className="text-xs font-medium uppercase tracking-wider">MoM</p>
           </div>
-          <p className="text-3xl font-bold mt-2">{momWins.length}</p>
+          <p className="text-3xl font-bold mt-2">{momWinsCount}</p>
         </div>
         <div className={`p-5 rounded-xl border ${TILE.purple} transition-colors`}>
           <div className="flex items-center gap-2 opacity-75">
