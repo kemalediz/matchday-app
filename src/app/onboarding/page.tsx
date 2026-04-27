@@ -48,6 +48,7 @@ interface PlayerDraft {
   phone: string;
   seedRating: number | null;
   excluded: boolean; // admin toggled "not a player"
+  isLikelyMe?: boolean; // server pre-flagged this row as the current admin
 }
 
 export default function OnboardingWizard() {
@@ -82,12 +83,17 @@ export default function OnboardingWizard() {
       setChatText(text);
       setOrgName(summary.groupName ?? guessNameFromFilename(file.name) ?? "");
       // Seed the player list from detected authors.
+      // Authors flagged as `isLikelyMe` are pre-excluded — the admin
+      // already gets an OWNER membership and shouldn't duplicate as a
+      // PLAYER. They can untick the X to include themselves if they
+      // do play.
       setPlayers(
         summary.authors.map((a) => ({
           name: a.name,
           phone: a.phone ?? "",
           seedRating: null,
-          excluded: false,
+          excluded: a.isLikelyMe,
+          isLikelyMe: a.isLikelyMe,
         })),
       );
       setActivity((a) => ({
@@ -454,15 +460,25 @@ function PlayersStep(props: {
                 p.excluded ? "opacity-50 bg-slate-50" : isDup ? "bg-amber-50/60" : ""
               }`}
             >
-              <input
-                type="text"
-                value={p.name}
-                placeholder="Name"
-                onChange={(e) => updatePlayer(i, { name: e.target.value })}
-                className={`h-9 px-2.5 rounded-md border text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 ${
-                  isDup ? "border-amber-300" : "border-slate-200"
-                }`}
-              />
+              <div className="flex items-center gap-2">
+                <input
+                  type="text"
+                  value={p.name}
+                  placeholder="Name"
+                  onChange={(e) => updatePlayer(i, { name: e.target.value })}
+                  className={`flex-1 h-9 px-2.5 rounded-md border text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 ${
+                    isDup ? "border-amber-300" : "border-slate-200"
+                  }`}
+                />
+                {p.isLikelyMe && (
+                  <span
+                    className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-blue-100 text-blue-700 border border-blue-200 whitespace-nowrap"
+                    title="This looks like you. Excluded by default — toggle ✓ if you also play."
+                  >
+                    you
+                  </span>
+                )}
+              </div>
               <input
                 type="tel"
                 value={p.phone}

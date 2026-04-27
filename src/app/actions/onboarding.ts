@@ -30,6 +30,13 @@ export interface ParsedChatSummary {
     messageCount: number;
     firstSeen: string;
     lastSeen: string;
+    /** True when this author is best-guess the current admin themselves
+     *  (matched by phone, otherwise first-name fuzzy). The wizard
+     *  pre-excludes them from the player list so the admin doesn't
+     *  duplicate themselves as a PLAYER alongside their own OWNER
+     *  membership. The admin can still un-exclude if they DO want to
+     *  appear as a player. */
+    isLikelyMe: boolean;
   }>;
 }
 
@@ -51,21 +58,71 @@ export async function parseChatUpload(fileText: string): Promise<ParsedChatSumma
   }
 
   const parsed = parseWhatsAppChat(fileText, { recentMessageLimit: 1 });
-  return summariseForClient(parsed);
+
+  // Look up the current admin so we can pre-exclude their own row from
+  // the detected players list. Phone wins (E.164 normalised on both
+  // sides); first-name fuzzy is the fallback when phone isn't set on
+  // the user yet.
+  const me = await db.user.findUnique({
+    where: { id: session.user.id },
+    select: { name: true, phoneNumber: true },
+  });
+  const meIndex = pickLikelyAdminIndex(parsed, me);
+
+  return summariseForClient(parsed, meIndex);
 }
 
-function summariseForClient(parsed: ParsedChat): ParsedChatSummary {
+function pickLikelyAdminIndex(
+  parsed: ParsedChat,
+  me: { name: string | null; phoneNumber: string | null } | null,
+): number | null {
+  if (!me) return null;
+
+  if (me.phoneNumber) {
+    const myDigits = me.phoneNumber.replace(/\D/g, "");
+    if (myDigits) {
+      for (let i = 0; i < parsed.authors.length; i++) {
+        const phone = parsed.authors[i].phone?.replace(/\D/g, "") ?? "";
+        // Match suffix to ride out country-code mismatches between
+        // stored E.164 and a "0xxx" parsed from the chat.
+        if (phone && (phone === myDigits || phone.endsWith(myDigits) || myDigits.endsWith(phone))) {
+          return i;
+        }
+      }
+    }
+  }
+
+  if (me.name) {
+    const myFirst = me.name.trim().split(/\s+/)[0]?.toLowerCase() ?? "";
+    if (myFirst.length >= 2) {
+      for (let i = 0; i < parsed.authors.length; i++) {
+        const authorFirst = parsed.authors[i].name.trim().split(/\s+/)[0]?.toLowerCase() ?? "";
+        if (!authorFirst) continue;
+        const longer = myFirst.length >= authorFirst.length ? myFirst : authorFirst;
+        const shorter = myFirst.length >= authorFirst.length ? authorFirst : myFirst;
+        if (longer.startsWith(shorter) && shorter.length >= 2 && longer.length >= 3) {
+          return i;
+        }
+      }
+    }
+  }
+
+  return null;
+}
+
+function summariseForClient(parsed: ParsedChat, meIndex: number | null): ParsedChatSummary {
   return {
     groupName: parsed.groupName,
     firstMessageAt: parsed.firstMessageAt?.toISOString() ?? null,
     lastMessageAt: parsed.lastMessageAt?.toISOString() ?? null,
     totalMessages: parsed.totalMessages,
-    authors: parsed.authors.map((a) => ({
+    authors: parsed.authors.map((a, i) => ({
       name: a.name,
       phone: a.phone,
       messageCount: a.messageCount,
       firstSeen: a.firstSeen.toISOString(),
       lastSeen: a.lastSeen.toISOString(),
+      isLikelyMe: i === meIndex,
     })),
   };
 }
