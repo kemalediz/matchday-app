@@ -14,8 +14,10 @@ import {
   ChevronRight,
   Timer,
   Shield,
+  Star,
 } from "lucide-react";
 import { LandingPage } from "@/components/landing/landing-page";
+import { getMomSummaries } from "@/lib/mom";
 
 function getGreeting(hour: number): string {
   if (hour < 5) return "Good night";
@@ -87,6 +89,7 @@ export default async function DashboardPage() {
     take: 5,
     include: { activity: true },
   });
+  const recentMomByMatch = await getMomSummaries(recentMatches.map((m) => m.id));
 
   const matchesPlayed = await db.attendance.count({
     where: {
@@ -286,27 +289,41 @@ export default async function DashboardPage() {
             </Link>
           </div>
           <div className="divide-y divide-slate-100">
-            {recentMatches.map((m) => (
-              <Link
-                key={m.id}
-                href={`/matches/${m.id}`}
-                className="flex items-center justify-between px-6 py-4 hover:bg-slate-50 transition-colors"
-              >
-                <div>
-                  <p className="font-medium text-slate-800">{m.activity.name}</p>
-                  <p className="text-xs text-slate-500 mt-0.5">
-                    {format(m.date, "EEE, d MMM yyyy")}
-                  </p>
-                </div>
-                {m.redScore !== null && m.yellowScore !== null && (
-                  <div className="flex items-center gap-2 font-mono font-bold">
-                    <span className="text-red-500">{m.redScore}</span>
-                    <span className="text-slate-300">-</span>
-                    <span className="text-amber-500">{m.yellowScore}</span>
+            {recentMatches.map((m) => {
+              const mom = recentMomByMatch.get(m.id);
+              const momLabel = mom
+                ? mom.topPlayers.length > 1
+                  ? `${mom.topPlayers.map((p) => p.name).join(" & ")} (${mom.topCount} each, ${mom.totalVotes} votes)`
+                  : `${mom.topPlayers[0].name} (${mom.topCount}/${mom.totalVotes} votes)`
+                : null;
+              return (
+                <Link
+                  key={m.id}
+                  href={`/matches/${m.id}`}
+                  className="flex items-center justify-between gap-3 px-6 py-4 hover:bg-slate-50 transition-colors"
+                >
+                  <div className="min-w-0">
+                    <p className="font-medium text-slate-800 truncate">{m.activity.name}</p>
+                    <p className="text-xs text-slate-500 mt-0.5">
+                      {format(m.date, "EEE, d MMM yyyy")}
+                    </p>
+                    {momLabel && (
+                      <p className="text-xs text-slate-500 mt-1 flex items-center gap-1.5 truncate">
+                        <Star className="w-3.5 h-3.5 text-amber-500 fill-amber-500 shrink-0" />
+                        <span className="truncate">{momLabel}</span>
+                      </p>
+                    )}
                   </div>
-                )}
-              </Link>
-            ))}
+                  {m.redScore !== null && m.yellowScore !== null && (
+                    <div className="flex items-center gap-2 font-mono font-bold shrink-0">
+                      <span className="text-red-500">{m.redScore}</span>
+                      <span className="text-slate-300">-</span>
+                      <span className="text-amber-500">{m.yellowScore}</span>
+                    </div>
+                  )}
+                </Link>
+              );
+            })}
           </div>
         </section>
       )}

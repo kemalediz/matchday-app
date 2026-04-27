@@ -4,9 +4,10 @@ import { getUserOrg } from "@/lib/org";
 import { redirect } from "next/navigation";
 import Link from "next/link";
 import { format, formatDistanceToNow, isToday, isTomorrow } from "date-fns";
-import { Calendar, MapPin, Users } from "lucide-react";
+import { Calendar, MapPin, Users, Star } from "lucide-react";
 import { MatchesTabs } from "@/components/match/matches-tabs";
 import { formatLondon } from "@/lib/london-time";
+import { getMomSummaries } from "@/lib/mom";
 
 // IMPORTANT: every user-facing time on this page is rendered in London
 // wall-clock via formatLondon. Plain date-fns format() uses the runtime's
@@ -47,6 +48,7 @@ export default async function MatchesPage() {
     take: 20,
     include: { activity: { include: { sport: true } } },
   });
+  const momByMatch = await getMomSummaries(pastMatches.map((m) => m.id));
 
   const myAttendances = await db.attendance.findMany({
     where: {
@@ -128,27 +130,41 @@ export default async function MatchesPage() {
     );
   });
 
-  const pastCards = pastMatches.map((m) => (
-    <Link
-      key={m.id}
-      href={`/matches/${m.id}`}
-      className="block bg-white rounded-xl border border-slate-200 shadow-sm hover:shadow transition-all"
-    >
-      <div className="p-5 flex items-center justify-between">
-        <div>
-          <p className="font-semibold text-slate-800">{m.activity.name}</p>
-          <p className="text-sm text-slate-500 mt-0.5">{format(m.date, "EEE, d MMM yyyy")}</p>
-        </div>
-        {m.redScore !== null && m.yellowScore !== null && (
-          <div className="flex items-center gap-3 text-lg font-mono font-bold">
-            <span className="text-red-500">{m.redScore}</span>
-            <span className="text-slate-300 text-base">-</span>
-            <span className="text-amber-500">{m.yellowScore}</span>
+  const pastCards = pastMatches.map((m) => {
+    const mom = momByMatch.get(m.id);
+    const momLabel = mom
+      ? mom.topPlayers.length > 1
+        ? `${mom.topPlayers.map((p) => p.name).join(" & ")} (${mom.topCount} each, ${mom.totalVotes} votes)`
+        : `${mom.topPlayers[0].name} (${mom.topCount}/${mom.totalVotes} votes)`
+      : null;
+    return (
+      <Link
+        key={m.id}
+        href={`/matches/${m.id}`}
+        className="block bg-white rounded-xl border border-slate-200 shadow-sm hover:shadow transition-all"
+      >
+        <div className="p-5 flex items-center justify-between gap-3">
+          <div className="min-w-0">
+            <p className="font-semibold text-slate-800 truncate">{m.activity.name}</p>
+            <p className="text-sm text-slate-500 mt-0.5">{format(m.date, "EEE, d MMM yyyy")}</p>
+            {momLabel && (
+              <p className="text-xs text-slate-500 mt-1.5 flex items-center gap-1.5 truncate">
+                <Star className="w-3.5 h-3.5 text-amber-500 fill-amber-500 shrink-0" />
+                <span className="truncate">{momLabel}</span>
+              </p>
+            )}
           </div>
-        )}
-      </div>
-    </Link>
-  ));
+          {m.redScore !== null && m.yellowScore !== null && (
+            <div className="flex items-center gap-3 text-lg font-mono font-bold shrink-0">
+              <span className="text-red-500">{m.redScore}</span>
+              <span className="text-slate-300 text-base">-</span>
+              <span className="text-amber-500">{m.yellowScore}</span>
+            </div>
+          )}
+        </div>
+      </Link>
+    );
+  });
 
   return (
     <div className="p-6 sm:p-8 max-w-6xl mx-auto">
