@@ -65,6 +65,17 @@ export type DueInstruction =
       text: string;
       matchId: string;
       userId: string;
+    }
+  | {
+      // Retroactively swap the bot's reaction on an existing message.
+      // The bot looks up the message via getMessageById and calls
+      // msg.react(emoji), which replaces any prior reaction the bot
+      // account placed. Used when slots shift after a drop, or when
+      // historical reactions need fixing after a rule change.
+      kind: "update-reaction";
+      key: string;
+      waMessageId: string;
+      emoji: string;
     };
 
 export async function getDuePosts(groupId: string): Promise<{

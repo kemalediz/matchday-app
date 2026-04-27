@@ -1,5 +1,5 @@
 import { db } from "./db";
-import { requestBenchConfirmationOnDrop } from "./bot-scheduler";
+import { requestBenchConfirmationOnDrop, queueSlotEmojiRefresh } from "./bot-scheduler";
 
 export async function registerAttendance(userId: string, matchId: string) {
   const match = await db.match.findUnique({ where: { id: matchId } });
@@ -102,6 +102,10 @@ export async function cancelAttendance(userId: string, matchId: string) {
   // and handle confirmation/timeout.
   if (wasConfirmed) {
     await requestBenchConfirmationOnDrop(matchId);
+    // Slots have shifted up — queue retroactive react updates so
+    // every confirmed player's IN message shows their NEW slot emoji.
+    // Idempotent and bounded; bot picks them up on its next 5-min tick.
+    await queueSlotEmojiRefresh(matchId);
   }
 
   return { status: "DROPPED" as const };

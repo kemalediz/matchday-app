@@ -51,5 +51,15 @@ export async function POST(request: Request) {
     }).catch(() => {}); // tolerate already-sent or deleted rows
   }
 
+  // RetroReaction keys look like `retro-react-<id>`; same idempotency
+  // model — once acked, don't re-emit.
+  if (key.startsWith("retro-react-")) {
+    const retroId = key.slice("retro-react-".length);
+    await db.retroReaction.update({
+      where: { id: retroId },
+      data: { sentAt: new Date() },
+    }).catch(() => {});
+  }
+
   return NextResponse.json({ ok: true });
 }

@@ -121,6 +121,20 @@ export type DueInstruction =
       matchId: string;
       userId: string;
       // Bot must ACK with the waMessageId so the reaction-watcher can find it.
+    }
+  | {
+      // Retroactively replace the bot's reaction on an existing message.
+      // Used when a player's slot changes after their IN was already
+      // reacted to (drop-and-shift, slot-emoji rule fixes, historical
+      // corrections). The bot calls msg.react(emoji) which swaps any
+      // prior reaction the bot account placed on that message.
+      // Older bot builds without this kind will skip the instruction;
+      // server emits whatever's queued and ACKs only resolve once a
+      // bot version that knows the kind reports back.
+      kind: "update-reaction";
+      key: string;            // `retro-react-<id>`
+      waMessageId: string;
+      emoji: string;
     };
 
 export interface DuePostsResult {
@@ -410,6 +424,28 @@ export async function computeDuePosts(groupId: string): Promise<DuePostsResult |
           text: job.text,
         });
       }
+    }
+  }
+
+  // ── Retroactive reactions ───────────────────────────────────────────
+  // Queued by registerAttendance (and ad-hoc cleanup scripts) when a
+  // prior IN message's slot emoji needs to change. Emit each unsent
+  // row; ACK via key `retro-react-<id>` (see /api/whatsapp/ack).
+  {
+    const retros = await db.retroReaction.findMany({
+      where: { orgId: org.id, sentAt: null },
+      orderBy: { createdAt: "asc" },
+      take: 30,
+    });
+    for (const r of retros) {
+      const key = `retro-react-${r.id}`;
+      if (sentKeys.has(key)) continue;
+      out.push({
+        kind: "update-reaction",
+        key,
+        waMessageId: r.waMessageId,
+        emoji: r.emoji,
+      });
     }
   }
 
@@ -1092,6 +1128,99 @@ export async function sweepExpiredBenchConfirmations(orgId: string): Promise<voi
  * already full (status UPCOMING with confirmed === maxPlayers). Call this
  * from the dropout flow (lib/attendance.ts).
  */
+/**
+ * Slot-emoji map for IN reactions.
+ * Slots 1-10 use Unicode keycap digits. Slots 11+ fall back to ✅
+ * (Unicode has no single-grapheme keycap for double digits, and
+ * concatenated keycaps don't render as one reaction; ⚽ camouflaged
+ * with player reactions historically — see memory).
+ */
+const KEYCAP_EMOJI: Record<number, string> = {
+  1: "1️⃣",
+  2: "2️⃣",
+  3: "3️⃣",
+  4: "4️⃣",
+  5: "5️⃣",
+  6: "6️⃣",
+  7: "7️⃣",
+  8: "8️⃣",
+  9: "9️⃣",
+  10: "🔟",
+};
+function slotEmoji(slot: number): string {
+  return KEYCAP_EMOJI[slot] ?? "✅";
+}
+
+/**
+ * Walk the current squad and queue retroactive reacts for any player
+ * whose IN message in this match should now show a different slot
+ * emoji. Used after a drop to reflect the shift-up; cheap to call
+ * eagerly because it's idempotent (the bot just calls msg.react()
+ * with the new emoji, replacing any prior reaction it set).
+ *
+ * Lower bound for "messages in this match": match.createdAt — the
+ * scheduler creates the next match in the same week, so this captures
+ * everyone's IN messages between attendance opening and the drop.
+ */
+export async function queueSlotEmojiRefresh(matchId: string): Promise<void> {
+  const match = await db.match.findUnique({
+    where: { id: matchId },
+    include: {
+      activity: { select: { orgId: true } },
+      attendances: {
+        where: { status: { in: ["CONFIRMED", "BENCH"] } },
+        orderBy: { position: "asc" },
+      },
+    },
+  });
+  if (!match) return;
+
+  const orgId = match.activity.orgId;
+  const confirmed = match.attendances.filter((a) => a.status === "CONFIRMED");
+  const bench = match.attendances.filter((a) => a.status === "BENCH");
+
+  const userSlotEmoji = new Map<string, string>();
+  confirmed.forEach((a, i) => userSlotEmoji.set(a.userId, slotEmoji(i + 1)));
+  // Bench players keep the chair emoji regardless of their bench rank.
+  bench.forEach((a) => userSlotEmoji.set(a.userId, "🪑"));
+
+  for (const [userId, emoji] of userSlotEmoji) {
+    const lastIn = await db.analyzedMessage.findFirst({
+      where: {
+        orgId,
+        authorUserId: userId,
+        intent: "in",
+        createdAt: { gte: match.createdAt },
+      },
+      orderBy: { createdAt: "desc" },
+      select: { waMessageId: true },
+    });
+    if (!lastIn) continue;
+
+    // Skip if there's already an unsent retro for this exact
+    // (message, emoji) combination — no point queueing the same
+    // refresh twice if the bot hasn't picked it up yet.
+    const dup = await db.retroReaction.findFirst({
+      where: {
+        waMessageId: lastIn.waMessageId,
+        emoji,
+        sentAt: null,
+      },
+      select: { id: true },
+    });
+    if (dup) continue;
+
+    await db.retroReaction.create({
+      data: {
+        orgId,
+        waMessageId: lastIn.waMessageId,
+        emoji,
+        reason: `slot refresh for match ${matchId}`,
+      },
+    });
+  }
+}
+
 export async function requestBenchConfirmationOnDrop(
   matchId: string,
 ): Promise<void> {

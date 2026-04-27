@@ -134,6 +134,30 @@ async function executeInstruction(instr: DueInstruction, groupId: string): Promi
       });
       return;
     }
+
+    if (instr.kind === "update-reaction") {
+      // Look up the original message and replace the bot account's
+      // reaction. whatsapp-web.js's msg.react() swaps any prior react
+      // from this account on the same message — no separate clear
+      // step. If the message can't be found (rare; very old messages
+      // can fall out of the cache) we still ACK so the server stops
+      // re-emitting it.
+      try {
+        const msg = await client.getMessageById(instr.waMessageId);
+        if (msg) {
+          await msg.react(instr.emoji);
+        } else {
+          console.warn(`update-reaction: message not found ${instr.waMessageId}`);
+        }
+      } catch (e) {
+        console.warn(`update-reaction failed for ${instr.waMessageId}:`, e);
+      }
+      await ackInstruction({
+        key: instr.key,
+        kind: instr.kind,
+      });
+      return;
+    }
   } catch (err) {
     console.error(`Failed to execute instruction ${instr.kind} (${instr.key}):`, err);
   }
