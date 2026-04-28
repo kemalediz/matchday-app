@@ -80,6 +80,12 @@ A condensed digest of what's been learned across many sessions. The detailed sou
 
 **`@lid` privacy senders.** WhatsApp delivers some senders as `<opaque>@lid` instead of `<phone>@c.us`. Phone is unknown — fall back to unique pushname match within the org. The score-write path skips the user-resolution gate (record the score even when sender unresolved).
 
+**Nicknames don't fuzzy-match.** Pushname "Nunu" → DB name "Elnur Mammadov" has zero letter overlap; same for "Mike" → "Michael Allen" (Mike isn't a prefix of Michael). The fuzzy-name layer can never bridge nicknames — it's a letter-overlap algorithm. Use `UserAlias` for these. The alias upsert is wired into `mergePlayers` so admin merges teach the system once-and-done; same pushname next week resolves cleanly with no new ghost.
+
+**Tailscale SSH expires.** Roughly once a week the Pi auto-deploy script silently fails — SSH exits 0 but the session emits "Tailscale SSH requires an additional check. To authenticate, visit: https://login.tailscale.com/a/...". Server-side fixes (Vercel-served) keep working in the meantime; bot-protocol changes need the Pi current. Look for the auth line in the output; ask Kemal to click once.
+
+**Time-of-day gates on bot posts.** Anything that fires off a row-creation event (e.g. `announce-match` when generate-matches creates next week's match) needs a London-hour window, otherwise the cron creating the row at 00:00 UTC = 01:00 BST wakes the group at 01:20 BST when the bot's next poll lands. `09:00 ≤ londonHour < 13:00` is the standard "morning" window. Plus an "is this the soonest unplayed match" check so future-week announcements don't overlap with this-week's ones.
+
 **Next.js 16 beta.** Breaking changes vs training data. Read `node_modules/next/dist/docs/` before guessing API shape. Server actions exported from `"use server"` files MUST be async — non-async helpers go in a separate file (`src/lib/phone.ts` had to move out).
 
 **Prisma 7 generates into the workspace, not `node_modules`.** `src/generated/prisma/` is gitignored. Scripts use `import { PrismaClient } from "../src/generated/prisma/client.ts"` with explicit `.ts` extension because tsx resolves it; plain Node ESM doesn't.
@@ -98,6 +104,8 @@ A condensed digest of what's been learned across many sessions. The detailed sou
 ## Things to NEVER do
 
 - Don't filter `leftAt: null` in fuzzy-matcher queries (creates ghost users).
+- Don't add a row-creation-triggered bot post without a `londonHour` time-of-day gate (otherwise it fires at 01:20 BST when the cron creates the row at midnight UTC).
+- Don't rely on letter-overlap fuzzy to bridge nicknames ("Nunu" → "Elnur"). Use `UserAlias` populated by `mergePlayers`.
 - Don't trust LLM-emitted roster, time, or count — post-process server-side.
 - Don't post on the bot's behalf without an idempotency key.
 - Don't add rules Kemal didn't ask for — if it feels useful, ASK first.

@@ -152,6 +152,39 @@ Every queued bot instruction has a stable `key` so the same instruction never fi
 
 The server records `SentNotification` rows on ACK; the next compute step builds a `sentKeys` set and skips anything already there.
 
+## Sender resolution (analyze route)
+
+`resolveSender(orgId, msg)` runs every inbound message through this chain:
+
+1. **Phone** — exact `User.phoneNumber` lookup (raw → `+` prefix → `normalisePhone`).
+2. **Exact name** — case-insensitive equals against memberships in this org.
+3. **First-name fuzzy** — relaxed prefix match (one side ≥3, other ≥2). Multiple candidates → return null (don't guess).
+4. **`UserAlias`** — admin-curated nickname → user mapping, scoped to org.
+5. **Provision** — last resort, only if pushname ≥3 chars.
+
+Soft-removed memberships (`leftAt != null`) are INCLUDED in the candidate set; on a unique match the resolver calls `restoreMembership(membershipId)` to clear `leftAt`. Never filter `leftAt: null` in fuzzy-matcher queries — it creates ghost users.
+
+Aliases are populated automatically by `mergePlayers`: the dropped user's name (and, for provisional ghosts, the email slug) is upserted into `UserAlias` for the kept user. Once-and-done — no manual UI for aliases yet, but the dataset grows organically with merges.
+
+## Time-of-day gates on bot posts
+
+Every bot post that's tied to creation-time of a row (rather than user action) needs a London-hour gate. Otherwise the cron creating the row at 00:00 UTC (= 01:00 BST during BST) fires an immediate notification at 01:20 BST when the bot polls. Concrete examples:
+
+- `announce-match` — only fire `09:00 ≤ londonHour < 13:00`. The `generate-matches` cron creates next week's match nightly; the bot must NOT announce it at 01:20 BST.
+- `announce-match` also needs an "is this the soonest unplayed match in the activity?" check — when today's match is still UPCOMING/TEAMS_GENERATED/TEAMS_PUBLISHED, don't announce next week's. Once today's flips to COMPLETED, the next morning's tick picks up the future one.
+
+## Tailscale SSH gotcha
+
+The Pi auto-deploy command is the standing rule. Roughly once a week the Tailscale SSH check expires; the SSH command exits cleanly (`exit 0`) but the actual session prints:
+
+```
+# Tailscale SSH requires an additional check.
+# To authenticate, visit: https://login.tailscale.com/a/...
+tailscale: failed to fetch next SSH action
+```
+
+If a Pi pull seems to do nothing despite the script running, look for that line in the output. Ask Kemal to click the URL once; that re-arms the check for another week. Server-side fixes (Vercel-served) keep working in the meantime — only bot-side code changes (`whatsapp-bot/`) need the Pi to be current.
+
 ## "Never break the live org" safety
 
 Schema changes go in **strictly additive** — nullable + defaulted columns, new tables — so rolling back is safe. Sutton FC is live production; Kemal's Tuesday match depends on this code working every week.
