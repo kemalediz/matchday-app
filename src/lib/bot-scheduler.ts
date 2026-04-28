@@ -299,6 +299,46 @@ function buildSquadRosterBlock(args: {
   return lines.join("\n");
 }
 
+/**
+ * Match-day 17:00 view when teams have been generated. Replaces the
+ * flat squad roster with a Red vs Yellow lineup so each player can
+ * scan and confirm what side they're on tonight. Bench remains
+ * separately listed for any standby. No "objections / swap X Y"
+ * footer here — that's already in the team-publish post that fired
+ * when teams were generated; this is a daily reminder, not a fresh
+ * announcement.
+ */
+function buildMatchDayTeamsBlock(args: {
+  activity: { name: string; venue: string };
+  sport: { teamLabels: string[] };
+  matchDate: Date;
+  teamAssignments: { team: "RED" | "YELLOW"; user: { name: string | null } }[];
+  bench: { user: { name: string | null } }[];
+}): string {
+  const { activity, sport, matchDate, teamAssignments, bench } = args;
+  const [redLabel, yellowLabel] = sport.teamLabels as [string, string];
+  const red = teamAssignments.filter((t) => t.team === "RED");
+  const yellow = teamAssignments.filter((t) => t.team === "YELLOW");
+  const numbered = (arr: typeof red) =>
+    arr.map((t, i) => `${i + 1}. ${t.user.name ?? "(unnamed)"}`).join("\n");
+  const lines: string[] = [];
+  lines.push(`⚽ *Tonight at ${format(matchDate, "HH:mm")}* — *${activity.name}* at ${activity.venue}`);
+  lines.push("");
+  lines.push(`*${redLabel}:*`);
+  lines.push(numbered(red));
+  lines.push("");
+  lines.push(`*${yellowLabel}:*`);
+  lines.push(numbered(yellow));
+  if (bench.length > 0) {
+    lines.push("");
+    lines.push(`*Bench (${bench.length}):*`);
+    bench.forEach((a, i) => lines.push(`${i + 1}. ${a.user.name ?? "(unnamed)"}`));
+  }
+  lines.push("");
+  lines.push("See you tonight 🙌");
+  return lines.join("\n");
+}
+
 /** Date-only key for "daily X" idempotency (YYYY-MM-DD in London). */
 function londonDateKey(at: Date = new Date()): string {
   return new Intl.DateTimeFormat("en-CA", {
@@ -623,18 +663,25 @@ async function computeForMatch(
     const dayKey = londonDateKey(now);
     const isEvening = londonHour(now) >= 17 && londonHour(now) < 18;
     const beforeDeadline = now < m.attendanceDeadline;
-    const isUpcoming = m.status === "UPCOMING";
+    // Pre-match: any state where the match still needs people in the
+    // group thinking about it — covers UPCOMING (squad still forming),
+    // TEAMS_GENERATED, and TEAMS_PUBLISHED (lineup is locked but match
+    // hasn't kicked off yet). Completed/cancelled matches don't fire
+    // 5pm posts even though they're still in the scheduler window for
+    // MoM and rating-reminder purposes.
+    const isPrematch =
+      m.status === "UPCOMING" ||
+      m.status === "TEAMS_GENERATED" ||
+      m.status === "TEAMS_PUBLISHED";
 
     // Single shared key for the entire 17:00 evening slot. Whichever
     // branch fires first claims today; subsequent ticks see this key in
     // sentKeys and skip the whole block. Prevents the previous bug where
     // bench-thin firing at 17:04 didn't block unpaid-only firing at 17:09
-    // five minutes later. Also gated on isUpcoming so completed matches
-    // (still in the scheduler window for MoM/rating purposes) don't fire
-    // duplicate posts of their own.
+    // five minutes later.
     const eveningKey = `${matchId}:evening-update:${dayKey}`;
 
-    if (isEvening && isUpcoming && !sentKeys.has(eveningKey)) {
+    if (isEvening && isPrematch && !sentKeys.has(eveningKey)) {
       // Stop the unpaid-chase tail once we're in the final day before
       // kickoff. Whoever has paid has paid; ~5 reminders (Wed → Sun for
       // a Tue match) is enough. From the day-before-match onward, drop
@@ -656,10 +703,37 @@ async function computeForMatch(
         maxPlayers: m.maxPlayers,
       });
 
+      const isMatchDay = dayKey === matchDayKey;
+      const teamsReady = m.teamAssignments.length > 0;
+
       let text: string | null = null;
       let mentions: string[] | undefined;
 
-      if (beforeDeadline && need > 0) {
+      if (isMatchDay && teamsReady) {
+        // 2-pre. Match day with teams generated → SHOW THE TEAM
+        // LINEUPS instead of the squad roster. By 17:00 on match day
+        // people already know the squad is locked; what they actually
+        // want is "am I Red or Yellow tonight?". Bench list still
+        // shown so anyone on standby knows where they stand.
+        text = buildMatchDayTeamsBlock({
+          activity,
+          sport,
+          matchDate: m.date,
+          teamAssignments: m.teamAssignments,
+          bench,
+        });
+      } else if (isMatchDay && need === 0 && !teamsReady) {
+        // 2-pre-alt. Match day, full squad, but teams haven't been
+        // generated yet (LLM @-mention or admin button hasn't fired).
+        // Show the roster AND nudge somebody to trigger team
+        // generation so the next 17:00-window tick can show the
+        // lineup. Most ticks happen every 5 min so nudge is acted on
+        // quickly.
+        const intro =
+          `⚽ *Tonight at ${format(m.date, "HH:mm")}* — *${activity.name}* at ${activity.venue}\n\n` +
+          `Squad is locked. Say *@MatchTime generate teams* in the chat to lock in tonight's lineup 👇`;
+        text = `${intro}\n\n${rosterBlock}`;
+      } else if (beforeDeadline && need > 0) {
         // 2a. Short squad — chase + unpaid tail. Chase template (LLM
         // or fallback) produces its own numbered list; the
         // enforceCanonicalRoster post-processor on the analyze path
