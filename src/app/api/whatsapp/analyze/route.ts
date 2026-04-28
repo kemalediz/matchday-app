@@ -203,10 +203,37 @@ export async function POST(request: Request) {
 
   // 3. Execute verdicts sequentially (attendance writes are cheap and
   //    order matters for state-collapse correctness).
+  // Dedupe `generate_teams_request` within a batch — only the LAST one
+  // actually fires. If two players in the same batch both ask to
+  // generate teams, running both would emit two team posts that each
+  // ignore the other's pin requests. Better to honour the most recent
+  // request (which has fresher context) and silently drop the
+  // earlier ones to "noise" so they don't fire a second post.
+  let lastTeamsRequestIdx = -1;
+  for (let i = 0; i < verdicts.length; i++) {
+    if (verdicts[i].intent === "generate_teams_request") lastTeamsRequestIdx = i;
+  }
+
   for (let i = 0; i < fresh.length; i++) {
     const msg = fresh[i];
-    const verdict = verdicts[i];
+    let verdict = verdicts[i];
     const sender = senderById.get(msg.waMessageId)!;
+    if (
+      verdict.intent === "generate_teams_request" &&
+      i !== lastTeamsRequestIdx
+    ) {
+      // Earlier duplicate generate-teams request — react ⚽ but don't
+      // fire a second post. The last one in the batch handles team
+      // generation for everyone.
+      verdict = {
+        ...verdict,
+        intent: "noise",
+        reply: null,
+        react: "⚽",
+        teamOverrides: null,
+        includeNames: null,
+      };
+    }
     try {
       const { react, reply } = await executeVerdict({
         verdict,
@@ -219,15 +246,20 @@ export async function POST(request: Request) {
       // canonical roster — the LLM has been observed to reorder/omit
       // players (especially provisional ones), so any numbered roster
       // in the reply gets overwritten with the truth from the DB.
+      // EXCEPT for generate_teams_request: that reply intentionally
+      // contains TWO numbered team lists (Red + Yellow) which would
+      // be wrecked by the canonical-roster overwrite. Skip it.
       let cleanReply = reply;
       if (cleanReply && nextMatchForReply) {
         cleanReply = enforceProximity(cleanReply, nextMatchForReply.date);
-        cleanReply = enforceCanonicalRoster(cleanReply, {
-          confirmed: nextMatchForReply.attendances.map(
-            (a) => a.user.name ?? "(unnamed)",
-          ),
-          maxPlayers: nextMatchForReply.maxPlayers,
-        });
+        if (verdict.intent !== "generate_teams_request") {
+          cleanReply = enforceCanonicalRoster(cleanReply, {
+            confirmed: nextMatchForReply.attendances.map(
+              (a) => a.user.name ?? "(unnamed)",
+            ),
+            maxPlayers: nextMatchForReply.maxPlayers,
+          });
+        }
       }
       await recordAnalysis({
         orgId: org.id,

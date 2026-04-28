@@ -695,13 +695,23 @@ export async function composeChaseText(input: {
   }
 }
 
+/** YYYY-MM-DD key in London time. Used for calendar-day proximity. */
+function londonDateKey(at: Date): string {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Europe/London",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(at);
+  return parts; // en-CA formats as YYYY-MM-DD
+}
+
 function computeProximity(date: Date): {
   proximity: "past" | "tonight" | "tomorrow" | "this-week" | "future";
   rosterHeader: string;
   friendlyDay: string; // "tonight" | "tomorrow" | "on Tue 28 Apr"
 } {
   const hoursToKickoff = (date.getTime() - Date.now()) / (1000 * 60 * 60);
-  const daysToKickoff = Math.floor(hoursToKickoff / 24);
   const kickoffLocal = new Intl.DateTimeFormat("en-GB", {
     timeZone: "Europe/London",
     weekday: "short",
@@ -714,16 +724,32 @@ function computeProximity(date: Date): {
     .format(date)
     .replace(/,/g, "");
   const dayPart = kickoffLocal.split(" at ")[0];
-  const proximity =
-    hoursToKickoff < 0
-      ? "past"
-      : hoursToKickoff <= 6
-      ? "tonight"
-      : hoursToKickoff <= 24
-      ? "tomorrow"
-      : daysToKickoff <= 7
-      ? "this-week"
-      : "future";
+
+  // Proximity bucket is calendar-day based, not raw hours: "tonight"
+  // means the match is later today (London), "tomorrow" means
+  // calendar-tomorrow, etc. Hours-only thresholds got it wrong at
+  // 14:26 BST on match day (>6h to 21:30 → bucketed as "tomorrow"
+  // even though the match was that same evening).
+  const todayKey = londonDateKey(new Date());
+  const matchDayKey = londonDateKey(date);
+  const oneDayLaterKey = londonDateKey(
+    new Date(Date.now() + 24 * 60 * 60 * 1000),
+  );
+  const sevenDaysLaterKey = londonDateKey(
+    new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+  );
+  let proximity: "past" | "tonight" | "tomorrow" | "this-week" | "future";
+  if (hoursToKickoff < 0) {
+    proximity = "past";
+  } else if (matchDayKey === todayKey) {
+    proximity = "tonight";
+  } else if (matchDayKey === oneDayLaterKey) {
+    proximity = "tomorrow";
+  } else if (matchDayKey <= sevenDaysLaterKey) {
+    proximity = "this-week";
+  } else {
+    proximity = "future";
+  }
   const rosterHeader = {
     past: "*Squad:*",
     tonight: "*Playing tonight:*",
