@@ -26,32 +26,53 @@ export interface BalanceOptions {
   perTeam: number;
   strategy: BalancingStrategy;
   composition?: Record<string, number>; // per-team target, used by position-aware
+  /** Optional: pin specific players to specific teams. Honoured even
+   *  when it makes the balance worse — admin intent overrides the
+   *  optimiser. Used by the LLM `generate teams, put me on Red`
+   *  pathway and by the admin "swap X to RED" UI. Hill-climb skips
+   *  swaps that would move a pinned player off their team. */
+  pinnedToTeam?: Record<string, "RED" | "YELLOW">;
 }
 
 export function balanceTeams(opts: BalanceOptions): TeamResult {
-  const { players, perTeam, strategy, composition } = opts;
+  const { players, perTeam, strategy, composition, pinnedToTeam } = opts;
 
   if (players.length < perTeam * 2) {
     throw new Error(`Need at least ${perTeam * 2} players, got ${players.length}`);
   }
 
   if (strategy === "position-aware" && composition) {
-    return balancePositionAware(players, perTeam, composition);
+    return balancePositionAware(players, perTeam, composition, pinnedToTeam ?? {});
   }
   // "rating-only" and (for now) "role-quota" fall through to rating-only.
-  return balanceRatingOnly(players, perTeam);
+  return balanceRatingOnly(players, perTeam, pinnedToTeam ?? {});
 }
 
 // ─────────────────────────── rating-only ───────────────────────────
 
-function balanceRatingOnly(players: PlayerWithRating[], perTeam: number): TeamResult {
+function balanceRatingOnly(
+  players: PlayerWithRating[],
+  perTeam: number,
+  pinnedToTeam: Record<string, "RED" | "YELLOW">,
+): TeamResult {
   const selected = players.slice(0, perTeam * 2);
-  const sorted = [...selected].sort((a, b) => b.rating - a.rating);
 
   const red: PlayerWithRating[] = [];
   const yellow: PlayerWithRating[] = [];
 
-  for (const player of sorted) {
+  // Step 1: place pinned players first, capped at perTeam per side.
+  for (const p of selected) {
+    if (pinnedToTeam[p.id] === "RED" && red.length < perTeam) red.push(p);
+    else if (pinnedToTeam[p.id] === "YELLOW" && yellow.length < perTeam) yellow.push(p);
+  }
+
+  // Step 2: snake-draft remaining (rating-desc) into whichever team
+  // currently has the lower total rating, respecting per-team capacity.
+  const remaining = selected
+    .filter((p) => !pinnedToTeam[p.id])
+    .sort((a, b) => b.rating - a.rating);
+
+  for (const player of remaining) {
     if (red.length >= perTeam) yellow.push(player);
     else if (yellow.length >= perTeam) red.push(player);
     else if (teamRating(red) <= teamRating(yellow)) red.push(player);
@@ -71,16 +92,39 @@ function balancePositionAware(
   players: PlayerWithRating[],
   perTeam: number,
   composition: Record<string, number>,
+  pinnedToTeam: Record<string, "RED" | "YELLOW">,
 ): TeamResult {
   const selected = players.slice(0, perTeam * 2);
   const positionKeys = Object.keys(composition);
 
-  const sorted = [...selected].sort((a, b) => b.rating - a.rating);
   const red: PlayerWithRating[] = [];
   const yellow: PlayerWithRating[] = [];
   const redNeeds: Record<string, number> = { ...composition };
   const yellowNeeds: Record<string, number> = { ...composition };
   const assigned = new Map<string, string>();
+
+  // Step 1: place pinned players first, picking each one's best
+  // position from their pinned team's remaining needs.
+  for (const p of selected) {
+    const pin = pinnedToTeam[p.id];
+    if (!pin) continue;
+    if (pin === "RED" && red.length < perTeam) {
+      red.push(p);
+      const pos = pickPositionFor(p, redNeeds, positionKeys);
+      assigned.set(p.id, pos);
+      redNeeds[pos] = Math.max(0, (redNeeds[pos] ?? 0) - 1);
+    } else if (pin === "YELLOW" && yellow.length < perTeam) {
+      yellow.push(p);
+      const pos = pickPositionFor(p, yellowNeeds, positionKeys);
+      assigned.set(p.id, pos);
+      yellowNeeds[pos] = Math.max(0, (yellowNeeds[pos] ?? 0) - 1);
+    }
+  }
+
+  // Step 2: snake-draft remaining players by rating-desc.
+  const sorted = selected
+    .filter((p) => !pinnedToTeam[p.id])
+    .sort((a, b) => b.rating - a.rating);
 
   for (const p of sorted) {
     let team: "red" | "yellow";
@@ -100,9 +144,15 @@ function balancePositionAware(
 
   let bestCost = costFor(red, yellow, assigned, positionKeys);
 
+  // Step 3: hill-climb. Skip any candidate swap that would move a
+  // pinned player to the wrong side — admin intent overrides the
+  // optimiser. If both arrays are entirely pinned, no swaps possible
+  // (the loop noops).
+  const isPinned = (p: PlayerWithRating) => pinnedToTeam[p.id] !== undefined;
   for (let i = 0; i < 1000; i++) {
     const ri = Math.floor(Math.random() * red.length);
     const yi = Math.floor(Math.random() * yellow.length);
+    if (isPinned(red[ri]) || isPinned(yellow[yi])) continue;
 
     [red[ri], yellow[yi]] = [yellow[yi], red[ri]];
 

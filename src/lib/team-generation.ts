@@ -19,7 +19,18 @@ export type GenerateTeamsResult =
   | { ok: true; groupPost: string; matchId: string }
   | { ok: false; reason: string };
 
-export async function generateTeamsForMatch(matchId: string): Promise<GenerateTeamsResult> {
+export interface GenerateTeamsOptions {
+  /** Pin specific userIds to specific teams. Honoured by the
+   *  balancer even when it makes the rating-diff worse — admin
+   *  intent overrides the optimiser. Used by the LLM "put me on
+   *  Red" pathway. */
+  pinnedToTeam?: Record<string, "RED" | "YELLOW">;
+}
+
+export async function generateTeamsForMatch(
+  matchId: string,
+  opts: GenerateTeamsOptions = {},
+): Promise<GenerateTeamsResult> {
   const match = await db.match.findUnique({
     where: { id: matchId },
     include: {
@@ -92,6 +103,7 @@ export async function generateTeamsForMatch(matchId: string): Promise<GenerateTe
     perTeam,
     strategy: sport.balancingStrategy as BalancingStrategy,
     composition: composition ?? undefined,
+    pinnedToTeam: opts.pinnedToTeam,
   });
 
   await db.teamAssignment.deleteMany({ where: { matchId } });

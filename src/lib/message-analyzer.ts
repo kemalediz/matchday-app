@@ -81,6 +81,13 @@ export interface AnalysisVerdict {
    *  Ehtisham as IN"). Server resolves names against the current match
    *  roster; unmatched names are ignored. */
   includeNames: string[] | null;
+  /** Populated when intent = "generate_teams_request" and the request
+   *  pins a specific player to a specific team ("generate teams and
+   *  put me on Red", "Wasim wants to be Yellow tonight"). Each entry
+   *  is a (name, team) pair; team is the canonical "RED" | "YELLOW"
+   *  enum value, NOT the org's display label. Server resolves names
+   *  to userIds and feeds the balancer a pinnedToTeam map. */
+  teamOverrides: Array<{ name: string; team: "RED" | "YELLOW" }> | null;
   /** Third-party attendance registrations.
    *  Populated when the sender signs up / drops out OTHER people on their
    *  behalf ("my dad Najib is also in", "Ibrahim can't make it tonight",
@@ -115,6 +122,7 @@ Output schema:
       "scoreRed": <number> | null,
       "scoreYellow": <number> | null,
       "includeNames": [<string>, ...] | null,
+      "teamOverrides": [{"name": "<string>", "team": "RED" | "YELLOW"}, ...] | null,
       "registerFor": [{"name": "<string>", "action": "IN" | "OUT"}, ...] | null,
       "reasoning": "<short internal explanation>"
     }
@@ -145,6 +153,10 @@ Intent rules:
      "@M Time generate teams and consider Ibrahim and Ehtisham as IN"  → includeNames: ["Ibrahim", "Ehtisham"]
      "teams please, count Baki in"                                     → includeNames: ["Baki"]
      "generate teams"                                                   → includeNames: []
+  → If the message PINS specific players to specific teams ("put me on Red", "Wasim on Yellow", "stick Idris in Red, I've got the bib"), extract these into teamOverrides as {name, team}. Map any colour the user says to the canonical team enum: the first team-label in the org's sport (e.g. "Red") → "RED", the second (e.g. "Yellow") → "YELLOW". Use first names only. The author can refer to themselves with "me/myself/I" — use their first name from the sender hint. Examples:
+     "generate teams but put myself in Red, I have a red bib"   → teamOverrides: [{"name": "<author-first>", "team": "RED"}]
+     "teams please, Wasim on Yellow with me on Yellow"          → teamOverrides: [{"name": "Wasim", "team": "YELLOW"}, {"name": "<author-first>", "team": "YELLOW"}]
+     "generate teams"                                            → teamOverrides: []
   → Only classify as this intent if the request is CLEAR. If the person is just wondering who'd be on which team ("who'd be in red?"), that's "question", not this.
 - "bring_guests_vague": Someone commits to bringing additional players but DOESN'T name them ("two of my guys can play next week", "I'll bring 2 friends", "my mate wants to come", "can I bring someone?").
   → registerAttendance: null (can't register without names). registerFor: null. react: null. reply: short, warm question asking for the names so we can add them. Format the reply as: "thanks @<firstName>, could you share their names so I can add them to the list? 🙌". Ground the author's first name from the Match Context/sender. Use their display-name first token, no fabrication.
@@ -924,6 +936,7 @@ function offlineVerdict(waMessageId: string, reason: string): AnalysisVerdict {
     scoreRed: null,
     scoreYellow: null,
     includeNames: null,
+    teamOverrides: null,
     registerFor: null,
     reasoning: reason,
   };
@@ -1008,6 +1021,18 @@ function normaliseVerdict(waMessageId: string, raw: Record<string, unknown>): An
           .filter((n): n is string => typeof n === "string" && n.trim().length > 0)
           .map((n) => n.trim())
       : null;
+  const teamOverrides = Array.isArray(raw.teamOverrides)
+    ? (raw.teamOverrides as unknown[])
+        .map((e) => {
+          if (!e || typeof e !== "object") return null;
+          const o = e as Record<string, unknown>;
+          const name = typeof o.name === "string" ? o.name.trim() : "";
+          const team = o.team === "RED" || o.team === "YELLOW" ? o.team : null;
+          if (!name || !team) return null;
+          return { name, team };
+        })
+        .filter((e): e is { name: string; team: "RED" | "YELLOW" } => e !== null)
+    : null;
   const registerFor = Array.isArray(raw.registerFor)
     ? (raw.registerFor as unknown[])
         .map((e) => {
@@ -1034,6 +1059,7 @@ function normaliseVerdict(waMessageId: string, raw: Record<string, unknown>): An
       scoreRed: null,
       scoreYellow: null,
       includeNames: null,
+      teamOverrides: null,
       registerFor: null,
       reasoning: `[low-confidence downgrade] ${reasoning}`,
     };
@@ -1049,6 +1075,7 @@ function normaliseVerdict(waMessageId: string, raw: Record<string, unknown>): An
     scoreRed,
     scoreYellow,
     includeNames,
+    teamOverrides: teamOverrides && teamOverrides.length > 0 ? teamOverrides : null,
     registerFor: registerFor && registerFor.length > 0 ? registerFor : null,
     reasoning,
   };

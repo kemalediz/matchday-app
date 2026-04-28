@@ -944,14 +944,62 @@ async function executeVerdict(args: {
           }
         }
 
-        const result = await generateTeamsForMatch(match.id);
+        // Resolve per-team pin requests ("put me on Red"). Fuzzy-match
+        // each name against the (now possibly updated) roster; ignore
+        // unmatched. The author refers to themselves as "me/myself/I"
+        // — Claude is supposed to substitute their first name in the
+        // verdict, but if any literal "me"-style placeholder slips
+        // through we rebind it here using the resolved sender.
+        const pinnedToTeam: Record<string, "RED" | "YELLOW"> = {};
+        const pinnedLog: string[] = [];
+        const pinnedUnmatched: string[] = [];
+        if (verdict.teamOverrides && verdict.teamOverrides.length > 0) {
+          const roster = await db.attendance.findMany({
+            where: { matchId: match.id, status: "CONFIRMED" },
+            include: { user: { select: { id: true, name: true } } },
+          });
+          const norm = (s: string) =>
+            s.trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+          const SELF = new Set(["me", "myself", "i"]);
+          const senderFirst =
+            user?.name?.trim().split(/\s+/)[0]?.toLowerCase() ?? null;
+          for (const o of verdict.teamOverrides) {
+            const cleaned = o.name.trim();
+            const lookup = SELF.has(cleaned.toLowerCase()) && senderFirst
+              ? senderFirst
+              : cleaned;
+            const target = roster.find((a) => {
+              if (!a.user.name) return false;
+              const u = norm(a.user.name);
+              const q = norm(lookup);
+              return u === q || u.startsWith(`${q} `) || u.split(" ")[0] === q;
+            });
+            if (!target) {
+              pinnedUnmatched.push(cleaned);
+              continue;
+            }
+            pinnedToTeam[target.user.id] = o.team;
+            pinnedLog.push(`${target.user.name ?? cleaned} → ${o.team}`);
+          }
+        }
+
+        const result = await generateTeamsForMatch(match.id, {
+          pinnedToTeam:
+            Object.keys(pinnedToTeam).length > 0 ? pinnedToTeam : undefined,
+        });
         if (result.ok) {
           let text = result.groupPost;
           if (includedLog.length > 0) {
             text = `_Including ${includedLog.join(", ")} as CONFIRMED per the request._\n\n${text}`;
           }
+          if (pinnedLog.length > 0) {
+            text = `_Pinned per the request: ${pinnedLog.join(", ")}._\n\n${text}`;
+          }
           if (unmatchedLog.length > 0) {
             text += `\n\n_(couldn't find ${unmatchedLog.join(", ")} in the roster — ignored)_`;
+          }
+          if (pinnedUnmatched.length > 0) {
+            text += `\n\n_(couldn't find ${pinnedUnmatched.join(", ")} for team pinning — ignored)_`;
           }
           finalReply = text;
           finalReact = "⚽";
