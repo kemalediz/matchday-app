@@ -9,6 +9,7 @@ function LoginForm() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const callbackUrl = searchParams.get("callbackUrl") || "/";
+  const claimed = searchParams.get("claimed") === "1";
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -37,6 +38,12 @@ function LoginForm() {
           <h1 className="text-2xl font-bold text-slate-800">MatchTime</h1>
           <p className="text-sm text-slate-500 mt-1">Sign in to your account</p>
         </div>
+
+        {claimed && (
+          <div className="mb-5 p-3 bg-green-50 border border-green-200 rounded-lg text-sm text-green-800">
+            ✓ Player record linked. Sign in again to access your stats.
+          </div>
+        )}
 
         <form onSubmit={handleSubmit} className="space-y-4">
           <div>

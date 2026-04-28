@@ -40,7 +40,14 @@ export default async function DashboardPage() {
   if (!session?.user?.id) return <LandingPage />;
 
   const user = await db.user.findUnique({ where: { id: session.user.id } });
-  if (!user?.onboarded) redirect("/welcome");
+  // First-time sign-ins (Google / email) without a verified phone go
+  // through /claim, which lets them link to an existing player record
+  // by phone OTP. /claim has a "skip — I'm starting a new club" link
+  // back to /welcome for fresh admins. Once they've either claimed or
+  // skipped, /welcome takes over to collect name + mark onboarded.
+  if (!user?.onboarded) {
+    redirect(user?.phoneNumber ? "/welcome" : "/claim");
+  }
 
   const membership = await getUserOrg(session.user.id);
   if (!membership) redirect("/create-org");
