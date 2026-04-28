@@ -670,6 +670,24 @@ async function computeForMatch(
       m.status === "TEAMS_GENERATED" ||
       m.status === "TEAMS_PUBLISHED";
 
+    // "Is this the soonest unplayed match in the activity?" — same gate
+    // as announce-match. When today's match is still unplayed and next
+    // week's match has been auto-created, only the current week's
+    // 5pm post is relevant. Without this, both matches fire their own
+    // evening-update and the group sees a "next week is empty, need
+    // 14" chase at 17:00 the same day as today's actual match.
+    const earlierUnplayedCount = isPrematch
+      ? await db.match.count({
+          where: {
+            activityId: activity.id,
+            isHistorical: false,
+            status: { in: ["UPCOMING", "TEAMS_GENERATED", "TEAMS_PUBLISHED"] },
+            date: { lt: m.date },
+          },
+        })
+      : 1;
+    const isNextUpcoming = earlierUnplayedCount === 0;
+
     // Single shared key for the entire 17:00 evening slot. Whichever
     // branch fires first claims today; subsequent ticks see this key in
     // sentKeys and skip the whole block. Prevents the previous bug where
@@ -677,7 +695,7 @@ async function computeForMatch(
     // five minutes later.
     const eveningKey = `${matchId}:evening-update:${dayKey}`;
 
-    if (isEvening && isPrematch && !sentKeys.has(eveningKey)) {
+    if (isEvening && isPrematch && isNextUpcoming && !sentKeys.has(eveningKey)) {
       // Stop the unpaid-chase tail once we're in the final day before
       // kickoff. Whoever has paid has paid; ~5 reminders (Wed → Sun for
       // a Tue match) is enough. From the day-before-match onward, drop
