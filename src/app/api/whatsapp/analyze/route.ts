@@ -249,14 +249,21 @@ export async function POST(request: Request) {
       // EXCEPT for generate_teams_request: that reply intentionally
       // contains TWO numbered team lists (Red + Yellow) which would
       // be wrecked by the canonical-roster overwrite. Skip it.
+      // Re-fetch the match state HERE (not before the loop) so any
+      // attendance change just made by the prior verdicts in this
+      // batch is reflected — otherwise canonical-roster patches the
+      // count back to the stale pre-loop value.
       let cleanReply = reply;
       if (cleanReply && nextMatchForReply) {
+        const freshAttendances = await db.attendance.findMany({
+          where: { matchId: nextMatchForReply.id, status: "CONFIRMED" },
+          include: { user: { select: { name: true } } },
+          orderBy: { position: "asc" },
+        });
         cleanReply = enforceProximity(cleanReply, nextMatchForReply.date);
         if (verdict.intent !== "generate_teams_request") {
           cleanReply = enforceCanonicalRoster(cleanReply, {
-            confirmed: nextMatchForReply.attendances.map(
-              (a) => a.user.name ?? "(unnamed)",
-            ),
+            confirmed: freshAttendances.map((a) => a.user.name ?? "(unnamed)"),
             maxPlayers: nextMatchForReply.maxPlayers,
           });
         }
@@ -752,6 +759,30 @@ async function executeVerdict(args: {
       orderBy: { date: "asc" },
     });
     if (matchForOrg) {
+      // Pre-check OUT requests: if the sender doesn't actually have a
+      // CONFIRMED/BENCH attendance row for this match, there's nothing
+      // to drop — but Claude's reply (composed before this server-side
+      // check) typically reads "Squad is now (N-1)/M — we need one
+      // more". Posting that text when no drop actually happened is
+      // misleading, AND when paired with enforceCanonicalRoster's
+      // count-patcher (which rewrites the count to the true DB value)
+      // produces nonsense like "14/14 — we need one more". Suppress
+      // the reply + react and let the bot stay silent on these.
+      if (verdict.registerAttendance === "OUT") {
+        const existingAtt = await db.attendance.findFirst({
+          where: {
+            userId: user.id,
+            matchId: matchForOrg.id,
+            status: { in: ["CONFIRMED", "BENCH"] },
+          },
+          select: { id: true },
+        });
+        if (!existingAtt) {
+          finalReact = null;
+          finalReply = null;
+          return { react: finalReact, reply: finalReply };
+        }
+      }
       try {
         if (verdict.registerAttendance === "IN") {
           const result = await registerAttendance(user.id, matchForOrg.id);
