@@ -561,11 +561,45 @@ async function computeForMatch(
   const need = Math.max(0, maxPlayers - confirmed.length);
 
   // ── 1. Announce the match ─────────────────────────────────────────────
-  //     Fire as soon as the match exists (we create it ~7 days ahead; the
-  //     announcement should just go out promptly).
+  //     Two gates beyond "this match exists":
+  //
+  //     (a) Time-of-day window — only fire 09:00–12:59 London. The
+  //         generate-matches cron now runs daily at 00:00 UTC = 01:00 BST,
+  //         so without this gate the announcement landed at ~01:20 BST
+  //         the moment the new match row was created. Middle-of-night
+  //         posts wake people up.
+  //     (b) "Is this actually the next match in this activity?" — when
+  //         today's match is still UPCOMING/TEAMS_GENERATED/TEAMS_PUBLISHED
+  //         and next week's match has just been created, only the
+  //         current week's announcement should ever be live. Once
+  //         today's match flips to COMPLETED the next morning's tick
+  //         picks up the future one. Effect: the announcement always
+  //         reads "next match" from the group's perspective, never
+  //         "next-but-one".
   {
     const key = `${matchId}:announce-match`;
-    if (!sentKeys.has(key) && m.status === "UPCOMING" && hoursUntilMatch > 24) {
+    const lh = londonHour(now);
+    const inAnnounceWindow = lh >= 9 && lh < 13;
+    const earlierUnplayedCount =
+      m.status === "UPCOMING" && hoursUntilMatch > 24
+        ? await db.match.count({
+            where: {
+              activityId: activity.id,
+              isHistorical: false,
+              status: { in: ["UPCOMING", "TEAMS_GENERATED", "TEAMS_PUBLISHED"] },
+              date: { lt: m.date },
+            },
+          })
+        : 1; // any non-zero short-circuits the gate below
+    const isNextUpcoming = earlierUnplayedCount === 0;
+
+    if (
+      !sentKeys.has(key) &&
+      m.status === "UPCOMING" &&
+      hoursUntilMatch > 24 &&
+      inAnnounceWindow &&
+      isNextUpcoming
+    ) {
       const dateStr = format(m.date, "EEEE d MMMM 'at' HH:mm");
       out.push({
         kind: "group-message",
