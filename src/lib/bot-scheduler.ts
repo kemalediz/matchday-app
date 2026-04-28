@@ -819,6 +819,23 @@ async function computeForMatch(
     const user = m.attendances.find((a) => a.userId === bc.userId)?.user;
     if (!user?.phoneNumber) continue;
 
+    // If we know which player is being replaced AND that player had a
+    // TeamAssignment, tell the bencher which team they'd join and who
+    // they're standing in for. Falls back to the generic "a slot just
+    // opened" wording when context is missing (e.g. drop happened
+    // before teams were generated, or legacy PBC row from before the
+    // replacingUserId field shipped).
+    let context = `for *${activity.name}* tonight`;
+    if (bc.replacingUserId) {
+      const replacing = m.attendances.find((a) => a.userId === bc.replacingUserId)?.user;
+      const droppedTA = m.teamAssignments.find((t) => t.userId === bc.replacingUserId);
+      if (replacing && droppedTA) {
+        const teamLabels = sport.teamLabels as [string, string];
+        const teamLabel = droppedTA.team === "RED" ? teamLabels[0] : teamLabels[1];
+        context = `on *${teamLabel}* (replacing ${replacing.name ?? "—"}) for *${activity.name}* tonight`;
+      }
+    }
+
     out.push({
       kind: "bench-prompt",
       key,
@@ -826,7 +843,7 @@ async function computeForMatch(
       userId: bc.userId,
       phone: user.phoneNumber.replace(/^\+/, ""),
       text:
-        `🎟 @${user.name ?? ""} a slot just opened for *${activity.name}* tonight. ` +
+        `🎟 @${user.name ?? ""} a slot just opened ${context}. ` +
         `React 👍 to confirm, 👎 to pass. You've got 2h.`,
     });
   }
@@ -1319,6 +1336,9 @@ export async function sweepExpiredBenchConfirmations(orgId: string): Promise<voi
         data: {
           matchId: bc.matchId,
           userId: nextBench.userId,
+          // Preserve the original dropped player's id — the next
+          // bench user is being offered the SAME slot, not a new one.
+          replacingUserId: bc.replacingUserId,
           expiresAt: new Date(now.getTime() + 2 * 60 * 60 * 1000),
         },
       });
@@ -1426,6 +1446,7 @@ export async function queueSlotEmojiRefresh(matchId: string): Promise<void> {
 
 export async function requestBenchConfirmationOnDrop(
   matchId: string,
+  replacingUserId?: string | null,
 ): Promise<void> {
   const match = await db.match.findUnique({
     where: { id: matchId },
@@ -1448,6 +1469,7 @@ export async function requestBenchConfirmationOnDrop(
     data: {
       matchId,
       userId: firstBench.userId,
+      replacingUserId: replacingUserId ?? null,
       expiresAt: new Date(Date.now() + 2 * 60 * 60 * 1000),
     },
   });

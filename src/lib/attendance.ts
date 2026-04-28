@@ -101,7 +101,11 @@ export async function cancelAttendance(userId: string, matchId: string) {
   // PendingBenchConfirmation; subsequent /due-posts cycles post the prompt
   // and handle confirmation/timeout.
   if (wasConfirmed) {
-    await requestBenchConfirmationOnDrop(matchId);
+    // Pass the dropped user's id so the bench-prompt knows which team
+    // slot is being filled. On 👍 the reaction handler will transfer
+    // this user's TeamAssignment to the bench player and announce the
+    // swap to the group.
+    await requestBenchConfirmationOnDrop(matchId, userId);
     // Slots have shifted up — queue retroactive react updates so
     // every confirmed player's IN message shows their NEW slot emoji.
     // Idempotent and bounded; bot picks them up on its next 5-min tick.

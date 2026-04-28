@@ -359,6 +359,14 @@ model PendingBenchConfirmation {
   expiresAt   DateTime
   resolvedAt  DateTime?
   outcome     String?                // "confirmed" | "declined" | "expired"
+  /// The CONFIRMED player whose drop opened this slot. When this bench
+  /// user 👍s, their TeamAssignment takes the dropped player's slot
+  /// (the dropped TA row is deleted). On 👎/timeout, the chain to the
+  /// next bench player preserves this reference so they're offered
+  /// the same slot. Nullable: legacy rows + edge cases (drop happened
+  /// before teams were generated) fall back to the old behaviour
+  /// (attendance-only confirmation, no team swap, no announcement).
+  replacingUserId String?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
