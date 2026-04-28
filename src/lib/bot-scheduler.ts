@@ -302,8 +302,10 @@ function buildSquadRosterBlock(args: {
 /**
  * Match-day 17:00 view when teams have been generated. Replaces the
  * flat squad roster with a Red vs Yellow lineup so each player can
- * scan and confirm what side they're on tonight. Bench remains
- * separately listed for any standby. No "objections / swap X Y"
+ * scan and confirm what side they're on tonight. Bench is
+ * intentionally NOT listed — by match day the bench player isn't
+ * playing unless someone drops in the next few hours, and naming
+ * them on the lineup post is just noise. No "objections / swap X Y"
  * footer here — that's already in the team-publish post that fired
  * when teams were generated; this is a daily reminder, not a fresh
  * announcement.
@@ -313,30 +315,24 @@ function buildMatchDayTeamsBlock(args: {
   sport: { teamLabels: string[] };
   matchDate: Date;
   teamAssignments: { team: "RED" | "YELLOW"; user: { name: string | null } }[];
-  bench: { user: { name: string | null } }[];
 }): string {
-  const { activity, sport, matchDate, teamAssignments, bench } = args;
+  const { activity, sport, matchDate, teamAssignments } = args;
   const [redLabel, yellowLabel] = sport.teamLabels as [string, string];
   const red = teamAssignments.filter((t) => t.team === "RED");
   const yellow = teamAssignments.filter((t) => t.team === "YELLOW");
   const numbered = (arr: typeof red) =>
     arr.map((t, i) => `${i + 1}. ${t.user.name ?? "(unnamed)"}`).join("\n");
-  const lines: string[] = [];
-  lines.push(`⚽ *Tonight at ${format(matchDate, "HH:mm")}* — *${activity.name}* at ${activity.venue}`);
-  lines.push("");
-  lines.push(`*${redLabel}:*`);
-  lines.push(numbered(red));
-  lines.push("");
-  lines.push(`*${yellowLabel}:*`);
-  lines.push(numbered(yellow));
-  if (bench.length > 0) {
-    lines.push("");
-    lines.push(`*Bench (${bench.length}):*`);
-    bench.forEach((a, i) => lines.push(`${i + 1}. ${a.user.name ?? "(unnamed)"}`));
-  }
-  lines.push("");
-  lines.push("See you tonight 🙌");
-  return lines.join("\n");
+  return [
+    `⚽ *Tonight at ${format(matchDate, "HH:mm")}* — *${activity.name}* at ${activity.venue}`,
+    ``,
+    `*${redLabel}:*`,
+    numbered(red),
+    ``,
+    `*${yellowLabel}:*`,
+    numbered(yellow),
+    ``,
+    `See you tonight 🙌`,
+  ].join("\n");
 }
 
 /** Date-only key for "daily X" idempotency (YYYY-MM-DD in London). */
@@ -713,14 +709,14 @@ async function computeForMatch(
         // 2-pre. Match day with teams generated → SHOW THE TEAM
         // LINEUPS instead of the squad roster. By 17:00 on match day
         // people already know the squad is locked; what they actually
-        // want is "am I Red or Yellow tonight?". Bench list still
-        // shown so anyone on standby knows where they stand.
+        // want is "am I Red or Yellow tonight?". Bench is omitted on
+        // purpose — they're not playing unless someone drops, and
+        // naming them on the lineup post is unnecessary noise.
         text = buildMatchDayTeamsBlock({
           activity,
           sport,
           matchDate: m.date,
           teamAssignments: m.teamAssignments,
-          bench,
         });
       } else if (isMatchDay && need === 0 && !teamsReady) {
         // 2-pre-alt. Match day, full squad, but teams haven't been
