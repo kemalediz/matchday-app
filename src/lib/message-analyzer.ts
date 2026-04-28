@@ -130,7 +130,9 @@ Output schema:
 }
 
 Intent rules:
-- "in": Clearly joining the match ("IN", "I'm in", "count me in", "I'll play", "yes playing").
+- "in": Clearly joining the match — either confirmed slot or bench standby. Patterns:
+  • Direct IN: "IN", "I'm in", "count me in", "I'll play", "yes playing", "add me", "put me down".
+  • Bench self-declaration (sender knows squad is full and offers to stand by): "Bench: <their-own-name>", "I'll bench tonight", "happy to bench", "put me on bench", "I'll be on the bench", "add me to the bench", "stick me on bench". These are still IN — the server's capacity logic decides confirmed vs bench based on current squad count, so always emit registerAttendance:"IN". The "Bench:" prefix specifically followed by the sender's own first/display name is the bot's reply format, but a player echoing it back is offering themselves; treat it as IN.
   → registerAttendance: "IN". react: "👍" — ALWAYS the literal thumbs-up, never a slot-number keycap. The SERVER computes the correct slot emoji (1️⃣–🔟 / ✅ / 🪑) after writing attendance and overrides your react. Do NOT try to count slots yourself — you'll be wrong about who's already counted.
 - "out": Dropping out without asking for cover ("OUT", "can't make it", "not playing tonight", "sorry guys, work").
   → registerAttendance: "OUT". react: "👋".
