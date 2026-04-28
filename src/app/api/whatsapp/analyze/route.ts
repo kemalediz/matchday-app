@@ -406,6 +406,26 @@ async function resolveSender(orgId: string, msg: InboundMessage): Promise<Resolv
       );
       return { userId: null, name: pushname, phone: null };
     }
+
+    // Alias lookup. Admin merges populate UserAlias rows (Nunu →
+    // Elnur Mammadov, etc.) so the next time the same pushname
+    // arrives we resolve to the real user instead of creating
+    // another ghost. Letter-overlap-based fuzzy could never bridge
+    // "Nunu" → "Elnur" — admin curation is the right tool for
+    // nicknames + privacy-mode pushnames.
+    const aliasKey = norm(pushname);
+    if (aliasKey.length >= 2) {
+      const alias = await db.userAlias.findUnique({
+        where: { orgId_alias: { orgId, alias: aliasKey } },
+      });
+      if (alias) {
+        const m = candidates.find((c) => c.userId === alias.userId);
+        if (m) {
+          if (m.leftAt) await restoreMembership(m.id, m.user.name);
+          return { userId: m.user.id, name: m.user.name, phone: null };
+        }
+      }
+    }
   }
   // Auto-create a provisional member when we couldn't match.
   //   Rationale: the message came from the org's monitored WhatsApp
@@ -489,6 +509,23 @@ async function resolveOrProvisionByName(
       `[analyze] third-party name "${name}" is ambiguous in org ${orgId} (${firstNameMatches.length} candidates). Skipping registration.`,
     );
     return null;
+  }
+
+  // 1c. Alias lookup — admin-curated nickname → user mapping. Same
+  //     reason as resolveSender: covers "Nunu" → Elnur, "Mike" →
+  //     Michael Allen, etc. that fuzzy can't bridge.
+  const aliasKey = norm(name);
+  if (aliasKey.length >= 2) {
+    const alias = await db.userAlias.findUnique({
+      where: { orgId_alias: { orgId, alias: aliasKey } },
+    });
+    if (alias) {
+      const m = candidates.find((c) => c.userId === alias.userId);
+      if (m) {
+        if (m.leftAt) await restoreMembership(m.id, m.user.name);
+        return { userId: m.user.id, name: m.user.name };
+      }
+    }
   }
 
   // 2. No unique match and no ambiguity → provision. No phone known (third party).

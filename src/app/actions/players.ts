@@ -310,6 +310,39 @@ export async function mergePlayers(
       data: { authorUserId: keepUserId },
     });
 
+    // 8b. Save the dropped user's display name as a UserAlias for
+    //     the kept user, scoped to this org. This is the heart of
+    //     the "stop the same ghost re-appearing" fix: next time a
+    //     message arrives with that pushname (typical @lid case
+    //     where WhatsApp hides the real phone), the resolver finds
+    //     the kept user via alias instead of provisioning afresh.
+    //     Also save the email slug ("nunu" out of
+    //     "provisional+nunu-…@matchtime.local") to cover the case
+    //     where the admin renamed the provisional before merging.
+    const aliasNorm = (s: string) =>
+      s.trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+    const aliasesToSave = new Set<string>();
+    if (drop.name) {
+      const k = aliasNorm(drop.name);
+      if (k.length >= 2) aliasesToSave.add(k);
+    }
+    if (drop.email) {
+      const m = drop.email.match(/^provisional\+([a-z0-9-]+)-[a-z0-9]+@/i);
+      if (m) {
+        const k = aliasNorm(m[1].replace(/-/g, " "));
+        if (k.length >= 2) aliasesToSave.add(k);
+      }
+    }
+    for (const alias of aliasesToSave) {
+      await tx.userAlias.upsert({
+        where: { orgId_alias: { orgId, alias } },
+        create: { orgId, userId: keepUserId, alias, source: "merge" },
+        // If the alias already pointed at someone else, the most
+        // recent merge is authoritative (admin's intent now).
+        update: { userId: keepUserId, source: "merge" },
+      });
+    }
+
     // 9. Delete drop's memberships across ALL orgs (their identity is
     //    being absorbed). Then delete the user.
     await tx.membership.deleteMany({ where: { userId: dropUserId } });

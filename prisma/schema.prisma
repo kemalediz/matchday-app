@@ -95,6 +95,7 @@ model User {
   teamAssignments   TeamAssignment[]
   activityPositions PlayerActivityPosition[]
   ratingAdjustments RatingAdjustment[]
+  aliases           UserAlias[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -122,6 +123,7 @@ model Organisation {
   memberships Membership[]
   activities  Activity[]
   sports      Sport[]
+  userAliases UserAlias[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -461,6 +463,35 @@ model AnalyzedMessage {
 
   @@index([orgId, createdAt])
   @@index([groupId, createdAt])
+}
+
+/**
+ * Per-org alias for a user — the WhatsApp pushname (or nickname /
+ * variant spelling) that doesn't fuzzy-match the canonical DB name.
+ *
+ * Populated automatically when an admin merges a provisional ghost
+ * into a real user: the ghost's display name becomes an alias for
+ * the real user, scoped to the org. Next time a message arrives with
+ * that pushname (and no phone — typical @lid privacy mode case), the
+ * resolver finds the real user via alias instead of creating another
+ * ghost.
+ *
+ * Stored lower-cased + diacritics-stripped to match the resolver's
+ * comparison key.
+ */
+model UserAlias {
+  id        String       @id @default(cuid())
+  userId    String
+  user      User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  orgId     String
+  org       Organisation @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  alias     String                            // already-normalised key
+  source    String       @default("merge")    // "merge" | "manual" | "auto-detect"
+  createdAt DateTime     @default(now())
+
+  @@unique([orgId, alias])
+  @@index([userId])
+  @@index([orgId])
 }
 
 /**
