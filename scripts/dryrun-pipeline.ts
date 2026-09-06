@@ -47,7 +47,12 @@
  * Needs DATABASE_URL and ANTHROPIC_API_KEY.
  *
  *   ONLY=C1,K1     run only these case ids (comma-separated)
- *   REPEAT=15      run each case N times and report STABLE / UNSTABLE
+ *   REPEAT=15      run each case N times and report DECISION stability
+ *                  (writes + whether the group heard anything — this is
+ *                  the acceptance signal and the UNSTABLE count) beside
+ *                  the ROUTE spread (diagnostics: an LLM route is a
+ *                  distribution, not a value). Three runs cannot settle
+ *                  anything; 15 is the floor for a real question.
  *   FACTS=1        print basis / contingent / conditionOn on every run,
  *                  not just when REPEAT=1
  *   CHASES=1       compose all five scheduled-chase kinds instead of
@@ -181,9 +186,9 @@ const CASES: Case[] = [
 
   // ── A: the admin_ops route (§10 step 7 part 2) ────────────────────
   //
-  // Payment and reminder both require the tag; the recruit blast does
-  // not, because PR #33's RECRUIT_COMMAND_IMPLIES_ADDRESSED makes an
-  // admin's recruit command a direct instruction to MatchTime.
+  // All THREE admin_ops actions require the tag. Payment and reminder
+  // always did; the recruit blast joined them on 2026-09-06 — see the R
+  // block below and `RECRUIT_BLAST_REQUIRES_TAG`.
   { id: "A1", who: "Kemal", body: "@Match Time Amir paid for 4 players", tagged: true, expect: "route=admin_ops, action=bulk_payment, WRITE payment_credit (aggregate, namedCovered false)" },
   { id: "A2", who: "Kemal", body: "@Match Time Amir paid for Faris and Adam", tagged: true, expect: "route=admin_ops, action=bulk_payment, namedCovered TRUE — a different write from A1" },
   { id: "A3", who: "Zair", body: "@Match Time Amir paid for 4 players", tagged: true, expect: "NO write — only an admin may credit a payment (real money, live club)" },
@@ -207,14 +212,57 @@ const CASES: Case[] = [
   // routes `question` 5/5. Phrased the way a real admin would, so the
   // clamp is exercised on a live route rather than only in a unit test.
   { id: "R3", who: "Kemal", body: "@Match Time DM everyone who played in the last 50 games and invite them", tagged: true, expect: "50 must be CLAMPED to 12 — a mass DM is how the WhatsApp account gets banned" },
-  // MEASURED 2026-09-06: untagged, the ROUTER calls this `question`, not
-  // `admin_ops`, so PR #33's tag-free path is not reached and the
-  // interaction contract refuses it. Recorded rather than asserted: it
-  // is a router property, not this step's, and the tagged R3 is what
-  // exercises the clamp.
-  { id: "R3b", who: "Kemal", body: "message everyone from the last 50 games", tagged: false, expect: "measured: routes `question`, so the contract's tag gate refuses it. The admin recruit path is reached only when the router says admin_ops" },
+  // ⚠️ R3b IS THE CASE THAT CHANGED THE POLICY, and the note that used
+  // to sit here — "measured: routes `question`" — was measured on five
+  // runs and was wrong. Over 20 router calls it is `admin_ops` 13/20,
+  // `question` 4/20, `none` 3/20: a coin flip, on the one gate standing
+  // between an untagged message and a 20-person mass DM. Since
+  // 2026-09-06 the blast requires a tag (`RECRUIT_BLAST_REQUIRES_TAG`),
+  // so all three of those routes now converge on "no blast" and the
+  // DECISION is stable even though the ROUTE still is not. That is what
+  // the two stability lines below report separately.
+  { id: "R3b", who: "Kemal", body: "message everyone from the last 50 games", tagged: false, expect: "NO recruit_blast, on EVERY route the model samples (admin_ops 13/20, question 4/20, none 3/20). An untagged mass DM is refused" },
   { id: "R4", who: "Zair", body: "@Match Time message all players who played in the last 5 matches and invite them", tagged: true, expect: "NO recruit_blast — only an admin may send one" },
   { id: "R5", who: "Kemal", body: "@Match Time who played in the last 5 matches?", tagged: true, expect: "NOT recruit — asking to LIST the recent players is not asking to message them" },
+
+  // ── R6–R10: the four shapes the tag decision has to tell apart ────
+  //
+  // Added 2026-09-06 with R3b. The point of the block is that all four
+  // are recruit-flavoured and only ONE of them may fire a bulk DM.
+  //
+  //   R6  the explicit command, UNTAGGED, and unambiguous to the router
+  //       (`admin_ops` 20/20). This is the case a "fire on an
+  //       unambiguous imperative" carve-out would have kept, and it is
+  //       exactly why there is no carve-out: nothing in the CODE can
+  //       tell it from R3b, so the 13/20 rides in on the 20/20's coat
+  //       tails. Silence here is the price, and it is one message.
+  //   R7  the same command with the tag on. Must still fire.
+  //   R8  a plain chase nudge. Must NEVER fire a blast — measured
+  //       `none` 20/20, so this is the router agreeing, not the gate.
+  //   R9  the 1 Sept shape once more, in the R block so a future reader
+  //       of THIS policy sees it: untagged recruit alongside a drop,
+  //       still works, still drops the player. K1 is the full replay.
+  //
+  //       ⚠️ R9 READS UNSTABLE (13/15) AND IT IS NOT THIS CHANGE. Its
+  //       route is `other_att` 15/15, which never reaches the admin
+  //       branch the tag gate lives in; the split is the EXTRACTOR
+  //       calling the same sentence `sideRequests: ["recruit"]` 13
+  //       times and `["chase"]` twice, and a `chase` gets no PR #33
+  //       waiver, so the untagged drop is then suppressed by the
+  //       contract. K1 — the real incident wording, which keeps the
+  //       third sentence "Can someone pls come forward" — is `recruit`
+  //       15/15. So the wobble is what the shorter phrasing costs, it
+  //       predates 2026-09-06, and it is worth its own ticket: a drop
+  //       silently lost 2 times in 15 is the §11.1 failure, on the
+  //       attendance path rather than this one.
+  //  R10  the same nudge WITH a tag. Tagged does not make a chase a
+  //       command — "we need more players" names nobody to message and
+  //       asks MatchTime for nothing it can do deterministically.
+  { id: "R6", who: "Kemal", body: "DM everyone who played in the last 5 matches and invite them", tagged: false, expect: "NO recruit_blast. Router says admin_ops 20/20 and the extractor says recruit — and it is STILL refused, because untagged is untagged" },
+  { id: "R7", who: "Kemal", body: "@Match Time DM everyone who played in the last 5 matches and invite them", tagged: true, expect: "WRITE recruit_blast, lookback 5. The same sentence, tagged, must fire" },
+  { id: "R8", who: "Kemal", body: "come on lads we need more players", tagged: false, expect: "NO recruit_blast — a chase nudge is the scheduler's job, never a mass DM (router: none 20/20)" },
+  { id: "R9", who: "Kemal", body: "Najib is out. We need one more player", fullSquad: true, expect: "DROP Najib untagged (PR #33 side-request path, UNTOUCHED by the blast tag gate). No recruit_blast write here — the side request is reported by attendance-engine-batch, not the engine. MEASURED 13/15; the other 2 extract `chase` instead of `recruit` and the drop is then suppressed — a PRE-EXISTING extractor wobble, see the note above" },
+  { id: "R10", who: "Kemal", body: "@Match Time come on lads we need more players", tagged: true, expect: "NO recruit_blast — a tag does not turn a nudge into a bulk-DM command" },
 ];
 
 /**
@@ -962,7 +1010,10 @@ async function main(): Promise<void> {
 
   for (const c of selected) {
     const sender = senders.get(c.id)!;
-    const signatures: string[] = [];
+    /** The acceptance signal: writes + whether the group heard anything. */
+    const decisions: string[] = [];
+    /** Diagnostics only — an LLM route is a distribution, not a value. */
+    const routesSeen: string[] = [];
     console.log(
       `\n${"─".repeat(72)}\n${c.id}  ${sender.name}` +
         `${c.tagged ? " [@tagged]" : ""}${c.fullSquad ? " [FULL SQUAD]" : ""}` +
@@ -996,7 +1047,8 @@ async function main(): Promise<void> {
         });
       } catch (err) {
         console.log(`  💥 THREW: ${(err as Error).message}`);
-        signatures.push("threw");
+        decisions.push("threw");
+        routesSeen.push("threw");
         continue;
       }
       ran++;
@@ -1005,7 +1057,14 @@ async function main(): Promise<void> {
       const writes = r.engine.writes.map((w) =>
         w.kind === "attendance"
           ? `${w.status} ${w.name}${w.explicitBench ? " (explicit bench)" : ""} — ${w.reason}`
-          : `${w.kind} — ${w.reason}`,
+          : // The lookback is the number a MODEL read out of a sentence
+            // and the only thing that can widen a mass DM, so it is
+            // printed rather than inferred from the absence of a "clamped
+            // to" reason. `null` means the ask named none and
+            // `inviteRecentPlayers` uses its default of 5.
+            w.kind === "recruit_blast"
+            ? `recruit_blast lookback=${w.lookbackMatches ?? "null (default 5)"} — ${w.reason}`
+            : `${w.kind} — ${w.reason}`,
       );
       if (repeat > 1) console.log(`  ── run ${n + 1}/${repeat}`);
       console.log(`  route  : ${r.routes[0]?.route ?? "?"}`);
@@ -1039,33 +1098,60 @@ async function main(): Promise<void> {
       }
       console.log(`  cost   : $${r.cost.totalUsd.toFixed(5)}`);
 
-      signatures.push(
+      // ── TWO SIGNATURES, NOT ONE (2026-09-06) ────────────────────────
+      //
+      // R3b is why. The router is an LLM at the SDK's default
+      // temperature of 1, so its ROUTE for a genuinely ambiguous
+      // sentence is a distribution, not a value — "message everyone
+      // from the last 50 games" comes back `admin_ops` 13/20,
+      // `question` 4/20, `none` 3/20 — and no amount of prompt work
+      // makes that a guarantee. Folding the route into one signature
+      // meant every such case read UNSTABLE, which said nothing about
+      // whether the thing that MATTERS wobbled.
+      //
+      // What matters is the DECISION: what got written, and whether the
+      // group heard anything. That is what a defect is measured in and
+      // what a customer sees. R3b's whole fix is that its decision is
+      // now invariant ACROSS a route that still is not, and a harness
+      // that cannot express that cannot show the fix worked.
+      //
+      // So: `decisions` is the acceptance signal and drives the
+      // UNSTABLE count; `routes` is reported beside it as diagnostics.
+      decisions.push(
         JSON.stringify({
-          route: r.routes[0]?.route,
           writes: r.engine.writes
             .map((w) => `${w.kind}:${"name" in w ? w.name : ""}:${"status" in w ? w.status : ""}`)
             .sort(),
           spoke: r.composed.utterances.length > 0,
         }),
       );
+      routesSeen.push(r.routes[0]?.route ?? "?");
     }
 
-    if (signatures.length > 1) {
-      const variants = [...new Set(signatures)];
+    if (decisions.length > 1) {
+      const variants = [...new Set(decisions)];
       const stable = variants.length === 1;
       if (!stable) unstable++;
       console.log(
-        `  STABILITY: ${stable ? "✅ STABLE" : "⚠️  UNSTABLE"} across ${signatures.length} runs` +
+        `  DECISION : ${stable ? "✅ STABLE" : "⚠️  UNSTABLE"} across ${decisions.length} runs` +
           ` — ${variants.length} distinct outcome(s)`,
       );
       if (!stable) {
         variants
-          .map((v) => ({ v, n: signatures.filter((s) => s === v).length }))
+          .map((v) => ({ v, n: decisions.filter((s) => s === v).length }))
           .sort((a, b) => b.n - a.n)
           .forEach(({ v, n }, i) =>
-            console.log(`     variant ${i + 1} (${n}/${signatures.length}): ${v}`),
+            console.log(`     variant ${i + 1} (${n}/${decisions.length}): ${v}`),
           );
       }
+      const spread = [...new Set(routesSeen)]
+        .map((rt) => ({ rt, n: routesSeen.filter((x) => x === rt).length }))
+        .sort((a, b) => b.n - a.n)
+        .map(({ rt, n }) => `${rt} ${n}/${routesSeen.length}`)
+        .join(" · ");
+      console.log(
+        `  ROUTE    : ${new Set(routesSeen).size === 1 ? "one route" : "SPLIT"} — ${spread}`,
+      );
     }
   }
 

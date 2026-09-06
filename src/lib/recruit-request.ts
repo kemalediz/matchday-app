@@ -106,6 +106,14 @@ export function mergeRecruitReply(
  *   - `actionRequiresTag` is NOT modified, so every other untagged
  *     third-party OUT in the group stays suppressed exactly as today.
  *
+ * ⚠️ SCOPE CORRECTED 2026-09-06 — see `RECRUIT_BLAST_REQUIRES_TAG`.
+ * "the one whose verdict carries `recruitRequest`" meant the recruit
+ * SIDE REQUEST riding alongside an attendance change, which is what the
+ * incident was. §10 step 7 part 2 later built a second, separate branch
+ * — the explicit bulk-DM command on the `admin_ops` route — and read
+ * THIS constant there too. That was scope creep, and it is now undone:
+ * this constant governs the attendance path only.
+ *
  * WHAT IT DOES NOT DO. It does not make untagged third-party OUTs
  * tag-free in general. Wasim's 10:09 message on the same day — "Najib has
  * hurt his foot unfortunately @Amir can you step in for tonight?" —
@@ -113,3 +121,92 @@ export function mergeRecruitReply(
  * should change is a separate decision and is not taken here.
  */
 export const RECRUIT_COMMAND_IMPLIES_ADDRESSED = true;
+
+/**
+ * Must an EXPLICIT BULK-DM COMMAND carry an @Match Time tag?
+ *
+ * ⚠️ THIS IS THE SIBLING OF THE CONSTANT ABOVE AND IT PULLS THE OTHER
+ * WAY. Read them together; reverting one must not move the other.
+ *
+ * ── WHAT WAS MEASURED (2026-09-06, live router, 20 runs a phrasing) ──
+ *
+ *   "message everyone from the last 50 games"          UNTAGGED
+ *        admin_ops 13/20 · question 4/20 · none 3/20
+ *   "message everyone from the last 50 games and invite them"
+ *        admin_ops 20/20
+ *   "DM everyone who played in the last 5 matches and invite them"
+ *        admin_ops 20/20
+ *   "@Match Time DM everyone who played in the last 50 games …"
+ *        admin_ops 20/20
+ *   "come on lads we need more players"                none 20/20
+ *   "Najib is out. We need one more player. …"         other_att 20/20
+ *
+ * So the router is not generally unstable — every neighbouring wording
+ * is unanimous. That ONE sentence is genuinely ambiguous to it, because
+ * it names no purpose for the messaging: it can be read as an
+ * instruction, as a question about who those people are, or as chat.
+ * The router runs at the SDK's default temperature of 1 (`llm.ts` sets
+ * none), so an input the model is 65% sure about comes back as 13/20.
+ *
+ * ── WHY THAT IS UNACCEPTABLE RATHER THAN UNTIDY ──────────────────────
+ *
+ * Until this constant, the route was the ONLY gate on the action. So
+ * the same message, in the same state, proposed a mass DM on 13 runs in
+ * 20 and nothing at all on the other 7. Measured against the live Sutton
+ * FC data the same day, that blast DMs 27 people at the clamped lookback
+ * of 12 that "the last 50 games" resolves to, and 13 at the default of 5
+ * — before the per-category DM opt-out filter, which only shrinks it.
+ * `recruit-lookback.ts` spells out the stake: "the bot runs on an
+ * UNOFFICIAL WhatsApp client; a mass DM risks the account being banned,
+ * which takes the whole product down."
+ *
+ * The costs are not symmetric, and that decides it. A blast that does
+ * not fire costs the owner one re-typed message with a tag on it. A
+ * blast that fires when it should not costs the WhatsApp account.
+ *
+ * ── WHY A TAG, AND NOT A CLEVERER TEST ───────────────────────────────
+ *
+ * The obvious alternative is "fire untagged when the imperative is
+ * unambiguous". Both ways of building that were rejected:
+ *
+ *   In CODE it is a regex classifier. This codebase has deleted one
+ *   twice — 2026-04-21 (`handlers.ts:7-10`, at Kemal's explicit
+ *   request) and 2026-09-01 (`looksLikeRecruitRequest`, above) — and
+ *   the second deletion happened BECAUSE a pattern classified half a
+ *   sentence and caused the incident. In front of the single most
+ *   dangerous action in the product is the worst place to put one back.
+ *
+ *   In the MODEL it is another sample at temperature 1: the same coin
+ *   flip, one layer down, and dressed up as a safeguard. Note that two
+ *   models already have to agree for a blast to fire today — the router
+ *   must say `admin_ops` AND the extractor must say `action: recruit` —
+ *   and that pair is exactly what produced 13/20. Adding a third
+ *   opinion buys precision, never a guarantee.
+ *
+ * A tag is neither. It is a fact about the bytes the owner sent.
+ *
+ * ── WHAT THIS BUYS: A DETERMINISTIC DECISION, NOT A STABLE ROUTE ─────
+ *
+ * An LLM router cannot be made deterministic, and pretending otherwise
+ * is how this got shipped. What CAN be made deterministic is the
+ * DECISION. `question` and `none` already refused an untagged blast;
+ * `admin_ops` now does too, so all three sampled routes converge and
+ * the blast is invariant under the coin flip. The route still wobbles;
+ * nothing that matters does.
+ *
+ * ── WHAT IT DOES NOT TOUCH ───────────────────────────────────────────
+ *
+ * The 2026-09-01 incident. That fix is `RECRUIT_COMMAND_IMPLIES_ADDRESSED`
+ * on the ATTENDANCE path (`engine.ts:handleAttendance`, via
+ * `facts.sideRequests`), and "Najib is out. We need one more player."
+ * still drops Najib untagged and still carries its recruit side
+ * request, which `attendance-engine-batch.ts` still reports and
+ * `route.ts` still fires — at `inviteRecentPlayers`' bounded default of
+ * 5, with no model-read number anywhere in it. That is the real line
+ * between the two: the untagged path can never WIDEN a blast; only a
+ * tagged one can.
+ *
+ * Set to `false` and the `admin_ops` branch behaves exactly as it did
+ * between §10 step 7 part 2 and 2026-09-06.
+ */
+export const RECRUIT_BLAST_REQUIRES_TAG = true;

@@ -306,9 +306,61 @@ describe("the recruit blast is DECIDED by the engine and RUN by the route", () =
     expect(r.outcomes[0].reasons.join(" ")).toMatch(/only an admin/i);
   });
 
-  it("does not need a tag from an admin (PR #33)", () => {
-    const w = recruit("kemal", undefined, false).writes.find((x) => x.kind === "recruit_blast");
-    expect(w).toBeTruthy();
+  // ── THE TAG IS REQUIRED FOR THE BULK COMMAND (2026-09-06) ──────────
+  //
+  // Measured on the live router, 20 runs of each phrasing:
+  //
+  //   "message everyone from the last 50 games"
+  //        admin_ops 13/20 · question 4/20 · none 3/20
+  //   "message everyone from the last 50 games and invite them"
+  //        admin_ops 20/20
+  //   "@Match Time DM everyone who played in the last 50 games …"
+  //        admin_ops 20/20
+  //
+  // The route is the ONLY gate this action had, and for that one
+  // wording it is a coin flip: the same message, in the same state,
+  // DM'd 20 people twice and did nothing the third time. A missed blast
+  // costs the owner one re-typed message. A wrong one is a mass DM from
+  // an unofficial WhatsApp client, which is how the account — and with
+  // it the whole product — goes away.
+  //
+  // So the tag is required HERE, and required unconditionally, which
+  // makes the DECISION invariant even though the ROUTE is not: every
+  // route the model samples for an untagged message now converges on
+  // "no blast". `question` and `none` already refused it; `admin_ops`
+  // now does too.
+  //
+  // WHAT THIS IS NOT. It is not a revert of PR #33. That fix lives on
+  // the ATTENDANCE path — `facts.sideRequests` in `handleAttendance`,
+  // via `RECRUIT_COMMAND_IMPLIES_ADDRESSED` — and is untouched: "Najib
+  // is out. We need one more player." still drops Najib untagged and
+  // still carries its recruit side-request, at the bounded default of
+  // 5. See the 2026-09-01 block in `engine.test.ts`, which is the pin.
+  it("REFUSES an untagged blast, however sure the router sounded", () => {
+    const r = recruit("kemal", undefined, false);
+    expect(r.writes.filter((x) => x.kind === "recruit_blast")).toHaveLength(0);
+    expect(r.outcomes[0].reasons.join(" ")).toMatch(/@Match Time tag/i);
+  });
+
+  it("refuses an untagged blast that named a lookback too — the number is the risk", () => {
+    // "the last 50 games" is the widest a model-read number can make
+    // this blast. An untagged message must never be what widens it.
+    const r = recruit("kemal", 50, false);
+    expect(r.writes.filter((x) => x.kind === "recruit_blast")).toHaveLength(0);
+  });
+
+  it("says nothing in the group when it refuses — silence is the contract for untagged", () => {
+    // The refusal is recorded on the message's `reasoning` row for the
+    // admin log. It is NOT a new sentence in the group: MatchTime stays
+    // out of untagged traffic, and a bot that answers "tag me" to every
+    // ambiguous line is the nagging §13 exists to prevent.
+    const r = recruit("kemal", 50, false);
+    expect(r.speech).toHaveLength(0);
+  });
+
+  it("still fires for the same admin the moment they tag it", () => {
+    const w = recruit("kemal", 50, true).writes.find((x) => x.kind === "recruit_blast");
+    expect(w).toMatchObject({ lookbackMatches: 12 });
   });
 
   it("proposes no speech of its own — the route speaks after the blast runs", () => {

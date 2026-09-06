@@ -502,14 +502,44 @@ describe("the recruit blast is reported, never fired here", () => {
     expect([...res.outcomes.values()][0].recruitRequest).toBe(false);
   });
 
-  it("an admin needs no tag for it (PR #33)", async () => {
+  // ⚠️ THIS TEST USED TO READ "an admin needs no tag for it (PR #33)"
+  // AND EXPECT `true`. It was inverted on 2026-09-06, deliberately.
+  //
+  // What changed and why: on the live router, "message everyone from the
+  // last 50 games" comes back `admin_ops` 13/20, `question` 4/20, `none`
+  // 3/20 over 20 calls. The route was the only gate this action had, so
+  // the same untagged message DM'd 20 people on 13 runs and did nothing
+  // on the other 7. `recruit-lookback.ts` names the stake: a mass DM
+  // from an unofficial WhatsApp client is how the account gets banned,
+  // and that takes the whole product down.
+  //
+  // It is NOT a revert of PR #33. That fix is the recruit SIDE REQUEST
+  // on the attendance path (`attendance-engine-batch.ts` still reports
+  // `recruitRequest` for an untagged admin whose message carries
+  // `sideRequests: ["recruit"]`), which is what the 2026-09-01 incident
+  // actually was — "Najib is out. We need one more player." still drops
+  // Najib untagged and still blasts, at the bounded default of 5. What
+  // is refused here is the EXPLICIT bulk command carrying a model-read
+  // lookback: the untagged path may no longer widen a blast.
+  //
+  // Full argument on `RECRUIT_BLAST_REQUIRES_TAG` in `recruit-request.ts`.
+  it("an admin STILL needs a tag for it — the route is not a gate (2026-09-06)", async () => {
     const { model } = stubModel({ [BLAST]: BLAST_FACTS });
     const r = recorder(model, paidWorld());
     const res = await run({
       messages: [msg({ body: BLAST, senderUserId: "u-kemal", tagged: false })],
       deps: r.deps,
     });
-    expect([...res.outcomes.values()][0].recruitRequest).toBe(true);
+    const out = [...res.outcomes.values()][0];
+    expect(out.recruitRequest).toBe(false);
+    // Nothing is fired and nothing is said. The refusal is a DECISION,
+    // recorded on the row the admin log reads, not a new sentence in the
+    // group: untagged silence is what the interaction contract already
+    // promises, and a bot that answers "tag me" to every ambiguous line
+    // is the nagging §13 exists to prevent.
+    expect(r.dms).toEqual([]);
+    expect(out.reply).toBeNull();
+    expect(out.reasoning).toMatch(/@Match Time tag/i);
   });
 });
 

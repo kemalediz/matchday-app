@@ -80,7 +80,27 @@ import { buildCorpusWorld, readMembers, readRows, readScore, readTeams } from ".
  *                                     phrasing Kemal asked about, which
  *                                     before this change came back as
  *                                     `admin action "other" has no
- *                                     deterministic handler`.
+ *                                     deterministic handler`. TAGGED.
+ *   ADMIN-recruit-blast-untagged-needs-a-tag
+ *          the same command with
+ *          the tag taken off        → owned, and asserts the REFUSAL.
+ *                                     2026-09-06: the route used to be
+ *                                     this action's only gate, and on
+ *                                     one real phrasing it is a coin
+ *                                     flip (`admin_ops` 13/20). See
+ *                                     `RECRUIT_BLAST_REQUIRES_TAG`.
+ *   ADMIN-chase-nudge-is-not-a-recruit-blast
+ *          "come on lads we need
+ *           more players"           → owned, and expected to be HANDED
+ *                                     BACK: the router says `none`
+ *                                     20/20, so nothing here claims it.
+ *                                     That is the pass. It is listed
+ *                                     because the case has to fail
+ *                                     LOUDLY if a nudge ever starts
+ *                                     routing `admin_ops` and DMing the
+ *                                     club — and an unowned case that
+ *                                     nobody declared would instead be
+ *                                     reported as "did not run".
  *
  *   PR33-recruit-ask-must-not-swallow-the-drop
  *                                   → NOT owned here. Its message is a
@@ -100,6 +120,8 @@ const OWNED_CASE_IDS = new Set([
   "S22-reminder-request-queues-a-dm",
   "S22-reminder-request-is-queued-for-the-resolved-day",
   "ADMIN-recruit-blast-from-the-last-n-matches",
+  "ADMIN-recruit-blast-untagged-needs-a-tag",
+  "ADMIN-chase-nudge-is-not-a-recruit-blast",
 ]);
 
 const ENABLED: Set<Route> = new Set<Route>(["score", "admin_ops"]);

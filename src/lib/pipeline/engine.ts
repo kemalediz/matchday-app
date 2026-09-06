@@ -52,7 +52,10 @@ import {
   type PromoteRegisterEntry,
 } from "../promote-authorization";
 import { shouldAskForGuestName } from "../guest-name-ask";
-import { RECRUIT_COMMAND_IMPLIES_ADDRESSED } from "../recruit-request";
+import {
+  RECRUIT_BLAST_REQUIRES_TAG,
+  RECRUIT_COMMAND_IMPLIES_ADDRESSED,
+} from "../recruit-request";
 import { RECRUIT_LOOKBACK_MAX, resolveLookbackMatches } from "../recruit-lookback";
 import { resolveReminderPhrase } from "../reminder-time";
 import { resolvePerson } from "./identity";
@@ -1354,17 +1357,49 @@ export function decide(input: EngineInput): EngineResult {
       if (facts.action === "recruit") {
         // ── WHO MAY ASK. Not when it runs — see `recruit_blast`. ───────
         //
-        // Admin-only, exactly as `route.ts:1548-1557` gates it, and NO
-        // tag required: PR #33's `RECRUIT_COMMAND_IMPLIES_ADDRESSED`
-        // says an admin's recruit command is itself a direct instruction
-        // to MatchTime. Both pipelines read that same constant so
-        // flipping it reverts both together.
+        // Admin-only, exactly as `route.ts:1548-1557` gates it.
         if (!senderIsAdmin) {
           out.reasons.push("only an admin may send a recruit blast");
           return;
         }
-        if (!msg.tagged && !RECRUIT_COMMAND_IMPLIES_ADDRESSED) {
-          out.reasons.push("recruit blast requires an @Match Time tag");
+        // ── AND THEY MUST TAG IT (2026-09-06) ─────────────────────────
+        //
+        // This branch used to read `RECRUIT_COMMAND_IMPLIES_ADDRESSED`
+        // and waive the tag. Measured on the live router, 20 calls:
+        // "message everyone from the last 50 games" comes back
+        // `admin_ops` 13/20, `question` 4/20, `none` 3/20. So the same
+        // untagged message, in the same state, proposed a blast on 13
+        // runs and nothing at all on the other 7. Measured against the
+        // live Sutton FC data the same day, that blast DMs 27 people at
+        // the clamped lookback of 12 (13 at the default of 5). The route
+        // was this action's only gate, and `recruit-lookback.ts` says why
+        // that cannot stand:
+        // the bot runs on an unofficial WhatsApp client and a mass DM
+        // risks the ban that takes the whole product down. A blast that
+        // does not fire costs one re-typed message; one that fires
+        // wrongly costs the account.
+        //
+        // The other two sampled routes already refused it. Requiring
+        // the tag here makes all three agree, so the DECISION is
+        // invariant even though the ROUTE is not — which is the only
+        // determinism an LLM router can actually be held to.
+        //
+        // NOT a revert of PR #33. That fix is the SIDE REQUEST on the
+        // attendance path above (`facts.sideRequests`, still gated on
+        // `RECRUIT_COMMAND_IMPLIES_ADDRESSED`, still untagged, still
+        // dropping Najib). The full argument, the measurements and the
+        // rejected alternatives are on `RECRUIT_BLAST_REQUIRES_TAG`.
+        //
+        // A plain reason rather than `degrade()`: this IS a decision,
+        // taken and recorded on the message's `reasoning` row for the
+        // admin log, not a thing the engine failed to decide. It is the
+        // same shape as `bulk_payment`'s tag gate 200 lines up, and it
+        // adds no sentence to the group — untagged silence is what the
+        // interaction contract already promises.
+        if (RECRUIT_BLAST_REQUIRES_TAG && !msg.tagged) {
+          out.reasons.push(
+            "a recruit blast requires an @Match Time tag: a mass DM is not fired off an untagged message",
+          );
           return;
         }
         // "the last 5 matches" is a fact about the TEXT. The number the

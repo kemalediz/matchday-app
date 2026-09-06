@@ -44,7 +44,7 @@ Both write a machine-readable report to `.e2e/corpus/report-<mode>.json`.
 > The LIVE sweeps (`test:corpus:live`, `:answers`, `:writes`, `:dryrun`) are
 > unaffected: they never used the verdict seam.
 
-**53 cases; 36 run in CI.** The other 17 cannot be replayed deterministically and
+**61 cases; 36 run in CI.** The other 25 cannot be replayed deterministically and
 each must say why (see *Stubbed vs live*). The scoreboard states all three numbers
 on its first two lines — a case that never ran is never counted as a pass.
 
