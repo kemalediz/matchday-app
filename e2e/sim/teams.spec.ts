@@ -11,15 +11,25 @@
  * Control case: a plain "generate teams" (teamNames:null) leaves
  * Match.teamLabels empty and the post falls back to Red/Yellow.
  *
- * Verdicts are stubbed (deterministic) — only the persistence + display
- * wiring is under test here; the LLM's name-choosing is covered by the
- * live suite (teams-live.spec.ts).
+ * The router and the teams extractor are stubbed (deterministic) — only
+ * the persistence + display wiring is under test here; the model's
+ * name-choosing is covered by the live suite (teams-live.spec.ts).
+ *
+ * ── PORTED 2026-09-06, §10 STEP 8 ───────────────────────────────────
+ *
+ * `verdict.teamNames` became `TeamFacts.teamNames`, on the `balancer`
+ * route. `parseFacts` still validates it for real — a pair, or null —
+ * which is why the control case below passes `null` rather than omitting
+ * the field.
  */
-import type { APIRequestContext } from "@playwright/test";
 import { test, expect, resetDb } from "../fixtures";
-import type { TestDb } from "../helpers/test-db";
 import { createGroup, SimGroup } from "./group";
 import { londonAt } from "../helpers/constants";
+
+const teams = (teamNames: [string, string] | null) => ({
+  route: "balancer",
+  facts: { action: "generate", includeRefs: [], teamNames, swaps: [], pairings: [] },
+});
 
 test.describe.configure({ mode: "serial" });
 
@@ -66,17 +76,7 @@ test('(a) admin asks MT to pick names → Match.teamLabels persisted + used in t
   const r = await grp.post(
     "alice",
     "@Match Time generate the teams. Team names will be something you randomly select for this week",
-    {
-      verdict: {
-        intent: "generate_teams_request",
-        react: "⚽",
-        confidence: 0.95,
-        teamNames: ["Falcons", "Sharks"],
-        includeNames: null,
-        teamOverrides: null,
-        reasoning: "stub: generate teams + MT picks the names",
-      },
-    },
+    { ...teams(["Falcons", "Sharks"]), tag: true },
   );
 
   // Persisted as the per-match display override (index 0 = RED, 1 = YELLOW).
@@ -117,15 +117,7 @@ test('(b) control: plain "generate teams" → Match.teamLabels stays empty, post
   // Interaction contract: team ops require an @Match Time tag.
   const r = await grp.post("alice", "@Match Time generate the teams", {
     tag: true,
-    verdict: {
-      intent: "generate_teams_request",
-      react: "⚽",
-      confidence: 0.95,
-      teamNames: null,
-      includeNames: null,
-      teamOverrides: null,
-      reasoning: "stub: generate teams, no naming request",
-    },
+    ...teams(null),
   });
 
   // No naming request → no per-match override written.

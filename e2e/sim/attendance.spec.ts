@@ -1,13 +1,13 @@
 /**
  * Group-simulator scenario matrix — ATTENDANCE.
  *
- * Every test drives the REAL analyze pipeline (LLM stubbed) against a
- * fresh virtual group and asserts the bot's reaction, outbound posts/DMs
- * (BotJob rows) and the DB end-state. Covers:
+ * Every test drives the REAL analyze pipeline (router + extractor
+ * stubbed) against a fresh virtual group and asserts the bot's reaction,
+ * outbound posts/DMs (BotJob rows) and the DB end-state. Covers:
  *   - IN → CONFIRMED, squad-full announcement on the filling IN
  *   - IN at capacity → BENCH
  *   - OUT → DROPPED + open BenchSlotOffer (bench non-empty)
- *   - bench claim in-group (benchConfirmation) → promoted + announce
+ *   - bench PROMPT answered in the group → promoted + announce
  *   - admin "move X to bench" → demote, slot freed, NO offer, no dup announce
  *   - benched player's own IN when a slot is free → promoted
  *   - banter "X is out" from a non-admin while X chats → NOT dropped
@@ -15,11 +15,37 @@
  *   - OUT from someone not registered → silent no-op
  *   - drop → bench-offer → first DM "YES" claims, late claimer misses
  *   - drop → bench-offer → 👍 reaction claims (👎 is a no-op)
+ *
+ * ── PORTED 2026-09-06, §10 STEP 8 ───────────────────────────────────
+ *
+ * Every `verdict:` became a `route` plus the FACTS the extractor reads
+ * out of that body, so each case now pins the ENGINE's decision instead
+ * of asserting a write it had already asked for. Three assertions
+ * changed value and each says why at its own site:
+ *
+ *   • the two third-party moves react 👍, not 🪑 / 👋. `reactFor` gives
+ *     a status react only when the SENDER's own row moved, and the old
+ *     values described the subject rather than the speaker.
+ *   • the in-group bench claim now needs a real `PendingBenchConfirmation`
+ *     row, because `verdict.benchConfirmation` used to reach
+ *     `resolveBenchConfirmation` without one.
+ *
+ * `benchConfirmation`, `registerAttendance` and `registerFor` have no
+ * successor fields; `subject` + `polarity` per claim carry all three.
  */
 import type { APIRequestContext } from "@playwright/test";
 import { test, expect, resetDb } from "../fixtures";
 import type { TestDb } from "../helpers/test-db";
 import { createGroup, SimGroup } from "./group";
+import { claim, facts, otherFacts, selfIn, selfOut } from "../helpers/stub";
+
+/** The two bodies this file posts most: a plain self IN and a plain self
+ *  OUT, as the FACTS the extractor reads out of them. Everything that
+ *  happens next — a slot, a bench seat, a promotion, a freed slot, a
+ *  bench-slot offer — is `pipeline/engine.ts` deciding, which is the
+ *  whole point of the port. */
+const IN = { route: "self_att", facts: selfIn() };
+const OUT = { route: "self_att", facts: selfOut() };
 
 test.describe.configure({ mode: "serial" });
 
@@ -46,7 +72,7 @@ test.describe("capacity lifecycle", () => {
 
   test("IN → CONFIRMED with ✅", async ({ request, db }) => {
     const grp = await group(request, db);
-    const r = await grp.post("greg", "in");
+    const r = await grp.post("greg", "in", IN);
     expect(r.handledBy).toBe("llm");
     expect(r.react).toBe("✅");
     expect(await grp.confirmed()).toContain("Greg Gale");
@@ -55,7 +81,7 @@ test.describe("capacity lifecycle", () => {
 
   test("the IN that fills the squad triggers ONE full-line-up announcement", async ({ request, db }) => {
     const grp = await group(request, db);
-    const r = await grp.post("henry", "I'm in");
+    const r = await grp.post("henry", "I'm in", IN);
     expect(r.react).toBe("✅");
     expect((await grp.counts()).confirmed).toBe(8);
     const announce = r.groupPosts.find((t) => t.includes("Squad complete"));
@@ -68,7 +94,7 @@ test.describe("capacity lifecycle", () => {
 
   test("IN at capacity lands on the BENCH with 🪑", async ({ request, db }) => {
     const grp = await group(request, db);
-    const r = await grp.post("ivan", "in");
+    const r = await grp.post("ivan", "in", IN);
     expect(r.react).toBe("🪑");
     expect(await grp.bench()).toEqual(["Ivan Ice"]);
     expect((await grp.counts()).confirmed).toBe(8); // capacity respected
@@ -76,7 +102,7 @@ test.describe("capacity lifecycle", () => {
 
   test("OUT → DROPPED + an open BenchSlotOffer for the freed slot", async ({ request, db }) => {
     const grp = await group(request, db);
-    const r = await grp.post("pete", "out");
+    const r = await grp.post("pete", "out", OUT);
     expect(r.react).toBe("👋");
     expect(await grp.dropped()).toContain("Pete Power");
     const offers = await grp.openOffers();
@@ -86,15 +112,41 @@ test.describe("capacity lifecycle", () => {
 
   test("bencher claims the slot in-group → promoted, offer resolved, group told", async ({ request, db }) => {
     const grp = await group(request, db);
-    const r = await grp.post("ivan", "yes I'll take it", {
-      verdict: {
-        intent: "in",
-        benchConfirmation: "yes",
-        react: "👍",
-        confidence: 0.9,
-        reasoning: "stub: bench claim",
-      },
-    });
+    // ── PORTED 2026-09-06, §10 STEP 8, AND IT NOW DRIVES THE REAL
+    //    SHIPPED PATH RATHER THAN A FIELD THAT SHORT-CIRCUITED IT ─────
+    //
+    // This used `verdict.benchConfirmation = "yes"`, which
+    // `executeVerdict` handed straight to `resolveBenchConfirmation`.
+    // There is no such field, and there is deliberately no successor:
+    // `attendance-engine-batch.ts` REFUSES this shape ("a bare 'yes'
+    // from someone with a prompt open") because a
+    // `PendingBenchConfirmation` is a different table and a different
+    // flow from the `BenchSlotOffer` the engine models.
+    //
+    // What handles it now is `lib/bench-prompt-answer.ts`, consulted by
+    // `analyze/route.ts` ONLY when the database says this exact sender
+    // has an unanswered prompt open for this match. That prior is the
+    // whole mechanism — it is what lets a bare "yes" be read without a
+    // model — so the row has to exist for the path to be reachable, and
+    // the old verdict field is precisely what let the test skip it.
+    // Seeding it is not scaffolding; it is the trigger.
+    //
+    // The body changed too. "yes I'll take it" is five words with a
+    // second clause and `readBenchPromptAnswer` returns null for it BY
+    // DESIGN ("anything carrying a second clause, a condition or a
+    // question mark returns null"). That is a real narrowing versus the
+    // mega-prompt, it is documented in that file's "What is LOST"
+    // section, and it is the conservative direction.
+    await grp.db.run(
+      `INSERT INTO "PendingBenchConfirmation" (id, "matchId", "userId", "expiresAt", "replacingUserId", "createdAt", "updatedAt")
+       VALUES ($1, $2, $3, (now() AT TIME ZONE 'UTC') + interval '2 hours', $4,
+               now() AT TIME ZONE 'UTC', now() AT TIME ZONE 'UTC')`,
+      [`pbc-${grp.orgId}`, grp.matchId, grp.player("ivan").userId, grp.player("pete").userId],
+    );
+
+    const r = await grp.post("ivan", "yes");
+    expect(r.handledBy).toBe("fast-path");
+    expect(r.intent).toBe("bench_confirmation");
     expect(r.react).toBe("✅");
     expect((await grp.attendanceOf("ivan"))?.status).toBe("CONFIRMED");
     expect(await grp.openOffers()).toHaveLength(0);
@@ -128,19 +180,18 @@ test.describe("admin demote and re-promotion", () => {
   test('admin "move Pete to the bench" → demote, slot freed, NO offer, single announce', async ({ request, db }) => {
     const grp = await group(request, db);
     const r = await grp.post("alice", "@Match Time move Pete to the bench please", {
-      // Interaction contract: moving ANOTHER player (registerFor) is a
-      // directed op → requires an @Match Time tag.
+      // Interaction contract: moving ANOTHER player is a directed op →
+      // requires an @Match Time tag.
       tag: true,
-      verdict: {
-        intent: "question",
-        registerFor: [{ name: "Pete", action: "BENCH" }],
-        reply: "Done — Pete Power has moved to the bench. A confirmed spot has opened up.",
-        react: "✅",
-        confidence: 0.95,
-        reasoning: "stub: admin demote",
-      },
+      route: "other_att",
+      facts: otherFacts("Pete", "bench"),
     });
-    expect(r.react).toBe("🪑");
+    // 👍, not 🪑. `pipeline/engine.ts:reactFor` gives a status react only
+    // when the SENDER's own row moved; Alice is still confirmed and it is
+    // Pete who was benched, so a 🪑 on her message would say she had been.
+    // The old value came from the verdict's react being recomputed
+    // against the write rather than against the sender.
+    expect(r.react).toBe("👍");
     expect((await grp.attendanceOf("pete"))?.status).toBe("BENCH");
     expect((await grp.counts()).confirmed).toBe(4); // slot freed
     // Exactly one attendance row for Pete — demote, not re-registration.
@@ -152,14 +203,17 @@ test.describe("admin demote and re-promotion", () => {
     ).toBe(1);
     // A demote never opens a bench-slot offer.
     expect(await grp.openOffers()).toHaveLength(0);
-    // The announcement passes through exactly ONCE (no safety-net dup).
-    const mentions = (r.reply ?? "").match(/moved to the bench/g) ?? [];
-    expect(mentions).toHaveLength(1);
+    // The move is announced exactly ONCE. It used to count the phrase
+    // "moved to the bench", which was the MODEL's wording passed through;
+    // the composer writes the sentence now, so the assertion counts
+    // mentions of the player instead of a phrase nobody owns.
+    const mentions = (r.reply ?? "").match(/Pete/g) ?? [];
+    expect(mentions.length, `announced once, in: ${r.reply}`).toBe(1);
   });
 
   test("benched player's own IN while a slot is free → promoted back", async ({ request, db }) => {
     const grp = await group(request, db);
-    const r = await grp.post("pete", "in");
+    const r = await grp.post("pete", "in", IN);
     expect(r.react).toBe("✅");
     expect((await grp.attendanceOf("pete"))?.status).toBe("CONFIRMED");
     expect((await grp.counts()).confirmed).toBe(5);
@@ -185,22 +239,23 @@ test.describe("third-party drops", () => {
   test('banter "Dan is out 😂" from a non-admin while Dan chats → NOT dropped, bot silent', async ({ request, db }) => {
     const grp = await group(request, db);
     const batch = await grp.postBatch([
+      // Dan protests, in the same batch. The extractor reports the IN
+      // claim his message really makes; the banter guard needs him to
+      // have SPOKEN and not corroborated the drop.
       {
         player: "dan",
         body: "😂😂 never, I'm playing",
-        verdict: { intent: "noise", react: null, reply: null, confidence: 1, reasoning: "stub" },
+        route: "self_att",
+        facts: selfIn(),
       },
+      // And the wind-up. The extractor CORRECTLY reports the OUT claim —
+      // the text contains it — which is exactly §6.2's point: deciding
+      // it is banter needs corroboration only the engine can see.
       {
         player: "felix",
         body: "Dan is out lads 😂😂",
-        verdict: {
-          intent: "out",
-          registerFor: [{ name: "Dan", action: "OUT" }],
-          reply: "Dan is out 😂 We're down to 3/8 — need 5 more!",
-          react: "👋",
-          confidence: 0.9,
-          reasoning: "stub: banter misread as drop",
-        },
+        route: "other_att",
+        facts: otherFacts("Dan", "out"),
       },
     ]);
     const banter = batch.results[1];
@@ -212,18 +267,17 @@ test.describe("third-party drops", () => {
   test("third-party OUT for a player NOT in the batch is honoured", async ({ request, db }) => {
     const grp = await group(request, db);
     const r = await grp.post("felix", "@Match Time Dan can't make it tonight, he told me", {
-      // Interaction contract: dropping ANOTHER player (registerFor OUT) is
-      // a directed op → requires an @Match Time tag.
+      // Interaction contract: dropping ANOTHER player is a directed op →
+      // requires an @Match Time tag. `reported: true` is the fact that
+      // "he told me" carries.
       tag: true,
-      verdict: {
-        intent: "out",
-        registerFor: [{ name: "Dan", action: "OUT" }],
-        react: "👋",
-        confidence: 0.95,
-        reasoning: "stub: genuine relayed drop",
-      },
+      route: "other_att",
+      facts: otherFacts("Dan", "out", { reported: true }),
     });
-    expect(r.react).toBe("👋");
+    // 👍 rather than 👋, for the same reason as the demote above: Felix's
+    // own row did not move, and a 👋 on his message would read as Felix
+    // leaving. `reactFor(status, self)` is the one place that decides it.
+    expect(r.react).toBe("👍");
     expect((await grp.attendanceOf("dan"))?.status).toBe("DROPPED");
     // Bench is empty → no offer to make.
     expect(await grp.openOffers()).toHaveLength(0);
@@ -231,7 +285,7 @@ test.describe("third-party drops", () => {
 
   test("OUT from someone who never registered → silent no-op", async ({ request, db }) => {
     const grp = await group(request, db);
-    const r = await grp.post("greg", "out");
+    const r = await grp.post("greg", "out", OUT);
     expect(r.react).toBeNull();
     expect(r.reply).toBeNull();
     expect(await grp.attendanceOf("greg")).toBeNull();
@@ -258,7 +312,7 @@ test.describe("bench-offer claim lifecycle", () => {
 
   test('drop → offer → first bencher DMs "YES" → promoted + ack + group announce', async ({ request, db }) => {
     const grp = await group(request, db);
-    await grp.post("pete", "out");
+    await grp.post("pete", "out", OUT);
     expect(await grp.openOffers()).toHaveLength(1);
 
     const r = await grp.dm("greg", "YES");
@@ -282,7 +336,7 @@ test.describe("bench-offer claim lifecycle", () => {
 
   test("next drop → 👎 reaction is a no-op, 👍 reaction claims the slot", async ({ request, db }) => {
     const grp = await group(request, db);
-    await grp.post("dan", "out");
+    await grp.post("dan", "out", OUT);
     const offers = await grp.openOffers();
     expect(offers).toHaveLength(1);
     // Simulate the Pi ACKing the posted offer message id.
@@ -331,13 +385,13 @@ test.describe("self-promotion resolves the open bench offer", () => {
     const grp = await group(request, db);
 
     // Confirmed player drops → a slot frees up + an open offer is created.
-    await grp.post("pete", "out");
+    await grp.post("pete", "out", OUT);
     const offers = await grp.openOffers();
     expect(offers).toHaveLength(1);
     const offerId = offers[0].id;
 
     // A bench player says plain "IN" — self-promotes into the freed slot.
-    const r = await grp.post("greg", "in");
+    const r = await grp.post("greg", "in", IN);
     expect(r.react).toBe("✅");
     expect((await grp.attendanceOf("greg"))?.status).toBe("CONFIRMED");
     expect((await grp.counts()).confirmed).toBe(5);
@@ -409,18 +463,11 @@ test.describe("admin-directed promote a specific bench player", () => {
       // Interaction contract: promoting/replacing OTHER players is a
       // directed op → requires an @Match Time tag.
       tag: true,
-      verdict: {
-        intent: "in",
-        registerAttendance: null,
-        registerFor: [
-          { name: "Ehtisham", action: "OUT" },
-          { name: "Aydın", action: "IN" },
-        ],
-        reply: "Done — Aydın Arslan is in and the squad is back to full at 5/5.",
-        react: "✅",
-        confidence: 0.95,
-        reasoning: "stub: admin promote bench player",
-      },
+      route: "other_att",
+      facts: facts([
+        claim({ subject: "other", personRef: "Ehtisham", personNamed: true, polarity: "out" }),
+        claim({ subject: "other", personRef: "Aydın", personNamed: true, polarity: "in" }),
+      ]),
     });
 
     // End-state: Ehtisham dropped, Aydın confirmed, squad full, Salman
@@ -484,18 +531,14 @@ test.describe("self-replace: player swaps themselves for a bench player", () => 
       // bench player (Aydın) — a directed op on another player — so the
       // whole self-replace flow requires an @Match Time tag.
       tag: true,
-      verdict: {
-        intent: "in",
-        registerAttendance: null,
-        registerFor: [
-          { name: "Ehtisham", action: "OUT" },
-          { name: "Aydın", action: "IN" },
-        ],
-        reply: "No worries — Aydın Arslan is in for you, squad stays full at 5/5.",
-        react: "✅",
-        confidence: 0.95,
-        reasoning: "stub: self-replace from bench",
-      },
+      route: "other_att",
+      // The OUT is about the SENDER, which is what makes this a
+      // self-replace rather than roster surgery on somebody else, and
+      // `subject` is the field that says so.
+      facts: facts([
+        claim({ polarity: "out" }),
+        claim({ subject: "other", personRef: "Aydın", personNamed: true, polarity: "in" }),
+      ]),
     });
 
     // End-state: Ehtisham dropped, Aydın promoted into the squad, squad
@@ -558,7 +601,7 @@ test.describe("off-list joiner taking the last slot closes the open offer", () =
     const grp = await group(request, db);
 
     // A confirmed player drops → a slot frees up + an open offer is created.
-    await grp.post("pete", "out");
+    await grp.post("pete", "out", OUT);
     const offers = await grp.openOffers();
     expect(offers).toHaveLength(1);
     const offerId = offers[0].id;
@@ -566,7 +609,7 @@ test.describe("off-list joiner taking the last slot closes the open offer", () =
     expect(await grp.attendanceOf("quinn")).toBeNull();
 
     // Quinn (not squad, not bench) says plain "IN" and grabs the last slot.
-    const r = await grp.post("quinn", "in");
+    const r = await grp.post("quinn", "in", IN);
     expect(r.react).toBe("✅");
     expect((await grp.attendanceOf("quinn"))?.status).toBe("CONFIRMED");
     expect((await grp.counts()).confirmed).toBe(5); // squad full again
@@ -605,14 +648,14 @@ test.describe("off-list joiner taking the last slot closes the open offer", () =
     // → two open slots → one open offer. A single off-list joiner fills only
     // ONE slot; the squad is still short, so the offer must remain open for
     // the bench.
-    await grp.post("owner", "out");
-    await grp.post("alice", "out");
+    await grp.post("owner", "out", OUT);
+    await grp.post("alice", "out", OUT);
     expect((await grp.counts()).confirmed).toBe(3); // 3/5 — two slots open
     const openBefore = await grp.openOffers();
     expect(openBefore.length).toBeGreaterThanOrEqual(1);
 
     // ryan is another off-list member; fills just one of the two slots.
-    const r = await grp.post("ryan", "in");
+    const r = await grp.post("ryan", "in", IN);
     expect(r.react).toBe("✅");
     expect((await grp.counts()).confirmed).toBe(4); // 4/5 — still one open
     // Squad NOT full → the offer must NOT be closed.
@@ -657,18 +700,11 @@ test.describe("unrelated non-admin cannot promote a bench player into the squad"
     // masking the authorisation check.
     await grp.post("bilal", "@Match Time replace Ehtisham with Aydın from the bench", {
       tag: true,
-      verdict: {
-        intent: "in",
-        registerAttendance: null,
-        registerFor: [
-          { name: "Ehtisham", action: "OUT" },
-          { name: "Aydın", action: "IN" },
-        ],
-        react: "🪑",
-        reply: "It's up to Ehtisham / an admin to action that.",
-        confidence: 0.9,
-        reasoning: "stub: unrelated non-admin promote attempt",
-      },
+      route: "other_att",
+      facts: facts([
+        claim({ subject: "other", personRef: "Ehtisham", personNamed: true, polarity: "out" }),
+        claim({ subject: "other", personRef: "Aydın", personNamed: true, polarity: "in" }),
+      ]),
     });
 
     // The free slot was available, yet the unrelated non-admin's IN did

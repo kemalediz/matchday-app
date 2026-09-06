@@ -13,10 +13,10 @@
  * No WhatsApp, no Anthropic, no network beyond the local Next server.
  *
  * ═══════════════════════════════════════════════════════════════════════
- * ⚠️ DETERMINISM: `verdict:` IS INERT SINCE §10 STEP 8 (2026-09-06)
+ * DETERMINISM: A ROUTE AND SOME FACTS, NEVER A VERDICT
  * ═══════════════════════════════════════════════════════════════════════
  *
- * What this said until today, and it was true for eighteen months:
+ * What this said until §10 step 8, and it was true for eighteen months:
  *
  *   "the LLM is stubbed (MT_TEST_LLM_STUB_FILE — same seam the api/
  *    specs use). `post()` either takes an explicit verdict (what the
@@ -24,42 +24,49 @@
  *    everything after the verdict is the REAL deterministic server
  *    logic."
  *
- * §10 step 8 deleted `analyzeBatch`, `SYSTEM_PROMPT` and `AnalysisVerdict`,
- * so there is nothing left that reads a verdict. `postBatch` still
- * collects `verdict:` into a stub file and still writes it; the server
- * never opens it. A spec that passes one is asserting against a decider
- * that does not exist, and what it will actually get is `route.ts`'s
- * "NOBODY OWNED IT" branch — no write, no reply, one operator note.
+ * Step 8 deleted `analyzeBatch`, `SYSTEM_PROMPT` and `AnalysisVerdict`,
+ * so there was nothing left to read a verdict. `verdict:` and
+ * `inferVerdict` are deleted with them. THE SEAM IS NOW TWO FILES, one
+ * layer either side of where the verdict used to sit, and a spec reaches
+ * both by saying, per message, what the ROUTER answered and what the
+ * EXTRACTOR found:
  *
- * THE DETERMINISM SEAM IS NOW TWO FILES, one layer either side of where
- * the verdict used to sit:
+ *   await g.post("pete", "in", { route: "self_att", facts: selfIn() });
  *
- *   `setRouterStub({ enabled, engine, engineRoutes, bodies })`
- *        what the ROUTER answered, and which route flags are on for
- *        this request (`src/lib/pipeline/gate.ts`,
- *        `src/lib/pipeline/route-flags.ts`)
- *   `setExtractorStub({ bodies, fail, failAll })`
- *        what the EXTRACTOR found — raw JSON, so `parseFacts` still
- *        runs for real (`src/lib/pipeline/extractor-stub.ts`)
+ *   await g.postBatch(
+ *     [{ player: "alice", body: "@Match Time move Dan to the bench", tag: true,
+ *        route: "other_att", facts: otherFacts("Dan", "bench") }],
+ *     { floor: true },              // and the step-5 / step-7 knobs
+ *   );
  *
- * Everything after those two is still the REAL deterministic server
- * logic — the engine's rules, the apply paths, capacity, bench offers,
- * the interaction contract, the batch-final squad post, outbound BotJobs
- * — which is still exactly what the suite is meant to regression-net.
+ * WHY THAT IS NOT A RENAME OF `verdict:`. A verdict said what to DO —
+ * `registerAttendance: "IN"` — and the suite then asserted the write it
+ * had just asked for. Facts say only what the message SAID; `polarity`,
+ * `tense`, `basis`, `contingent`, `personNamed` and `subject` are all
+ * properties of the text, checkable by re-reading it. Whether that
+ * becomes a CONFIRMED row, a BENCH row, a name-ask, a tentative or
+ * nothing at all is `pipeline/engine.ts`'s decision, made against
+ * capacity, the interaction contract, authorisation and the confidence
+ * floor. So every ported case pins a decision it used to assume.
  *
- * `e2e/sim/attendance-engine.spec.ts` is the worked example. The specs
- * still on the dead seam are enumerated in `e2e/helpers/stub.ts`'s
- * header; `verdict:` and `inferVerdict` are kept only so they compile
- * until they are ported.
+ * A body with no `route` is left unmapped, which `gate.ts` falls back to
+ * `unsure` — an ENGINE route since step 8 — and an unmapped body has no
+ * facts, so nothing is written and nothing is said. That is the
+ * direction that cannot invent a write in a spec which never mentioned
+ * one.
+ *
+ * For finer control (a floor override, `engineRoutes`, an injected
+ * extractor failure) a spec can still arm `helpers/stub.ts`'s
+ * `setRouterStub` / `setExtractorStub` / `engineOn` directly and pass no
+ * per-message routing at all; `postBatch` only writes the stub files
+ * when the batch itself declares something.
  */
 import type { APIRequestContext } from "@playwright/test";
 import { expect } from "@playwright/test";
 import { TestDb } from "../helpers/test-db";
 import { E2E } from "../helpers/env";
-import { setLlmStub, type StubVerdict } from "../helpers/stub";
+import { setExtractorStub, setRouterStub } from "../helpers/stub";
 import { londonAt } from "../helpers/constants";
-
-export type { StubVerdict };
 
 const HEADERS = { "x-api-key": E2E.WHATSAPP_API_KEY };
 
@@ -376,26 +383,6 @@ export async function createGroup(
   return g;
 }
 
-// ── Default-verdict inference for trivial bodies ───────────────────────
-//
-// ⚠️ INERT since §10 step 8 — see the header. What it returns is written
-// to a file nothing reads. Kept, rather than deleted with the seam, for
-// two reasons: `postBatch`'s signature is shared by ~20 specs that have
-// not been ported yet, and the two `sim default:` reasoning strings are
-// still in `live-llm.ts`'s `STUB_PREFIXES`, so if anything ever wires a
-// verdict path back up, a "live" sweep reading these is still caught.
-
-export function inferVerdict(body: string): StubVerdict | undefined {
-  const t = body.trim().toLowerCase().replace(/[!.\s]+$/g, "");
-  if (/^(in|i'?m in|count me in|in please|yes,? i'?m in)$/.test(t)) {
-    return { intent: "in", registerAttendance: "IN", react: "👍", confidence: 0.95, reasoning: "sim default: plain IN" };
-  }
-  if (/^(out|i'?m out|count me out|can'?t make it|sorry,? (i'?m )?out)$/.test(t)) {
-    return { intent: "out", registerAttendance: "OUT", react: "👋", confidence: 0.95, reasoning: "sim default: plain OUT" };
-  }
-  return undefined; // stub default = noise (bot stays silent)
-}
-
 // ── Result shapes ──────────────────────────────────────────────────────
 
 export interface SimMessageResult {
@@ -426,9 +413,15 @@ export interface BatchItem {
   /** Player key, or omit and pass `author` for an unknown sender. */
   player?: string;
   body: string;
-  /** ⚠️ INERT since §10 step 8. Setting it changes nothing the server
-   *  does — see the file header. Use `setRouterStub` + `setExtractorStub`. */
-  verdict?: StubVerdict;
+  /** What the ROUTER answered for this message — `self_att`, `other_att`,
+   *  `offer`, `question`, `balancer`, `score`, `admin_ops`, `unsure`,
+   *  `none`. Omitted → unmapped, which `gate.ts` falls back to `unsure`. */
+  route?: string;
+  /** The RAW JSON the extractor for that route returned. Build it with
+   *  `helpers/stub.ts`'s `selfIn` / `selfOut` / `otherFacts` / `facts` +
+   *  `claim`, so `parseFacts` still runs for real. Omitted → the body
+   *  extracts nothing, which cannot invent a write. */
+  facts?: Record<string, unknown>;
   author?: { name: string | null; phone: string };
   /** Simulate the message @-mentioning the bot ("@Match Time …"). Sets
    *  the structured `botMentioned` signal the interaction-contract gate
@@ -451,25 +444,18 @@ export interface SimHistoryEntry {
 export interface SimBatchOpts {
   /** Recent chat history to send with the batch (oldest first). */
   history?: SimHistoryEntry[];
-  /**
-   * ⚠️ INERT since §10 step 8 (2026-09-06). Still sends the
-   * `x-mt-attendance-engine` header; nothing reads it.
-   *
-   * It existed for a live A/B: one arm with the attendance engine on and
-   * the next with it off, in one process, because the dev server's
-   * environment is fixed at boot. `ENGINE_HEADER` / `engineHeaderOverride`
-   * were deleted from `src/lib/pipeline/gate.ts` with
-   * `ATTENDANCE_ENGINE_ENABLED` itself — "there is no second arm to A/B
-   * against any more", in that file's words, because the flag's off
-   * position reverted to `analyzeBatch` and `analyzeBatch` is gone.
-   *
-   * Kept only so `e2e/corpus/current-analyzer-pipeline.ts` and its
-   * `AttendanceEnginePipeline` subclass still compile. Passing it
-   * changes nothing; a spec that relies on it is asserting an arm that
-   * cannot exist. `src/lib/pipeline/__tests__/gate.test.ts` holds the
-   * tombstone for the deleted header.
-   */
-  attendanceEngine?: boolean;
+  /** Overrides ROUTER_GATE_FLOOR_ENABLED for this request
+   *  (`RouterStub.floor`). Default false. */
+  floor?: boolean;
+  /** Which of §10 step 7's routes this request owns. Omitted → the env
+   *  flags, which default ON. `[]` → own nothing, which is the only way
+   *  to assert "and this route was not owned". */
+  engineRoutes?: string[];
+  /** Bodies whose EXTRACTOR CALL fails with a real overload error, after
+   *  the SDK's four retries (`ExtractorStub.fail`). */
+  extractorFail?: string[];
+  /** Every extractor call fails — the total-overload edge. */
+  extractorFailAll?: boolean;
 }
 
 // ── The group itself ───────────────────────────────────────────────────
@@ -545,11 +531,18 @@ export class SimGroup {
 
   /** Send a BATCH of group messages through the real analyze pipeline. */
   async postBatch(items: BatchItem[], opts: SimBatchOpts = {}): Promise<SimBatchResult> {
-    const stub: Record<string, StubVerdict> = {};
+    // Per-message routing goes in by waMessageId rather than by body, so
+    // two messages in one batch can carry the SAME text and still be
+    // routed apart — which `router-gate.spec.ts` needs and a body map
+    // cannot express. Facts are still keyed by body: that is the seam
+    // `extractor-stub.ts` reads (it only ever sees the prompt), and it is
+    // why two identical bodies necessarily extract the same facts.
+    const routes: Record<string, string> = {};
+    const factBodies: Record<string, Record<string, unknown>> = {};
     const messages = items.map((it) => {
       const id = nextMsgId();
-      const v = it.verdict ?? inferVerdict(it.body);
-      if (!LIVE_LLM && v) stub[id] = v;
+      if (it.route) routes[id] = it.route;
+      if (it.facts) factBodies[it.body.trim()] = it.facts;
       let authorPhone = "";
       let authorName: string | null = null;
       if (it.author) {
@@ -572,7 +565,32 @@ export class SimGroup {
         ...(typeof tagged === "boolean" ? { botMentioned: tagged } : {}),
       };
     });
-    if (!LIVE_LLM) setLlmStub(stub);
+    // Arm the two seams ONLY when this batch actually says something
+    // about them, and never under MT_SIM_LIVE_LLM=1 (which pins both
+    // files empty on purpose, and which `assertSeamMatchesMode` refuses
+    // a run for if they are not). A spec that arms `setRouterStub` /
+    // `engineOn` itself and passes no per-message routing is therefore
+    // left alone, rather than having its carefully-built stub silently
+    // overwritten with an empty one on the next `post()`.
+    const declaresRouting =
+      Object.keys(routes).length > 0 ||
+      Object.keys(factBodies).length > 0 ||
+      opts.floor !== undefined ||
+      opts.engineRoutes !== undefined ||
+      opts.extractorFail !== undefined ||
+      opts.extractorFailAll !== undefined;
+    if (!LIVE_LLM && declaresRouting) {
+      setRouterStub({
+        floor: opts.floor ?? false,
+        ...(opts.engineRoutes ? { engineRoutes: opts.engineRoutes } : {}),
+        routes,
+      });
+      setExtractorStub({
+        bodies: factBodies,
+        ...(opts.extractorFail ? { fail: opts.extractorFail } : {}),
+        ...(opts.extractorFailAll ? { failAll: true } : {}),
+      });
+    }
     // Oldest first, spaced a minute apart ending 1 minute before now —
     // the same shape the Pi's in-memory buffer produces.
     const history = (opts.history ?? []).map((h, i, arr) => ({
@@ -582,12 +600,7 @@ export class SimGroup {
         h.timestamp ?? new Date(Date.now() - (arr.length - i) * 60_000).toISOString(),
     }));
     const res = await this.request.post("/api/whatsapp/analyze", {
-      headers: {
-        ...HEADERS,
-        ...(typeof opts.attendanceEngine === "boolean"
-          ? { "x-mt-attendance-engine": opts.attendanceEngine ? "1" : "0" }
-          : {}),
-      },
+      headers: HEADERS,
       data: {
         groupId: this.groupId,
         messages,
@@ -613,13 +626,22 @@ export class SimGroup {
     playerKey: string | null,
     body: string,
     opts: {
-      verdict?: StubVerdict;
+      /** What the ROUTER answered for this message. See `BatchItem`. */
+      route?: string;
+      /** The RAW JSON its extractor returned. See `BatchItem`. */
+      facts?: Record<string, unknown>;
       author?: { name: string | null; phone: string };
       /** Simulate an @Match Time tag (structured botMentioned signal). */
       botMentioned?: boolean;
       tag?: boolean;
       /** Recent chat history to send with this message (oldest first). */
       history?: SimHistoryEntry[];
+      /** Overrides ROUTER_GATE_FLOOR_ENABLED for this request. */
+      floor?: boolean;
+      /** Which step-7 routes this request owns. */
+      engineRoutes?: string[];
+      /** Make this message's extractor call fail like an overloaded API. */
+      extractorFails?: boolean;
     } = {},
   ): Promise<SimPostResult> {
     const batch = await this.postBatch(
@@ -627,13 +649,19 @@ export class SimGroup {
         {
           player: playerKey ?? undefined,
           body,
-          verdict: opts.verdict,
+          ...(opts.route ? { route: opts.route } : {}),
+          ...(opts.facts ? { facts: opts.facts } : {}),
           author: opts.author,
           botMentioned: opts.botMentioned,
           tag: opts.tag,
         },
       ],
-      { history: opts.history },
+      {
+        history: opts.history,
+        ...(opts.floor !== undefined ? { floor: opts.floor } : {}),
+        ...(opts.engineRoutes !== undefined ? { engineRoutes: opts.engineRoutes } : {}),
+        ...(opts.extractorFails ? { extractorFail: [body.trim()] } : {}),
+      },
     );
     return { ...batch.results[0], groupPosts: batch.groupPosts, dms: batch.dms, raw: batch.raw };
   }

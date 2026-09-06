@@ -58,17 +58,17 @@
  *                                            → `assertLiveSweepReachedModel`
  *
  * (3) is not hypothetical. `buildTestEnv()` used to `delete` the stub
- * path from its overlay, but the child is spawned with
- * `{ ...process.env, ...overlay }`, so an `MT_TEST_LLM_STUB_FILE`
- * already in the orchestrator's own environment survived into the dev
- * server and the "live" sweep was stubbed end to end. The overlay now
- * pins it to `""` (falsy — the analyzer's check is a plain truthiness
+ * flag from its overlay, but the child is spawned with
+ * `{ ...process.env, ...overlay }`, so a stub flag already in the
+ * orchestrator's own environment survived into the dev server and the
+ * "live" sweep was stubbed end to end. The overlay now pins each of the
+ * three to `""` (falsy — every reader's check is a plain truthiness
  * test) and this module asserts the result.
  */
 import { E2EPreflightError } from "./preflight";
 
 export const LIVE_ENV_FLAG = "MT_SIM_LIVE_LLM";
-export const STUB_FILE_ENV = "MT_TEST_LLM_STUB_FILE";
+export const DM_QA_STUB_ENV = "MT_TEST_DM_QA_STUB";
 /** §10 step 5's router seam. Mirrors `ROUTER_STUB_FILE_ENV` in
  *  `src/lib/pipeline/gate.ts`. */
 export const ROUTER_STUB_FILE_ENV = "MT_TEST_ROUTER_STUB_FILE";
@@ -172,15 +172,15 @@ export function assertSeamMatchesMode(
           `for this run.`,
       );
     }
-    if (!blank(childEnv[STUB_FILE_ENV])) {
+    if (!blank(childEnv[DM_QA_STUB_ENV])) {
       throw new E2EPreflightError(
         `e2e: REFUSING to run — ${LIVE_ENV_FLAG}=1 asks for a LIVE model run, but the ` +
-          `server under test would still see ${STUB_FILE_ENV}=${childEnv[STUB_FILE_ENV]}.\n` +
-          `  Since §10 step 8 this variable no longer stubs verdicts (analyzeBatch is ` +
-          `deleted) — it is dm-qa.ts's stub flag, and with it set every scoped DM answer ` +
-          `would be the SCOPED CONTEXT echoed back rather than a model's answer, reported ` +
-          `as the model's.\n` +
-          `  Fix:  unset ${STUB_FILE_ENV} in your shell — the suite sets it itself for ` +
+          `server under test would still see ${DM_QA_STUB_ENV}=${childEnv[DM_QA_STUB_ENV]}.\n` +
+          `  This is dm-qa.ts's stub flag (it was called MT_TEST_LLM_STUB_FILE while it ` +
+          `also pointed at analyzeBatch's verdict file; §10 step 8 deleted that reader). ` +
+          `With it set, every scoped DM answer would be the SCOPED CONTEXT echoed back ` +
+          `rather than a model's answer, reported as the model's.\n` +
+          `  Fix:  unset ${DM_QA_STUB_ENV} in your shell — the suite sets it itself for ` +
           `stubbed runs and pins it empty for live ones.`,
       );
     }
@@ -210,13 +210,13 @@ export function assertSeamMatchesMode(
     return;
   }
 
-  if (blank(childEnv[STUB_FILE_ENV])) {
+  if (blank(childEnv[DM_QA_STUB_ENV])) {
     throw new E2EPreflightError(
       `e2e: REFUSING to run — this is a STUBBED run (${LIVE_ENV_FLAG} is not 1) but the ` +
-        `server under test would have no ${STUB_FILE_ENV}, so dm-qa.ts would try the real ` +
+        `server under test would have no ${DM_QA_STUB_ENV}, so dm-qa.ts would try the real ` +
         `model and the DM-Q&A no-leak assertions would be grading a model's prose instead ` +
         `of the scoped context itself.\n` +
-        `  Fix:  run the suite via \`npm run test:e2e\`; do not clear ${STUB_FILE_ENV}.`,
+        `  Fix:  run the suite via \`npm run test:e2e\`; do not clear ${DM_QA_STUB_ENV}.`,
     );
   }
   if (!blank(childEnv[KEY_ENV])) {

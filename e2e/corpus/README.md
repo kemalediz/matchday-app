@@ -26,23 +26,53 @@ Both write a machine-readable report to `.e2e/corpus/report-<mode>.json`.
 
 > ### ⚠️ `npm run test:corpus` (the STUBBED sweep) measures nothing right now
 >
-> The stubbed sweep replays each case's `stub` block through `analyzeBatch`'s
+> The stubbed sweep replayed each case's `stub` block through `analyzeBatch`'s
 > verdict seam. §10 step 8 (2026-09-06) deleted `analyzeBatch`, `SYSTEM_PROMPT`
-> and `AnalysisVerdict`, so **nothing reads those verdicts any more**:
-> `CurrentAnalyzerPipeline` posts the messages, the server routes nothing, no
-> owner claims anything, and every case scores whatever a silent bot scores.
-> Expect `baseline.stub.json`'s passes to read as regressions across the board.
+> and `AnalysisVerdict`; the PR that ported the rest of the suite off that seam
+> deleted `verdict:` itself, so `CurrentAnalyzerPipeline` now forwards
+> **nothing** in `stub` mode. All 36 cases run against a server that routes
+> nothing and says nothing.
+>
+> **Measured 2026-09-06: 10 of 36 green, 24 recorded passes gone**
+> (`spurious_write 8 · wrong_write 3 · missed_write 10 · speech 5`;
+> missed-write rate 27.8% against §10 step 3's 2% target).
+>
+> **Do not read 10/36 as ten cases of coverage.** Most of those ten expect
+> nothing to happen, and a silent bot satisfies that for the wrong reason —
+> S3 (past tense never registers), S11 (a conditional drop holds), S29 (banter
+> drop refused) and S12b (a chase nudge is not a drop) are green because
+> nobody decided anything. The eight SPURIOUS writes are the other side of the
+> same coin: they come from the deterministic fast paths that sit ABOVE the
+> engine (`reconcilePastedRoster`, the bench-prompt reader), which still act
+> on messages nobody routed.
 >
 > This is **left failing on purpose**, not re-baselined. Re-recording it with
 > `MT_CORPUS_RECORD=1` would enshrine "the bot says nothing" as the expected
 > outcome of 36 real incidents, which is the single worst thing that could be
-> done to this corpus. The fix is to port the `stub` blocks from verdicts to
-> ROUTES + FACTS — one `route` and one extractor body per message, the seams
-> `e2e/sim/attendance-engine.spec.ts` already drives — and it is a real piece of
-> work, not a rename.
+> done to this corpus.
+>
+> **The port is not mechanical, and that is why it did not ride along with the
+> rest of the suite.** 25 of the 36 are `stubKind: "corrected"` and port
+> directly: write the facts the text carries, and the case still asks "does the
+> server execute a correct reading correctly?". The other **11 are
+> `historical`** — "the verdict the model ACTUALLY EMITTED during the incident"
+> — and there is no historical router or extractor output to port, because
+> neither component existed on the day. Each option changes what the corpus
+> asserts:
+>
+> | option | what it costs |
+> | --- | --- |
+> | re-label them `corrected` and write the true facts | the cases stop asking whether the SERVER catches a bad reading; they become "given a correct reading, is the outcome right?" |
+> | mark them live-only with a `liveOnlyReason` | CI-covered cases drop from 36 to 25 |
+> | write deliberately-wrong facts | tests the extractor, not the server — the "grading your own answer key" trap below |
+>
+> Rule 4 above ("never weaken an expectation to make the suite green") is why
+> none of those was chosen unilaterally. Pick one, re-record, and say which in
+> the commit.
 >
 > The LIVE sweeps (`test:corpus:live`, `:answers`, `:writes`, `:dryrun`) are
-> unaffected: they never used the verdict seam.
+> unaffected: they never used the verdict seam, and they are the corpus's real
+> evidence until this is settled.
 
 **61 cases; 36 run in CI.** The other 25 cannot be replayed deterministically and
 each must say why (see *Stubbed vs live*). The scoreboard states all three numbers

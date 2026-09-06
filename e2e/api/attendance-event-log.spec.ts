@@ -32,7 +32,7 @@
  * flush.
  */
 import { test, expect, postAnalyze, resetDb } from "../fixtures";
-import { setLlmStub } from "../helpers/stub";
+import { engineOn, otherFacts } from "../helpers/stub";
 import { U, MATCH, PHONE, ORG_ID } from "../helpers/constants";
 import { E2E } from "../helpers/env";
 import { testDb, type TestDb } from "../helpers/test-db";
@@ -213,13 +213,8 @@ test.describe("a squad-state write without an event FAILS", () => {
 
   test("the REAL analyze route passes the gate on a third-party OUT", async ({ request, db }) => {
     const id = msgId();
-    setLlmStub({
-      [id]: {
-        intent: "out",
-        confidence: 0.95,
-        registerFor: [{ name: "Tom", action: "OUT" }],
-        reasoning: "third-party OUT",
-      },
+    engineOn({
+      "@Match Time Tom can't make it": { route: "other_att", facts: otherFacts("Tom", "out") },
     });
     await postAnalyze(request, [
       {
@@ -310,11 +305,11 @@ test.describe("a squad can be rebuilt from the log alone", () => {
 test.describe("batchId records a flush instead of inferring it", () => {
   test("every message in one analyze request shares one batchId", async ({ request, db }) => {
     const ids = [msgId(), msgId(), msgId()];
-    setLlmStub(
-      Object.fromEntries(
-        ids.map((id) => [id, { intent: "noise", confidence: 0.95, reasoning: "banter" }]),
-      ),
-    );
+    // Routed `none`: banter, owned by nobody, written to no table but
+    // `AnalyzedMessage` — which is exactly the population this test is
+    // about. `batchId` has to group a flush whatever decided its
+    // messages, including "nothing did".
+    engineOn(Object.fromEntries(ids.map((_, i) => [`banter ${i}`, { route: "none" }])));
     await postAnalyze(
       request,
       ids.map((id, i) => ({
@@ -341,10 +336,7 @@ test.describe("batchId records a flush instead of inferring it", () => {
     // reconstruct.ts threw BOTH away rather than guess.
     const a = msgId();
     const b = msgId();
-    setLlmStub({
-      [a]: { intent: "noise", confidence: 0.9, reasoning: "x" },
-      [b]: { intent: "noise", confidence: 0.9, reasoning: "y" },
-    });
+    engineOn({ one: { route: "none" }, two: { route: "none" } });
     await postAnalyze(request, [
       { waMessageId: a, body: "one", authorPhone: PHONE.player, authorName: "Pat" },
     ]);

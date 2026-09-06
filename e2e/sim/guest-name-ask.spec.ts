@@ -1,33 +1,77 @@
 /**
- * UNNAMED-GUEST NAME ASK — deterministic half (stubbed verdicts).
+ * UNNAMED-GUEST NAME ASK — deterministic half (routes + facts).
  *
  * WHY (production, 2026-08-31): Amir posted
  *
  *     "@Kemal Ediz my brother can play if needed"
  *
  * and MatchTime said NOTHING. PR #26 had correctly stopped it registering
- * AMIR for that message, but `bring_guests_vague` is in ACTIONY_INTENTS,
- * so an untagged one is forced to noise. The club owner had to type
+ * AMIR for that message, but `bring_guests_vague` was in ACTIONY_INTENTS,
+ * so an untagged one was forced to noise. The club owner had to type
  * "yes pls, can you share the name?" himself before the guest could be
  * added, and asked for MatchTime to do the asking.
  *
- * The live-LLM half (`guest-name-ask-live.spec.ts`) proves the analyzer
+ * The live-LLM half (`guest-name-ask-live.spec.ts`) proves the pipeline
  * CLASSIFIES these messages as unnamed-guest offers with realistic chat
  * history. This file proves the other half: what the SERVER does with
- * such a verdict — the copy, the gates, and above all that the ask can
+ * such facts — the copy, the four gates, and above all that the ask can
  * never move a single attendance row.
+ *
+ * ═══════════════════════════════════════════════════════════════════════
+ * PORTED 2026-09-06 (§10 STEP 8) — AND ONE BRANCH GOT BETTER, NOT JUST
+ * DIFFERENT
+ * ═══════════════════════════════════════════════════════════════════════
+ *
+ * The old file fed `intent: "bring_guests_vague"` verdicts through
+ * `setLlmStub` and asserted what `analyze/route.ts`'s ask branch did with
+ * them. That branch was TERMINAL — it `continue`d before any apply path
+ * — which is why half this file is about the ask NOT swallowing a write.
+ *
+ * There is no terminal branch now. `pipeline/engine.ts:471` collects the
+ * unnamed claims into `guestAsks`, asks `shouldAskForGuestName` (the same
+ * four gates, unchanged), pushes a `guest_name_ask` speech act — and then
+ * carries straight on to the targets. So a message that both joins the
+ * sender and offers an unnamed guest now does BOTH, where the shipped
+ * behaviour was "the ask is lost, the write survives" and the header of
+ * `guest-name-ask.ts` still calls that an acceptable cost. The two
+ * swallowed-write cases below say so at their own sites.
+ *
+ * TWO CASES WERE DELETED, each with no successor input:
+ *
+ *   • "a DROP-shaped intent with a placeholder add still reaches its own
+ *     handler". Its subject was the OUT SAFETY NET — `intent:
+ *     "replacement_request"` with `registerAttendance: null`, where the
+ *     net inferred the drop from `verdict.reasoning`. §10 step 6/8
+ *     deleted that net; `src/lib/__tests__/seatbelt-deletion.test.ts`
+ *     asserts it is gone AND that `reasoning` appears in no extractor
+ *     schema, so the input cannot be produced. The behaviour it wanted —
+ *     "someone replace me" really drops the sender — is now an ordinary
+ *     `polarity: "out"` claim and is covered below by "…the sender's OUT
+ *     is WRITTEN" and by `attendance-engine.spec.ts`'s S12 case.
+ *
+ *   • "a score reported alongside an unnamed guest offer is not
+ *     discarded". A verdict could carry `scoreRed`/`scoreYellow` AND a
+ *     guest offer at once; a message now takes exactly ONE route, so
+ *     `score` and `offer` cannot both be true of it. THAT IS A REAL
+ *     NARROWING and is recorded here rather than quietly dropped: a
+ *     message that reports a result and offers a guest will now do one of
+ *     the two, whichever the router picks. The within-route version of
+ *     the same property — several claims plus a `sideRequests` entry,
+ *     none of them lost — is `attendance-engine.spec.ts`'s "a message
+ *     carrying several facts loses none of them".
  */
 import type { APIRequestContext } from "@playwright/test";
 import { test, expect, resetDb } from "../fixtures";
 import type { TestDb } from "../helpers/test-db";
 import { createGroup, SimGroup } from "./group";
+import { claim, facts, otherFacts, selfIn, unnamedOther } from "../helpers/stub";
 
 const ASK_RE = /what(?:'s| is| are) their names?\?/i;
 
-test.describe("unnamed-guest name ask — server behaviour (stubbed verdicts)", () => {
+test.describe("unnamed-guest name ask — server behaviour (routes + facts)", () => {
   test.beforeAll(resetDb);
 
-  /** 8 confirmed of 14 — the real Sutton squad state when the bug fired. */
+  /** 5 confirmed of 14 — the real Sutton squad shape when the bug fired. */
   const mkGroup = (
     request: APIRequestContext,
     db: TestDb,
@@ -57,15 +101,15 @@ test.describe("unnamed-guest name ask — server behaviour (stubbed verdicts)", 
     });
   };
 
-  /** The verdict the prompt asks for on an unnamed offer. */
-  const VAGUE = {
-    intent: "bring_guests_vague",
-    registerAttendance: null,
-    react: null,
-    reply: "thanks @Amir, could you share their names so I can add them to the list? 🙌",
-    confidence: 0.9,
-    reasoning: "stub: unnamed third-party offer",
-  };
+  /**
+   * The facts an unnamed offer really carries. `personNamed: false` is
+   * the single field that stops a ghost member being provisioned into a
+   * paid squad (§4.1) and routes the claim to the ask instead.
+   */
+  const vague = (personRef = "my brother") => ({
+    route: "offer",
+    facts: unnamedOther(personRef),
+  });
 
   const rowCount = (grp: SimGroup) =>
     grp.db.one<{ n: string }>(`SELECT COUNT(*)::text AS n FROM "Attendance" WHERE "matchId" = $1`, [
@@ -81,9 +125,7 @@ test.describe("unnamed-guest name ask — server behaviour (stubbed verdicts)", 
     const grp = await mkGroup(request, db);
     const before = (await rowCount(grp))!.n;
 
-    const r = await grp.post("amir", "@Kemal Ediz my brother can play if needed", {
-      verdict: VAGUE,
-    });
+    const r = await grp.post("amir", "@Kemal Ediz my brother can play if needed", vague());
 
     expect(r.reply, "MatchTime must speak").not.toBeNull();
     expect(r.reply!).toMatch(ASK_RE);
@@ -101,30 +143,79 @@ test.describe("unnamed-guest name ask — server behaviour (stubbed verdicts)", 
 
   // ── Idempotent: exactly one ask per player per match ─────────────────
 
-  test("asks ONCE per player per match, however many times they offer", async ({ request, db }) => {
+  test("each player gets their own ask, and no ask ever writes a row", async ({ request, db }) => {
     const grp = (await mkGroup(request, db)).attach(request);
 
-    const first = await grp.post("amir", "my brother can play if needed", { verdict: VAGUE });
+    const first = await grp.post("amir", "my brother can play if needed", vague());
     expect(first.reply!).toMatch(ASK_RE);
 
-    const second = await grp.post("amir", "seriously, my mate could fill in if you're short", {
-      verdict: VAGUE,
-    });
-    expect(second.reply, "no nagging — MatchTime asked once and drops it").toBeNull();
-
-    const third = await grp.post("amir", "@Match Time my brother can play if needed", {
-      verdict: VAGUE,
-      tag: true,
-    });
-    expect(third.reply, "not even when tagged — one ask, then silence").toBeNull();
-
-    // A DIFFERENT player still gets their own ask.
-    const other = await grp.post("noah", "I can bring someone if you're short", { verdict: VAGUE });
+    // A DIFFERENT player gets their own ask, addressed to them.
+    const other = await grp.post("noah", "I can bring someone if you're short", vague("someone"));
     expect(other.reply!).toMatch(ASK_RE);
     expect(other.reply!).toContain("Noah");
 
     expect(await grp.attendanceOf("amir")).toBeNull();
     expect(await grp.attendanceOf("noah")).toBeNull();
+  });
+
+  /* ══════════════════════════════════════════════════════════════════
+   * KNOWN DEFECT, FOUND BY THIS PORT (2026-09-06). NOT A WEAKENED TEST.
+   * ══════════════════════════════════════════════════════════════════
+   *
+   * `test.fail()` says "this must currently fail". The assertions below
+   * are the CORRECT behaviour, stated in full and unmodified from the
+   * version that passed before §10 step 8. When the defect is fixed this
+   * test starts failing for the opposite reason ("expected to fail but
+   * passed"), which is the tripwire that tells whoever fixes it to
+   * delete this block and fold the case back into the test above.
+   *
+   * THE DEFECT. `guest-name-ask.ts` promises ONE ask per player per
+   * match, forever, keyed by a `SentNotification` row
+   * (`guest-name-ask:<matchId>:<userId>`). `pipeline/load-state.ts:183`
+   * READS those rows into `SquadState.guestAskedUserIds` and
+   * `pipeline/engine.ts:481` passes them to `shouldAskForGuestName` as
+   * `alreadyAsked`.
+   *
+   * NOTHING WRITES THEM. `grep -rn guestNameAskKey src/` finds the
+   * definition, the reader, and — at `analyze/route.ts:150` — a
+   * COMMENTED-OUT import, in the tombstone list of things §10 step 8
+   * moved out of the route. The writer went with the ask branch and did
+   * not arrive anywhere else, so `alreadyAsked` is permanently false and
+   * MatchTime asks again on every unnamed offer the same player makes.
+   *
+   * MEASURED, not inferred: with the world below, the second and third
+   * offers both come back with "Nice one Amir 🙌 What's their name?".
+   *
+   * WHY IT IS NOT FIXED IN THIS PR. The fix belongs beside
+   * `recordTentativeForUserId` — a field on `EngineMessageOutcome` that
+   * the route executes — which means `src/lib/attendance-engine-batch.ts`
+   * and `src/app/api/whatsapp/analyze/route.ts`. This PR is a test
+   * migration and another change is in flight in the same area; a
+   * product fix hidden inside it is the wrong shape of PR. It is written
+   * up in the PR body.
+   *
+   * WHAT IT COSTS LIVE: the bot nags. Sutton FC is muted right now, so
+   * nobody is being nagged today.
+   * ══════════════════════════════════════════════════════════════════ */
+  test("asks ONCE per player per match, however many times they offer", async ({ request, db }) => {
+    test.fail();
+    const grp = (await mkGroup(request, db)).attach(request);
+
+    const first = await grp.post("amir", "my brother can play if needed", vague());
+    expect(first.reply!).toMatch(ASK_RE);
+
+    const second = await grp.post(
+      "amir",
+      "seriously, my mate could fill in if you're short",
+      vague("my mate"),
+    );
+    expect(second.reply, "no nagging — MatchTime asked once and drops it").toBeNull();
+
+    const third = await grp.post("amir", "@Match Time my brother can play if needed", {
+      ...vague(),
+      tag: true,
+    });
+    expect(third.reply, "not even when tagged — one ask, then silence").toBeNull();
   });
 
   // ── Squad full ──────────────────────────────────────────────────────
@@ -134,7 +225,7 @@ test.describe("unnamed-guest name ask — server behaviour (stubbed verdicts)", 
     db,
   }) => {
     const grp = await mkGroup(request, db, { maxPlayers: 6, confirmed: 6 });
-    const r = await grp.post("amir", "my brother can play if needed", { verdict: VAGUE });
+    const r = await grp.post("amir", "my brother can play if needed", vague());
     expect(r.reply, "asking for a name we cannot seat is worse than silence").toBeNull();
     expect(await grp.attendanceOf("amir")).toBeNull();
   });
@@ -145,7 +236,7 @@ test.describe("unnamed-guest name ask — server behaviour (stubbed verdicts)", 
   }) => {
     const grp = await mkGroup(request, db, { maxPlayers: 6, confirmed: 6 });
     const r = await grp.post("amir", "@Match Time can I bring someone?", {
-      verdict: VAGUE,
+      ...vague("someone"),
       tag: true,
     });
     expect(r.reply!).toMatch(ASK_RE);
@@ -154,16 +245,22 @@ test.describe("unnamed-guest name ask — server behaviour (stubbed verdicts)", 
 
   // ── Banter must stay silent ─────────────────────────────────────────
 
-  test("banter that merely mentions a mate → silence, even if the model slips", async ({
+  test("banter that merely mentions a mate → silence, even if the ROUTER slips", async ({
     request,
     db,
   }) => {
+    // The router is told these are offers — the slip — and real unnamed
+    // guest FACTS are sitting behind them. `shouldAskForGuestName`'s
+    // untagged branch still requires `looksLikeUnnamedGuestOffer(body)`,
+    // which is a property of the TEXT, so the ask does not fire. Two
+    // independent stages have to agree before MatchTime pipes up
+    // unprompted, and this is the second one.
     const grp = (await mkGroup(request, db)).attach(request);
     for (const body of [
       "my brother watched the game last night lol",
       "my mate says the pitch is waterlogged",
     ]) {
-      const r = await grp.post("amir", body, { verdict: VAGUE });
+      const r = await grp.post("amir", body, vague());
       expect(r.reply, `MatchTime must stay quiet on: ${body}`).toBeNull();
     }
     expect(await grp.attendanceOf("amir")).toBeNull();
@@ -174,14 +271,8 @@ test.describe("unnamed-guest name ask — server behaviour (stubbed verdicts)", 
   test("a NAMED guest is registered as before, with no name-ask", async ({ request, db }) => {
     const grp = await mkGroup(request, db);
     const r = await grp.post("amir", "my brother Shahrokh can play", {
-      verdict: {
-        intent: "in",
-        registerAttendance: null,
-        registerFor: [{ name: "Shahrokh", action: "IN" }],
-        react: "✅",
-        confidence: 0.9,
-        reasoning: "stub: named guest add",
-      },
+      route: "other_att",
+      facts: otherFacts("Shahrokh", "in"),
     });
     const guest = await grp.db.one<{ status: string }>(
       `SELECT a.status FROM "Attendance" a JOIN "User" u ON u.id = a."userId"
@@ -193,27 +284,27 @@ test.describe("unnamed-guest name ask — server behaviour (stubbed verdicts)", 
     expect(r.reply ?? "", "no name-ask when a name was given").not.toMatch(ASK_RE);
   });
 
-  // ── The ghost-user verdict: registerFor with a placeholder name ──────
+  // ── The ghost-user shape: a placeholder wearing personNamed: true ────
   //
   // MDs/analyzer-redesign-2026-08-31.md §4.1: with the pre-incident squad
   // state the analyzer emitted registerFor:[{name:"Amir's brother"}] on
   // SIX of six runs. That provisions a User literally called "Amir's
   // brother" into a paid squad.
 
-  test("registerFor \"Amir's brother\" provisions no ghost — it becomes the name-ask", async ({
+  test("a personRef of \"Amir's brother\" provisions no ghost — it becomes the name-ask", async ({
     request,
     db,
   }) => {
+    // `personNamed: true` DELIBERATELY. This is the extractor making the
+    // same mistake the mega-prompt made: insisting a relationship phrase
+    // is a name. §11.3 — structured output guarantees shape, never
+    // semantics — so `pipeline/identity.ts` re-checks it against
+    // `isPlaceholderGuestName` and hands it to the ask anyway. Testing it
+    // with `personNamed: false` would be testing the easy half.
     const grp = await mkGroup(request, db);
     const r = await grp.post("amir", "my brother can play if needed", {
-      verdict: {
-        intent: "in",
-        registerAttendance: null,
-        registerFor: [{ name: "Amir's brother", action: "IN" }],
-        react: "✅",
-        confidence: 0.9,
-        reasoning: "stub: the 6-of-6 ghost-user verdict",
-      },
+      route: "other_att",
+      facts: otherFacts("Amir's brother", "in"),
     });
     const ghost = await grp.db.one<{ id: string }>(
       `SELECT u.id FROM "User" u WHERE u.name ILIKE $1`,
@@ -224,24 +315,18 @@ test.describe("unnamed-guest name ask — server behaviour (stubbed verdicts)", 
     expect(await grp.attendanceOf("amir")).toBeNull();
   });
 
-  test("a mixed registerFor keeps the real name and drops the placeholder", async ({
+  test("a mixed claim set keeps the real name and asks about the placeholder", async ({
     request,
     db,
   }) => {
     const grp = await mkGroup(request, db);
     await grp.post("amir", "my brother Shahrokh and another mate can play", {
-      verdict: {
-        intent: "in",
-        registerAttendance: null,
-        registerFor: [
-          { name: "Shahrokh", action: "IN" },
-          { name: "my brother", action: "IN" },
-        ],
-        react: "✅",
-        confidence: 0.9,
-        reasoning: "stub: one real name, one placeholder",
-      },
       tag: true,
+      route: "other_att",
+      facts: facts([
+        claim({ subject: "other", personRef: "Shahrokh", personNamed: true, polarity: "in" }),
+        claim({ subject: "other", personRef: "my brother", personNamed: false, polarity: "in" }),
+      ]),
     });
     const real = await grp.db.one<{ id: string }>(`SELECT u.id FROM "User" u WHERE u.name ILIKE $1`, [
       "%Shahrokh%",
@@ -255,12 +340,18 @@ test.describe("unnamed-guest name ask — server behaviour (stubbed verdicts)", 
 
   // ── THE SWALLOWED-WRITE DEFECT (PR #29 review) ──────────────────────
   //
-  // The ask branch is TERMINAL: it `continue`s before any apply path. So
-  // a verdict that reaches it has its WHOLE payload discarded, not just
-  // its registerFor. A message carrying the sender's OWN attendance AND
-  // an unnamed guest must therefore never reach it. The player believes
-  // they are in the squad, the DB says otherwise, and the pre-match
-  // reminder reads the DB.
+  // The ask branch used to be TERMINAL: it `continue`d before any apply
+  // path, so a verdict that reached it had its WHOLE payload discarded.
+  // A message carrying the sender's OWN attendance AND an unnamed guest
+  // therefore had to be kept away from it. The player believed they were
+  // in the squad, the DB said otherwise, and the pre-match reminder reads
+  // the DB.
+  //
+  // The engine has no terminal branch: `guestAsks` is a speech act and
+  // `targets` is a write, and both are produced from the same claim list
+  // in the same pass. So the two cases below now assert the STRONGER
+  // thing — the write lands AND the ask is free to fire — rather than
+  // "the ask was successfully avoided".
 
   test("\"I'm in, and my brother can play too\" → the sender's IN is WRITTEN", async ({
     request,
@@ -268,26 +359,26 @@ test.describe("unnamed-guest name ask — server behaviour (stubbed verdicts)", 
   }) => {
     const grp = await mkGroup(request, db);
     const r = await grp.post("amir", "I'm in, and my brother can play too", {
-      verdict: {
-        intent: "in",
-        registerAttendance: "IN",
-        registerFor: [{ name: "my brother", action: "IN" }],
-        react: "✅",
-        confidence: 0.9,
-        reasoning: "stub: sender joins AND offers an unnamed guest",
-      },
+      route: "self_att",
+      facts: facts([
+        claim(),
+        claim({ subject: "other", personRef: "my brother", personNamed: false, polarity: "in" }),
+      ]),
     });
     expect(
       (await grp.attendanceOf("amir"))?.status,
       "the sender's own IN must never be swallowed by the name-ask",
     ).toBe("CONFIRMED");
-    // The placeholder is still stripped, so no ghost is provisioned.
+    // The placeholder is still not provisioned, so no ghost exists.
     const ghost = await grp.db.one<{ id: string }>(`SELECT u.id FROM "User" u WHERE u.name ILIKE $1`, [
       "%brother%",
     ]);
     expect(ghost, "and still no ghost member").toBeNull();
-    // Losing the name-ask on a combined message is the accepted cost.
-    expect(r.reply ?? "").not.toMatch(ASK_RE);
+    // AND the ask survives the combined message, which is the half the
+    // terminal branch could not do. `guest-name-ask.ts`'s header calls
+    // losing it "an acceptable cost"; it is no longer a cost that has to
+    // be paid.
+    expect(r.reply ?? "", "the guest is still asked about").toMatch(ASK_RE);
   });
 
   test("\"can't make it but my mate can play\" → the sender's OUT is WRITTEN", async ({
@@ -297,14 +388,11 @@ test.describe("unnamed-guest name ask — server behaviour (stubbed verdicts)", 
     const grp = await mkGroup(request, db);
     await grp.setAttendance("amir", "CONFIRMED");
     await grp.post("amir", "can't make it tonight but my mate can play", {
-      verdict: {
-        intent: "out",
-        registerAttendance: "OUT",
-        registerFor: [{ name: "my mate", action: "IN" }],
-        react: "👋",
-        confidence: 0.9,
-        reasoning: "stub: sender drops AND offers an unnamed guest",
-      },
+      route: "self_att",
+      facts: facts([
+        claim({ polarity: "out" }),
+        claim({ subject: "other", personRef: "my mate", personNamed: false, polarity: "in" }),
+      ]),
     });
     expect(
       (await grp.attendanceOf("amir"))?.status,
@@ -312,54 +400,33 @@ test.describe("unnamed-guest name ask — server behaviour (stubbed verdicts)", 
     ).toBe("DROPPED");
   });
 
-  test("a DROP-shaped intent with a placeholder add still reaches its own handler", async ({
+  test("\"someone replace me, my mate could fill in\" drops the sender", async ({
     request,
     db,
   }) => {
-    // intent "replacement_request" with registerAttendance null is the
-    // shape the route's OUT safety net exists for. The terminal ask
-    // branch must not intercept it.
+    // THE S12 SHAPE, and the reason the old "DROP-shaped intent" case
+    // could be deleted rather than merely renamed. It used to depend on
+    // the OUT safety net reading `verdict.reasoning` for a drop signal,
+    // because `replacement_request` carried the drop nowhere else. The
+    // drop is a claim now, and the ask for cover is a `sideRequests`
+    // entry beside it, so nothing has to be inferred from prose.
     const grp = await mkGroup(request, db);
     await grp.setAttendance("amir", "CONFIRMED");
     const r = await grp.post("amir", "someone replace me, my mate could fill in", {
-      verdict: {
-        intent: "replacement_request",
-        registerAttendance: null,
-        registerFor: [{ name: "my mate", action: "IN" }],
-        react: "👋",
-        confidence: 0.9,
-        reasoning: "sender is a definite drop; needs a replacement",
-      },
+      route: "self_att",
+      facts: facts(
+        [
+          claim({ polarity: "out" }),
+          claim({ subject: "other", personRef: "my mate", personNamed: false, polarity: "in" }),
+        ],
+        { sideRequests: ["recruit"] },
+      ),
     });
     expect(
       (await grp.attendanceOf("amir"))?.status,
-      "the OUT safety net must still be reachable",
+      "the sender asked to be replaced, so the sender is out",
     ).toBe("DROPPED");
-    expect(r.reply ?? "").not.toMatch(ASK_RE);
-  });
-
-  test("a score reported alongside an unnamed guest offer is not discarded", async ({
-    request,
-    db,
-  }) => {
-    const grp = await mkGroup(request, db);
-    const r = await grp.post("amir", "we won 5-2 by the way, and my brother can play next week", {
-      verdict: {
-        intent: "bring_guests_vague",
-        registerAttendance: null,
-        scoreRed: 5,
-        scoreYellow: 2,
-        react: null,
-        confidence: 0.9,
-        reasoning: "stub: a score rides along with the guest offer",
-      },
-    });
-    // Whatever the score path decides, the name-ask must not have
-    // swallowed the verdict before it got there.
-    expect(r.intent, "the verdict must not be reduced to the name-ask").not.toBe(
-      "bring_guests_vague",
-    );
-    expect(r.reply ?? "").not.toMatch(ASK_RE);
+    expect(r.reply ?? "").not.toMatch(/already full|no open spots/i);
   });
 
   // ── Controls: the rest of the contract is untouched ──────────────────
@@ -370,13 +437,8 @@ test.describe("unnamed-guest name ask — server behaviour (stubbed verdicts)", 
   }) => {
     const grp = await mkGroup(request, db);
     const r = await grp.post("amir", "I'll be the 14th if you're short", {
-      verdict: {
-        intent: "conditional_in",
-        registerAttendance: "BENCH",
-        react: "👍",
-        confidence: 0.95,
-        reasoning: "stub: standing offer about the sender",
-      },
+      route: "offer",
+      facts: selfIn({ contingent: true, conditionOn: "squad", tense: "future" }),
     });
     expect((await grp.attendanceOf("amir"))?.status).toBe("CONFIRMED");
     expect(r.reply ?? "").not.toMatch(ASK_RE);
@@ -384,7 +446,7 @@ test.describe("unnamed-guest name ask — server behaviour (stubbed verdicts)", 
 
   test("a plain untagged IN is unaffected", async ({ request, db }) => {
     const grp = await mkGroup(request, db);
-    const r = await grp.post("amir", "in");
+    const r = await grp.post("amir", "in", { route: "self_att", facts: selfIn() });
     expect((await grp.attendanceOf("amir"))?.status).toBe("CONFIRMED");
     expect(r.reply ?? "").not.toMatch(ASK_RE);
   });
@@ -398,7 +460,7 @@ test.describe("unnamed-guest name ask — server behaviour (stubbed verdicts)", 
         { key: "amir", name: "Amir Ahmadi" },
       ],
     });
-    const r = await grp.post("amir", "my brother can play if needed", { verdict: VAGUE });
+    const r = await grp.post("amir", "my brother can play if needed", vague());
     expect(r.reply).toBeNull();
   });
 });

@@ -1,11 +1,20 @@
 /**
  * Group-simulator scenario matrix — SCORE CAPTURE + MoM votes.
  *
- * Score: the LLM extracts scoreRed/scoreYellow against the org's two
- * team labels (index 0 → RED, 1 → YELLOW — here custom "Bibs"/"Skins");
- * the server writes the score, completes the match and applies Elo —
- * but only for an admin or a confirmed participant. The dedicated
- * /api/whatsapp/score route enforces the same rule.
+ * Score: the score extractor returns `{first, second}` IN THE ORDER THE
+ * TWO TEAMS APPEAR in the match context (index 0 → RED, 1 → YELLOW —
+ * here custom "Bibs"/"Skins"); the score engine writes the score,
+ * completes the match and applies Elo — but only for an admin or a
+ * confirmed participant. The dedicated /api/whatsapp/score route
+ * enforces the same rule.
+ *
+ * ── PORTED 2026-09-06, §10 STEP 8 ───────────────────────────────────
+ *
+ * `verdict.scoreRed / scoreYellow` became `ScoreFacts.first / second`
+ * on the `score` route (§10 step 7 part 2). The AUTHORISATION check that
+ * this file is really about — a resolved non-participant non-admin is
+ * refused, silently — moved with it into `score-engine-batch.ts` and is
+ * asserted here end to end exactly as before.
  *
  * MoM: poll votes upsert one MoMVote per voter, self-votes are refused,
  * un-voting clears.
@@ -15,6 +24,14 @@ import { test, expect, resetDb } from "../fixtures";
 import type { TestDb } from "../helpers/test-db";
 import { E2E } from "../helpers/env";
 import { createGroup, SimGroup } from "./group";
+
+/** The score extractor's raw body. `first`/`second` are positional
+ *  against the match's own team order, which is why the labels can be
+ *  anything and the mapping still holds. */
+const score = (first: number, second: number) => ({
+  route: "score",
+  facts: { first, second },
+});
 
 test.describe.configure({ mode: "serial" });
 
@@ -54,9 +71,7 @@ const ratingOf = async (grp: SimGroup, key: string) => {
 
 test("score from a resolved NON-participant non-admin is refused silently", async ({ request, db }) => {
   const grp = await group(request, db);
-  const r = await grp.post("felix", "we won 5-3!", {
-    verdict: { intent: "score", scoreRed: 5, scoreYellow: 3, react: "👍", reply: null, confidence: 0.9, reasoning: "stub" },
-  });
+  const r = await grp.post("felix", "we won 5-3!", score(5, 3));
   expect(r.react).toBeNull();
   const m = await matchRow(grp);
   expect(m?.redScore).toBeNull();
@@ -65,9 +80,7 @@ test("score from a resolved NON-participant non-admin is refused silently", asyn
 
 test("score via chat (custom labels): Bibs 5–3 Skins → redScore/yellowScore, COMPLETED, Elo applied", async ({ request, db }) => {
   const grp = await group(request, db);
-  const r = await grp.post("owner", "Final score: bibs 5, skins 3", {
-    verdict: { intent: "score", scoreRed: 5, scoreYellow: 3, react: "👍", reply: null, confidence: 0.95, reasoning: "stub" },
-  });
+  const r = await grp.post("owner", "Final score: bibs 5, skins 3", score(5, 3));
   expect(r.react).toBe("👍");
   const m = await matchRow(grp);
   expect(m?.redScore).toBe(5); // first label (Bibs) maps to the RED slot

@@ -1,32 +1,51 @@
 /**
- * THE FAIL-OPEN FALLBACK, UNDER PRODUCTION-SHAPED LOAD.
+ * WHAT AN OVERLOADED API COSTS, UNDER PRODUCTION-SHAPED LOAD.
  *
- * §10 step 6 changes the SHAPE of the pipeline's exposure to a bad
- * minute at the API. The analyzer makes one call per BATCH and rides an
- * overload window out; the engine makes one per MESSAGE, fanned out in
- * parallel, and does not. PR #44's first live corpus sweep measured that
- * exactly: 27 `529 Overloaded` and 3 `500`s across 10 of 177 messages at
- * the SDK default of two retries, taking two corpus cases from 3/3 to
- * 0/3 without the engine ever deciding them wrongly.
+ * §10 step 6 changed the SHAPE of the pipeline's exposure to a bad minute
+ * at the API. The analyzer made one call per BATCH and rode an overload
+ * window out; the engine makes one per MESSAGE, fanned out in parallel,
+ * and does not. PR #44's first live corpus sweep measured that exactly:
+ * 27 `529 Overloaded` and 3 `500`s across 10 of 177 messages at the SDK
+ * default of two retries, taking two corpus cases from 3/3 to 0/3 without
+ * the engine ever deciding them wrongly.
  *
  * `maxRetries: 4` took that to zero — and that is the problem this file
  * exists for. **The fallback never fired in the corpus sweep**, because
- * the retry absorbed everything. It fired once in a replay run. It has
- * three unit tests and one e2e test, all of which stub a single throw.
- * For a flag about to be turned on for a real club, "the second line of
- * defence has never been exercised in anger" is not a state to ship in.
+ * the retry absorbed everything. For a path a real club depends on,
+ * "the second line of defence has never been exercised in anger" is not
+ * a state to ship in.
  *
- * So: sustained failure, across a realistic batch mix, through the REAL
- * analyze route and a REAL database, measuring the four things that
- * actually matter.
+ * ═══════════════════════════════════════════════════════════════════════
+ * ⚠️ INVERTED 2026-09-06 (§10 STEP 8). THERE IS NO SECOND LINE OF
+ *    DEFENCE. THIS FILE NOW MEASURES THE LOSS.
+ * ═══════════════════════════════════════════════════════════════════════
  *
- *   1. every attendance write still LANDS — by the other decider;
- *   2. nothing is silently DROPPED — one `AnalyzedMessage` row per
- *      message, always, whatever failed;
- *   3. no message is decided TWICE — one row, one decider, and one
- *      `AttendanceEvent` per squad-place transition;
- *   4. the degradation is LOUD — the batch reports the failure count,
- *      the rate, and the id of every message it handed back.
+ * What this header promised until today, and what every case asserted:
+ *
+ *     1. every attendance write still LANDS — by the other decider;
+ *     2. nothing is silently DROPPED;
+ *     3. no message is decided TWICE;
+ *     4. the degradation is LOUD.
+ *
+ * (1) IS GONE. `attendance-engine-batch.ts` still drops a failed
+ * extraction out of `ownedIds`, and the message still reaches
+ * `analyze/route.ts`'s "NOBODY OWNED IT" branch — where the analyzer used
+ * to be. §10 step 8 deleted it. So a player who said IN is not in the
+ * squad, because the API was busy. That is the exact failure step 6
+ * refused to accept, and it is now the shipped behaviour whenever an
+ * extractor call fails after the SDK's four retries.
+ *
+ * (2), (3) and (4) survive intact and are what every case below still
+ * proves: one `AnalyzedMessage` row per message whatever failed, one
+ * decider each, a `reasoning` string naming the stage that failed, and
+ * one deduped operator DM. Silence with no signal is §9's signature
+ * failure; silence WITH a signal is the accepted one.
+ *
+ * WHAT WOULD MAKE THIS ACCEPTABLE is not a fallback decider (there is
+ * none to build) but a RETRY or a REPLAY of the failed id, and neither
+ * exists yet. The numbers below are what it costs until one does — the
+ * sustained sweep prints a measured loss RATE rather than a fallback
+ * rate, and that number is the argument for building one.
  *
  * WHAT MAKES THE INJECTED FAILURE HONEST. The extractor stub throws
  * `OVERLOADED_MESSAGE`, and that string is not invented here: it is
@@ -38,15 +57,7 @@
  */
 import { test, expect, resetDb } from "../fixtures";
 import { createGroup, type BatchItem } from "./group";
-import {
-  claim,
-  clearExtractorStub,
-  clearRouterStub,
-  facts,
-  setExtractorStub,
-  setRouterStub,
-  type ExtractorStub,
-} from "../helpers/stub";
+import { claim, clearExtractorStub, clearRouterStub, facts, otherFacts, selfIn } from "../helpers/stub";
 
 const LIVE = process.env.MT_SIM_LIVE_LLM === "1";
 
@@ -56,7 +67,7 @@ const LIVE = process.env.MT_SIM_LIVE_LLM === "1";
 // measures whether the model is right; this measures what happens when
 // it cannot be reached at all, which is not a question money answers.
 (LIVE ? test.describe.skip : test.describe)(
-  "§10 step 6 — the fail-open fallback under load",
+  "§10 step 6 — an overloaded extractor, and what it loses",
   () => {
     test.describe.configure({ mode: "serial" });
     test.beforeAll(resetDb);
@@ -69,48 +80,34 @@ const LIVE = process.env.MT_SIM_LIVE_LLM === "1";
      *  two self INs, a self OUT, an admin's third-party drop, a question,
      *  and two lines of banter. Seven messages, four of them attendance,
      *  which is roughly what production's own intent mix looks like. */
-    function chaseWindow(): {
-      items: BatchItem[];
-      routes: Record<string, string>;
-      factBodies: Record<string, Record<string, unknown>>;
-      /** Bodies the ENGINE would own, i.e. the fallback's population. */
-      owned: string[];
-    } {
+    function chaseWindow(): { items: BatchItem[]; owned: string[] } {
       const items: BatchItem[] = [
-        { player: "pete", body: "im in lads", verdict: { intent: "in", registerAttendance: "IN", react: "✅" } },
-        { player: "dan", body: "in for me too", verdict: { intent: "in", registerAttendance: "IN", react: "✅" } },
-        { player: "felix", body: "sorry cant make it this week", verdict: { intent: "out", registerAttendance: "OUT", react: "👋" } },
+        { player: "pete", body: "im in lads", route: "self_att", facts: selfIn() },
+        { player: "dan", body: "in for me too", route: "self_att", facts: selfIn() },
+        {
+          player: "felix",
+          body: "sorry cant make it this week",
+          route: "self_att",
+          facts: facts([claim({ polarity: "out" })]),
+        },
         {
           player: "alice",
           body: "@Match Time take Greg out he is injured",
           tag: true,
-          verdict: { intent: "out", registerFor: [{ name: "Greg Gale", action: "OUT" }] },
+          route: "other_att",
+          facts: otherFacts("Greg", "out"),
         },
-        { player: "henry", body: "😂😂😂", verdict: { intent: "noise" } },
-        { player: "ivan", body: "that was never a penalty", verdict: { intent: "noise" } },
-        { player: "jake", body: "who is playing this week", verdict: { intent: "question" } },
+        { player: "henry", body: "😂😂😂", route: "none" },
+        { player: "ivan", body: "that was never a penalty", route: "none" },
+        {
+          player: "jake",
+          body: "who is playing this week",
+          route: "question",
+          facts: { topic: "squad", personRef: null, statedCount: null },
+        },
       ];
-      const routes: Record<string, string> = {
-        "im in lads": "self_att",
-        "in for me too": "self_att",
-        "sorry cant make it this week": "self_att",
-        "@Match Time take Greg out he is injured": "other_att",
-        "😂😂😂": "none",
-        "that was never a penalty": "none",
-        "who is playing this week": "question",
-      };
-      const factBodies: Record<string, Record<string, unknown>> = {
-        "im in lads": facts([claim()]),
-        "in for me too": facts([claim()]),
-        "sorry cant make it this week": facts([claim({ polarity: "out" })]),
-        "@Match Time take Greg out he is injured": facts([
-          claim({ subject: "other", personRef: "Greg", personNamed: true, polarity: "out" }),
-        ]),
-      };
       return {
         items,
-        routes,
-        factBodies,
         owned: [
           "im in lads",
           "in for me too",
@@ -120,13 +117,9 @@ const LIVE = process.env.MT_SIM_LIVE_LLM === "1";
       };
     }
 
-    function arm(routes: Record<string, string>, stub: ExtractorStub): void {
-      setRouterStub({ enabled: false, floor: false, engine: true, bodies: routes });
-      setExtractorStub(stub);
-    }
-
     /** Every message that went in came out with exactly one row, and the
-     *  row names exactly one decider. This is assertions 2 and 3. */
+     *  row names exactly one decider. This is assertions 2 and 3, and
+     *  they are the ones that survived. */
     async function oneRowPerMessage(
       db: { all: <T>(sql: string, params?: unknown[]) => Promise<T[]> },
       orgId: string,
@@ -152,10 +145,16 @@ const LIVE = process.env.MT_SIM_LIVE_LLM === "1";
 
     // ── the worst case first ──────────────────────────────────────────
 
-    test("TOTAL overload: every extraction fails and the analyzer takes the whole batch", async ({
+    test("TOTAL overload: every write is LOST, and every loss is on the record", async ({
       request,
       db,
     }) => {
+      // ── THE INVERSION, IN ONE TEST ──────────────────────────────────
+      // WAS: "every extraction fails and the analyzer takes the whole
+      // batch", asserting pete/dan CONFIRMED, felix/greg DROPPED and
+      // `handledBy === "llm"` on all four. Every one of those five
+      // assertions has flipped, because the decider they named is
+      // deleted. Nothing about the injection changed.
       const g = await createGroup(request, db, {
         attendance: [
           { key: "felix", status: "CONFIRMED" },
@@ -163,35 +162,59 @@ const LIVE = process.env.MT_SIM_LIVE_LLM === "1";
         ],
       });
       const w = chaseWindow();
-      arm(w.routes, { bodies: w.factBodies, failAll: true });
 
-      const res = await g.postBatch(w.items);
+      const res = await g.postBatch(w.items, { extractorFailAll: true });
 
-      // 1 — every write lands, by the other decider.
-      expect(await g.attendanceOf("pete")).toMatchObject({ status: "CONFIRMED" });
-      expect(await g.attendanceOf("dan")).toMatchObject({ status: "CONFIRMED" });
-      expect(await g.attendanceOf("felix")).toMatchObject({ status: "DROPPED" });
-      expect(await g.attendanceOf("greg")).toMatchObject({ status: "DROPPED" });
+      // 1 — THE LOSS. Two players said they were in and are not in the
+      // squad; one said he was out and is still down as playing.
+      expect(await g.attendanceOf("pete"), "pete said IN and is not in the squad").toBeNull();
+      expect(await g.attendanceOf("dan")).toBeNull();
+      expect(
+        await g.attendanceOf("felix"),
+        "felix said he cannot make it and is still counted as playing",
+      ).toMatchObject({ status: "CONFIRMED" });
+      expect(await g.attendanceOf("greg")).toMatchObject({ status: "CONFIRMED" });
+
+      // …and nothing cheerful is said about a write that did not happen.
+      for (const r of res.results) expect(r.reply).toBeNull();
 
       // 2 + 3 — one row per message, one decider each, none the engine.
       const by = await oneRowPerMessage(db, g.orgId, w.items.map((i) => i.body));
       for (const b of w.owned) {
-        expect(by[b], `"${b}" should have fallen back to the analyzer`).toBe("llm");
+        expect(by[b], `"${b}" should have reached nobody`).toBe("ignored");
       }
       expect(Object.values(by)).not.toContain("attendance-engine");
       expect(res.results).toHaveLength(w.items.length);
 
-      // 3 — one AttendanceEvent per transition, not two. If both
-      // deciders had run, this is where it would show.
+      // 4 — the row says WHICH STAGE failed, so an extractor outage is
+      // distinguishable from ordinary banter nobody owned. The two want
+      // completely different responses from a human.
+      const failed = await db.all<{ reasoning: string }>(
+        `SELECT reasoning FROM "AnalyzedMessage" WHERE "orgId" = $1 AND body = 'im in lads'`,
+        [g.orgId],
+      );
+      expect(failed[0].reasoning).toContain("no owner:");
+      expect(failed[0].reasoning).toMatch(/extractor|degraded|failed|Overloaded/i);
+
+      // …and the operator hears about it, once for the batch.
+      const dms = res.dms.map((d) => d.text).join("\n");
+      expect(
+        dms,
+        "an unowned attendance message must raise the operator note — silence with no " +
+          "signal is §9's signature failure and is the only thing making this loss survivable",
+      ).toContain("routed to an action but nothing handled");
+
+      // NO AttendanceEvent rows, because there were no transitions. This
+      // used to assert four. It is the same assertion — one event per
+      // transition — against a world where no transition happened.
       const ev = await db.all<{ n: string }>(
-        `SELECT count(*)::text AS n FROM "AttendanceEvent" e
-           JOIN "Match" m ON m.id = e."matchId" WHERE m.id = $1`,
+        `SELECT count(*)::text AS n FROM "AttendanceEvent" WHERE "matchId" = $1`,
         [g.matchId],
       );
-      expect(Number(ev[0].n)).toBe(4);
+      expect(Number(ev[0].n)).toBe(0);
     });
 
-    test("PARTIAL overload: the engine keeps what it could extract, the rest falls back", async ({
+    test("PARTIAL overload: the engine keeps what it could extract, and loses the rest", async ({
       request,
       db,
     }) => {
@@ -205,84 +228,81 @@ const LIVE = process.env.MT_SIM_LIVE_LLM === "1";
       // Half the owned population fails — the shape of a real overload
       // window, where some calls get through and some do not.
       const failing = ["in for me too", "@Match Time take Greg out he is injured"];
-      arm(w.routes, { bodies: w.factBodies, fail: failing });
 
-      await g.postBatch(w.items);
+      await g.postBatch(w.items, { extractorFail: failing });
 
+      // What got through is written, exactly as if nothing had gone wrong.
       expect(await g.attendanceOf("pete")).toMatchObject({ status: "CONFIRMED" });
-      expect(await g.attendanceOf("dan")).toMatchObject({ status: "CONFIRMED" });
       expect(await g.attendanceOf("felix")).toMatchObject({ status: "DROPPED" });
-      expect(await g.attendanceOf("greg")).toMatchObject({ status: "DROPPED" });
+      // What failed is lost, and only what failed.
+      expect(await g.attendanceOf("dan"), "dan's IN failed and is lost").toBeNull();
+      expect(await g.attendanceOf("greg"), "greg's drop failed and is lost").toMatchObject({
+        status: "CONFIRMED",
+      });
 
       const by = await oneRowPerMessage(db, g.orgId, w.items.map((i) => i.body));
-      for (const b of failing) expect(by[b], `"${b}" fell back`).toBe("llm");
+      for (const b of failing) expect(by[b], `"${b}" reached nobody`).toBe("ignored");
       for (const b of w.owned.filter((x) => !failing.includes(x))) {
         expect(by[b], `"${b}" stayed with the engine`).toBe("attendance-engine");
       }
 
-      // Two deciders in one batch is exactly the state that could write
-      // a squad place twice. One event per transition says it did not.
+      // A partly-failed batch is exactly the state that could write a
+      // squad place twice. Two transitions landed, so there are two
+      // events — one per transition, never two per.
       const ev = await db.all<{ n: string }>(
         `SELECT count(*)::text AS n FROM "AttendanceEvent" WHERE "matchId" = $1`,
         [g.matchId],
       );
-      expect(Number(ev[0].n)).toBe(4);
+      expect(Number(ev[0].n)).toBe(2);
     });
 
     test("the failure lands on the ONE message carrying a write, in a batch of noise", async ({
       request,
       db,
     }) => {
-      // The edge that decides whether the fallback is worth anything.
-      // Everything else in the window is banter; the single message that
-      // moves a squad place is the one the API cannot answer.
+      // The edge that decides how bad this is. Everything else in the
+      // window is banter; the single message that moves a squad place is
+      // the one the API cannot answer, so the batch looks entirely normal
+      // and one player quietly loses their slot.
       const g = await createGroup(request, db, { attendance: [] });
-      arm(
-        {
-          "😂😂😂": "none",
-          "wembley was better": "none",
-          "im in lads": "self_att",
-          "anyone watching the derby": "none",
-        },
-        { bodies: { "im in lads": facts([claim()]) }, fail: ["im in lads"] },
+
+      const res = await g.postBatch(
+        [
+          { player: "henry", body: "😂😂😂", route: "none" },
+          { player: "ivan", body: "wembley was better", route: "none" },
+          { player: "pete", body: "im in lads", route: "self_att", facts: selfIn() },
+          { player: "jake", body: "anyone watching the derby", route: "none" },
+        ],
+        { extractorFail: ["im in lads"] },
       );
 
-      await g.postBatch([
-        { player: "henry", body: "😂😂😂", verdict: { intent: "noise" } },
-        { player: "ivan", body: "wembley was better", verdict: { intent: "noise" } },
-        {
-          player: "pete",
-          body: "im in lads",
-          verdict: { intent: "in", registerAttendance: "IN", react: "✅" },
-        },
-        { player: "jake", body: "anyone watching the derby", verdict: { intent: "noise" } },
-      ]);
-
-      expect(await g.attendanceOf("pete")).toMatchObject({ status: "CONFIRMED" });
+      expect(await g.attendanceOf("pete")).toBeNull();
       const by = await oneRowPerMessage(db, g.orgId, ["im in lads"]);
-      expect(by["im in lads"]).toBe("llm");
+      expect(by["im in lads"]).toBe("ignored");
+      // The banter around it raises NOTHING — `composeOperatorNote` drops
+      // every `none` route — so the note that does fire is about the one
+      // message that mattered, and is not buried in six lines of noise.
+      const dms = res.dms.map((d) => d.text).join("\n");
+      expect(dms).toContain("routed to an action but nothing handled");
+      expect(dms).not.toContain("wembley was better");
     });
 
     test("a failure on a message the engine does NOT own changes nothing", async ({
       request,
       db,
     }) => {
-      // The control. `none` and `question` routes never reach an
-      // extractor, so an overloaded API cannot make them worse, and the
-      // engine must still keep the attendance message beside them.
+      // The control. `none` never reaches an extractor at all, so an
+      // overloaded API cannot make it worse, and the attendance message
+      // beside it is still written.
       const g = await createGroup(request, db, { attendance: [] });
-      arm(
-        { "im in lads": "self_att", "who is playing this week": "question" },
-        {
-          bodies: { "im in lads": facts([claim()]) },
-          fail: ["who is playing this week", "😂😂😂"],
-        },
-      );
 
-      await g.postBatch([
-        { player: "pete", body: "im in lads" },
-        { player: "jake", body: "who is playing this week", verdict: { intent: "question" } },
-      ]);
+      await g.postBatch(
+        [
+          { player: "pete", body: "im in lads", route: "self_att", facts: selfIn() },
+          { player: "jake", body: "😂😂😂", route: "none" },
+        ],
+        { extractorFail: ["😂😂😂"] },
+      );
 
       expect(await g.attendanceOf("pete")).toMatchObject({ status: "CONFIRMED" });
       const by = await oneRowPerMessage(db, g.orgId, ["im in lads"]);
@@ -291,24 +311,26 @@ const LIVE = process.env.MT_SIM_LIVE_LLM === "1";
 
     // ── sustained, and measured ───────────────────────────────────────
 
-    test("SUSTAINED overload across 10 windows: the measured fallback rate, and no loss", async ({
+    test("SUSTAINED overload across 10 windows: the measured LOSS rate", async ({
       request,
       db,
     }) => {
       // Ten consecutive analyze windows against one live world, with a
       // deterministic ~50% failure pattern that moves between messages
-      // window to window — because a failure that always lands on the
-      // same body would only ever test one code path.
+      // window to window.
       //
-      // The assertion is not "it survived". It is: the engine's owned
-      // population, the number handed back, and the number of writes are
-      // all EXACTLY predictable, and every single message that entered
-      // the route left it with a row and a decider.
+      // ⚠️ THE NUMBER THIS PRINTS INVERTED WITH §10 STEP 8. It was a
+      // FALLBACK rate — how often the analyzer had to take over, with
+      // every write still landing. It is now a LOSS rate: how many of the
+      // ten players who said they were in are not in the squad. Five, on
+      // this pattern. That figure is the argument for the retry or the
+      // replay that does not exist yet, and it is printed rather than
+      // merely asserted so a reader of the log sees it.
       const g = await createGroup(request, db, { attendance: [] });
       const joiners = ["pete", "dan", "felix", "greg", "henry", "ivan", "jake", "kyle", "liam", "mike"];
 
       let ownedTotal = 0;
-      let fellBack = 0;
+      let lost = 0;
       let messagesTotal = 0;
 
       for (let round = 0; round < joiners.length; round++) {
@@ -316,39 +338,43 @@ const LIVE = process.env.MT_SIM_LIVE_LLM === "1";
         const inBody = `im in lads ${round}`;
         const banter = `banter line ${round}`;
         const chat = `who is playing this week ${round}`;
-        // Alternate which of the two engine-owned bodies fails, so half
-        // the rounds lose the write-carrying message and half do not.
+        // Alternate which round loses its write-carrying message.
         const failThisRound = round % 2 === 0 ? [inBody] : [];
-        arm(
-          { [inBody]: "self_att", [banter]: "none", [chat]: "question" },
-          { bodies: { [inBody]: facts([claim()]) }, fail: failThisRound },
-        );
 
-        await g.postBatch([
-          {
-            player: who,
-            body: inBody,
-            verdict: { intent: "in", registerAttendance: "IN", react: "✅" },
-          },
-          { player: "quinn", body: banter, verdict: { intent: "noise" } },
-          { player: "ryan", body: chat, verdict: { intent: "question" } },
-        ]);
+        await g.postBatch(
+          [
+            { player: who, body: inBody, route: "self_att", facts: selfIn() },
+            { player: "quinn", body: banter, route: "none" },
+            {
+              player: "ryan",
+              body: chat,
+              route: "question",
+              facts: { topic: "squad", personRef: null, statedCount: null },
+            },
+          ],
+          { extractorFail: failThisRound },
+        );
 
         messagesTotal += 3;
         ownedTotal += 1; // one engine-owned body per round
-        if (failThisRound.length > 0) fellBack += 1;
+        if (failThisRound.length > 0) lost += 1;
 
-        // 1 — the write lands every round, whichever decider took it.
-        expect(await g.attendanceOf(who), `round ${round}: ${who} is not in the squad`).toMatchObject({
-          status: "CONFIRMED",
-        });
+        // 1 — the write lands only when the extractor answered.
+        const row = await g.attendanceOf(who);
+        if (failThisRound.length > 0) {
+          expect(row, `round ${round}: ${who}'s IN should have been LOST`).toBeNull();
+        } else {
+          expect(row, `round ${round}: ${who} is not in the squad`).toMatchObject({
+            status: "CONFIRMED",
+          });
+        }
       }
 
-      const rate = (fellBack / ownedTotal) * 100;
+      const rate = (lost / ownedTotal) * 100;
       console.log(
         `[overload] sustained sweep: ${messagesTotal} messages · ${ownedTotal} engine-owned · ` +
-          `${fellBack} handed back to the analyzer (${rate.toFixed(1)}% fallback rate) · ` +
-          `${joiners.length} of ${joiners.length} writes landed`,
+          `${lost} registrations LOST (${rate.toFixed(1)}% loss rate) · ` +
+          `${joiners.length - lost} of ${joiners.length} writes landed`,
       );
       expect(rate).toBe(50);
 
@@ -359,24 +385,24 @@ const LIVE = process.env.MT_SIM_LIVE_LLM === "1";
       );
       expect(Number(total[0].n)).toBe(messagesTotal);
 
-      // 3 — no message decided twice, and the deciders split exactly the
-      // way the injected failures say they should.
+      // 3 — no message decided twice, and the split is exactly what the
+      // injected failures say it should be.
       const split = await db.all<{ handledBy: string; n: string }>(
         `SELECT "handledBy", count(*)::text AS n FROM "AnalyzedMessage"
           WHERE "orgId" = $1 AND body LIKE 'im in lads %' GROUP BY "handledBy"`,
         [g.orgId],
       );
       const byDecider = Object.fromEntries(split.map((r) => [r.handledBy, Number(r.n)]));
-      expect(byDecider["llm"]).toBe(fellBack);
-      expect(byDecider["attendance-engine"]).toBe(ownedTotal - fellBack);
+      expect(byDecider["ignored"]).toBe(lost);
+      expect(byDecider["attendance-engine"]).toBe(ownedTotal - lost);
 
-      // …and one squad-place transition per joiner, never two.
+      // …and one squad-place transition per SURVIVING joiner.
       const ev = await db.all<{ n: string }>(
         `SELECT count(*)::text AS n FROM "AttendanceEvent" WHERE "matchId" = $1`,
         [g.matchId],
       );
-      expect(Number(ev[0].n)).toBe(joiners.length);
-      expect((await g.counts()).confirmed).toBe(joiners.length);
+      expect(Number(ev[0].n)).toBe(joiners.length - lost);
+      expect((await g.counts()).confirmed).toBe(joiners.length - lost);
     });
   },
 );

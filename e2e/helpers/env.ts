@@ -53,19 +53,23 @@ export const E2E = {
   CRON_SECRET: "mt-e2e-cron-secret",
 
   /**
-   * `MT_TEST_LLM_STUB_FILE`'s path.
+   * `MT_TEST_DM_QA_STUB`'s value — a FLAG, not a path.
    *
-   * ⚠️ ITS CONTENTS HAVE HAD NO READER SINCE §10 STEP 8. It was the file
-   * `analyzeBatch` read verdicts out of; `analyzeBatch` is deleted. What
-   * survives is the ENV VAR, because `src/lib/dm-qa.ts:180` keys its own
-   * stub off `!!process.env.MT_TEST_LLM_STUB_FILE` — a truthiness test,
-   * never a read — and that stub is what makes the DM-Q&A no-leak
-   * assertions structural rather than a model's opinion. Setting a path
-   * nobody opens is the cheapest way to keep that flag honest; see
-   * `helpers/stub.ts`'s header for the full account and for the list of
-   * specs still waiting to be ported off the dead half.
+   * It was `MT_TEST_LLM_STUB_FILE`, and that name was doing two
+   * unrelated jobs: it pointed at the file `analyzeBatch` read verdicts
+   * out of, AND it is `src/lib/dm-qa.ts`'s stub flag, read there as a
+   * plain truthiness test and never opened. §10 step 8 deleted
+   * `analyzeBatch`; this PR deleted the file-writing helper with the
+   * specs that used it, which left a variable called "LLM stub file"
+   * that was neither an LLM stub nor a file.
+   *
+   * So it is renamed and its value is now just "1". With it set,
+   * `answerScopedQuestion` returns the SCOPED CONTEXT itself instead of
+   * calling Anthropic, which is how `e2e/sim/qa.spec.ts` asserts the
+   * no-leak guarantee structurally (no raw phone digits ever enter a
+   * model's context) rather than by reading a model's prose.
    */
-  LLM_STUB_FILE: path.join(REPO_ROOT, ".e2e", "llm-stub.json"),
+  DM_QA_STUB: "1",
 
   /** The ROUTER stub file (§10 step 5). Carries the router's answer AND
    *  the two step-5 flags, because the dev server's environment is fixed
@@ -155,7 +159,7 @@ export function buildTestEnv(): Record<string, string> {
     WHATSAPP_API_KEY: E2E.WHATSAPP_API_KEY,
     CRON_SECRET: E2E.CRON_SECRET,
     MT_TEST_MODE: "1",
-    MT_TEST_LLM_STUB_FILE: E2E.LLM_STUB_FILE,
+    MT_TEST_DM_QA_STUB: E2E.DM_QA_STUB,
     MT_TEST_ROUTER_STUB_FILE: E2E.ROUTER_STUB_FILE,
     MT_TEST_EXTRACTOR_STUB_FILE: E2E.EXTRACTOR_STUB_FILE,
     // Phase 1 autonomous onboarding (bot-added → intro → YES → org).
@@ -175,19 +179,20 @@ export function buildTestEnv(): Record<string, string> {
     // PINNED EMPTY, NOT DELETED. The child is spawned with
     // `{ ...process.env, ...thisOverlay }` (run.ts) and Playwright's
     // webServer merges the same way, so DELETING the key here only
-    // removes it from the overlay — an MT_TEST_LLM_STUB_FILE already in
-    // the orchestrator's own environment survived into the dev server
-    // and the "live" sweep ran entirely off the stub. An empty string
+    // removes it from the overlay — a stub flag already in the
+    // orchestrator's own environment survived into the dev server and
+    // the "live" sweep ran entirely off the stub. An empty string
     // overrides it, and every reader's check is a plain truthiness test.
     // helpers/live-llm.ts asserts the result rather than trusting it.
     //
-    // SINCE §10 STEP 8 THIS PINS ONE READER, NOT TWO. `analyzeBatch` is
-    // deleted, so the only thing still keyed off this variable is
-    // `dm-qa.ts`'s scoped-answer stub — which is exactly the thing a
-    // live run must not be reading, since a "live" DM-Q&A sweep that
-    // echoed the scoped context back would prove nothing about the
-    // model. The two seams that decide a WRITE are pinned below.
-    env.MT_TEST_LLM_STUB_FILE = "";
+    // THIS ONE PINS `dm-qa.ts`'s scoped-answer stub, and nothing else.
+    // (It used to pin `analyzeBatch` too, under the old
+    // `MT_TEST_LLM_STUB_FILE` name; §10 step 8 deleted that reader and
+    // this PR renamed the variable to say what is left.) A "live"
+    // DM-Q&A sweep that echoed the scoped context back would prove
+    // nothing about the model. The two seams that decide a WRITE are
+    // pinned below.
+    env.MT_TEST_DM_QA_STUB = "";
     // Same reasoning, for the router: a "live" sweep must not be able to
     // read a canned route out of a file, and must not be able to have
     // the floor or step 7's route ownership flipped by one either

@@ -19,6 +19,7 @@ import { test, expect, resetDb } from "../fixtures";
 import { REPO_ROOT } from "../helpers/env";
 import type { TestDb } from "../helpers/test-db";
 import { createGroup, SimGroup } from "./group";
+import { selfIn } from "../helpers/stub";
 
 const execFileAsync = promisify(execFile);
 
@@ -67,9 +68,10 @@ test("attendance verdicts can never register players when attendance is OFF (sta
   const grp2 = await createGroup(request, db, {
     features: { attendance: false, bench: false, squadFromList: true },
   });
-  const r = await grp2.post("dan", "in", {
-    verdict: { intent: "in", registerAttendance: "IN", react: "👍", confidence: 0.95, reasoning: "stub" },
-  });
+  // A perfectly good IN, routed and extracted — and refused, because the
+  // org does not track attendance. The org gate is above the engine, so
+  // the facts never get a chance to become a row.
+  const r = await grp2.post("dan", "in", { route: "self_att", facts: selfIn() });
   expect(r.handledBy).toBe("ignored");
   expect(r.react).toBeNull();
   expect(r.reply).toBeNull();

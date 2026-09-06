@@ -121,7 +121,6 @@ beforeEach(() => {
   captured.length = 0;
   create.mockClear();
   process.env.ANTHROPIC_API_KEY = "sk-test";
-  delete process.env.MT_TEST_LLM_STUB_FILE;
   vi.useFakeTimers();
   vi.setSystemTime(new Date("2026-08-31T12:00:00.000Z"));
 });

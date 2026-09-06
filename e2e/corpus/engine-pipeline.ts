@@ -37,9 +37,9 @@
  * in step 8, in that file's words because "there is no second arm to A/B
  * against any more": the flag's off position reverted to `analyzeBatch`,
  * and `analyzeBatch` is gone. So both arms of this A/B are now the same
- * arm. `attendanceEngine = true` still sends the header; nothing reads
- * it, and pipeline #1 already runs the engine because that is simply how
- * the route works.
+ * arm. The `attendanceEngine` field that sent the header is deleted with
+ * the header itself; pipeline #1 already runs the engine, because that is
+ * simply how the route works.
  *
  * KEPT RATHER THAN DELETED, for one reason: `pipeline` is a NAME in
  * `baseline.stub.json` and in every report under `.e2e/corpus/`, and a
@@ -54,9 +54,6 @@ import type { CorpusMode } from "./pipeline";
 
 export class AttendanceEnginePipeline extends CurrentAnalyzerPipeline {
   override readonly name = "attendance-engine";
-
-  /** Every request this pipeline makes forces the engine ON. */
-  protected override readonly attendanceEngine = true;
 
   /**
    * LIVE ONLY, deliberately.

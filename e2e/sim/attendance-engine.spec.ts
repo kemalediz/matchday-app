@@ -761,7 +761,7 @@ const LIVE = process.env.MT_SIM_LIVE_LLM === "1";
     // fires. Silence with no signal is §9's signature failure; silence
     // WITH a signal is the accepted one.
     const g = await createGroup(request, db, { attendance: [] });
-    setRouterStub({ enabled: false, floor: false, engine: true, bodies: { in: "self_att" } });
+    setRouterStub({ floor: false, bodies: { in: "self_att" } });
     // Something `extractJson` cannot read at all.
     setExtractorStub({ bodies: { in: "not json at all" as never } });
 
@@ -886,9 +886,7 @@ const LIVE = process.env.MT_SIM_LIVE_LLM === "1";
     // decision by a live owner and not the flag being off.
     const g = await createGroup(request, db, { attendance: [] });
     setRouterStub({
-      enabled: false,
       floor: false,
-      engine: true,
       engineRoutes: ["question"],
       bodies: {
         in: "self_att",

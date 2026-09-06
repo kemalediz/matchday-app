@@ -2,28 +2,60 @@
  * §10 STEP 5 — the router gate, through the REAL analyze route.
  *
  * The unit tests prove the partition is monotone. This proves the thing
- * that actually matters: that turning the gate on does not change what
- * MatchTime writes, and that turning it off restores today exactly.
+ * that actually matters: what a `none` route COSTS, and what the floor
+ * buys back.
  *
  * Four questions, in the order they matter:
  *
- *   1. With the gate OFF, is anything different? (Must be: no.)
- *   2. With the gate ON, does an all-banter batch reach the analyzer at
- *      all? (Must be: no — that is the 44x saving.)
- *   3. With the gate ON and one real IN in a banter batch, does the IN
- *      still register? (Must be: yes.)
- *   4. If the router wrongly routes a real IN `none`, what happens —
+ *   1. With every message routed `none`, does the batch go quiet without
+ *      going invisible? (That is the 44x saving, and the row is what
+ *      stops it being a disappearance.)
+ *   2. With one real IN in a banter batch, does the IN still register?
+ *   3. If the router wrongly routes a real IN `none`, what happens —
  *      with the floor off, and with it on? (The regression, measured,
  *      and the seatbelt catching it.)
+ *   4. Does gating narrow only what the MODEL sees, or does it also
+ *      narrow what the ENGINE'S BATCH RULES see? (Both, since §10 step 8
+ *      — measured in the last case rather than assumed.)
  *
- * Plus the one that is easy to forget: a gated message must not become
- * invisible. §11.1's objection to the `none` bucket is that a message
- * disappears with no `AnalyzedMessage.action`, and the row this writes
- * is what makes "did the gate eat an IN?" answerable.
+ * ═══════════════════════════════════════════════════════════════════════
+ * PORTED 2026-09-06, §10 STEP 8. THREE CASES WERE DELETED — READ WHY
+ * ═══════════════════════════════════════════════════════════════════════
+ *
+ * ① "with the gate OFF, the batch reaches the analyzer exactly as it does
+ *    today". `ROUTER_GATE_ENABLED` is deleted from `pipeline/gate.ts`,
+ *    together with the analyzer its off position reverted to. There is no
+ *    gate-off state: `routerIsNeeded()` now takes no arguments and
+ *    returns true, because without a route nothing has an owner and
+ *    MatchTime says nothing to anybody. `gate.ts`'s own essay is the
+ *    argument, `__tests__/gate.test.ts` ("names no predicate for a flag
+ *    that was deleted") is the tombstone, and
+ *    `attendance-engine.spec.ts`'s first case pins what replaced it —
+ *    an unrouted message is OWNED, and writes nothing.
+ *
+ * ② "the IN safety net still sees a gated message as the author's latest"
+ * ③ "…and DOES fire when the gated message came first"
+ *
+ *    Both drove the Najib IN safety net: `intent: "in"` with
+ *    `registerAttendance: null` was forced back to IN, but only on the
+ *    author's LAST message in the batch, and `latestIdxByAuthor` was
+ *    built from `fresh`. The net is deleted (§10 step 6/8) and so is its
+ *    input — a `Claim` has one `polarity` and cannot contradict itself,
+ *    so there is nothing for a net to repair. `grep latestIdxByAuthor
+ *    src/` returns nothing. The incident itself is still replayable:
+ *    `attendance-engine.spec.ts`'s "S6 — an IN at a FULL squad still
+ *    writes" and `e2e/corpus/incidents.jsonl`'s
+ *    `S6-najib-in-at-full-squad`.
+ *
+ * The batch-visibility property those two cases ALSO carried — that a
+ * gated message still occupies its place in the batch for the rules that
+ * scan it — is kept, and is now case 4 below, driven through the
+ * banter-drop guard instead of the deleted net.
  */
 import { test, expect, resetDb } from "../fixtures";
 import { createGroup } from "./group";
-import { clearRouterStub, setRouterStub } from "../helpers/stub";
+import { clearRouterStub } from "../helpers/stub";
+import { otherFacts, selfIn } from "../helpers/stub";
 
 const LIVE = process.env.MT_SIM_LIVE_LLM === "1";
 
@@ -35,45 +67,19 @@ const LIVE = process.env.MT_SIM_LIVE_LLM === "1";
   test.beforeAll(resetDb);
   test.afterEach(() => clearRouterStub());
 
-  test("with the gate OFF, the batch reaches the analyzer exactly as it does today", async ({
+  test("an all-banter batch never reaches an extractor, and is not invisible either", async ({
     request,
     db,
   }) => {
     const g = await createGroup(request, db, { attendance: [] });
-    clearRouterStub(); // {} → the flags fall back to the env, where both are off
 
     const res = await g.postBatch([
-      { player: "pete", body: "😂😂😂" },
-      { player: "alice", body: "in", verdict: { intent: "in", registerAttendance: "IN", react: "✅" } },
+      { player: "pete", body: "😂😂😂", route: "none" },
+      { player: "dan", body: "🐐", route: "none" },
+      { player: "felix", body: "great game last night", route: "none" },
     ]);
 
-    expect(await g.attendanceOf("alice")).toMatchObject({ status: "CONFIRMED" });
-    // Every message was analysed: nothing is tagged `router-gate`.
-    const gated = await db.all<{ n: string }>(
-      `SELECT count(*)::text AS n FROM "AnalyzedMessage" WHERE "handledBy" = 'router-gate'`,
-    );
-    expect(gated[0].n).toBe("0");
-    expect(res.results).toHaveLength(2);
-  });
-
-  test("with the gate ON, an all-banter batch never reaches the analyzer", async ({
-    request,
-    db,
-  }) => {
-    const g = await createGroup(request, db, { attendance: [] });
-    setRouterStub({
-      enabled: true,
-      floor: false,
-      bodies: { "😂😂😂": "none", "🐐": "none", "great game last night": "none" },
-    });
-
-    const res = await g.postBatch([
-      { player: "pete", body: "😂😂😂" },
-      { player: "dan", body: "🐐" },
-      { player: "felix", body: "great game last night" },
-    ]);
-
-    // Silence, and no writes — the same outcome the mega-call produces
+    // Silence, and no writes — the same outcome the mega-call produced
     // for banter, for a fraction of the money.
     expect(res.groupPosts).toEqual([]);
     for (const r of res.results) {
@@ -91,25 +97,22 @@ const LIVE = process.env.MT_SIM_LIVE_LLM === "1";
     for (const row of rows) {
       expect(row.handledBy).toBe("router-gate");
       expect(row.intent).toBe("noise");
-      expect(row.reasoning).toContain("router-gate:");
+      // The reason string changed with §10 step 8: it was
+      // `router-gate: …` written by the gate's own peel, and it is now
+      // `route.ts`'s single "NOBODY OWNED IT" line, which names the route
+      // that produced the silence. Same guarantee — the row says why —
+      // from one place instead of two.
+      expect(row.reasoning).toContain("no owner: route=none");
     }
   });
 
-  test("with the gate ON, a real IN inside a banter batch still registers", async ({
-    request,
-    db,
-  }) => {
+  test("a real IN inside a banter batch still registers", async ({ request, db }) => {
     const g = await createGroup(request, db, { attendance: [] });
-    setRouterStub({
-      enabled: true,
-      floor: false,
-      bodies: { "😂😂😂": "none", "🐐": "none", in: "self_att" },
-    });
 
     await g.postBatch([
-      { player: "pete", body: "😂😂😂" },
-      { player: "alice", body: "in", verdict: { intent: "in", registerAttendance: "IN", react: "✅" } },
-      { player: "dan", body: "🐐" },
+      { player: "pete", body: "😂😂😂", route: "none" },
+      { player: "alice", body: "in", route: "self_att", facts: selfIn() },
+      { player: "dan", body: "🐐", route: "none" },
     ]);
 
     expect(await g.attendanceOf("alice")).toMatchObject({ status: "CONFIRMED" });
@@ -117,7 +120,11 @@ const LIVE = process.env.MT_SIM_LIVE_LLM === "1";
       `SELECT "handledBy" FROM "AnalyzedMessage" WHERE "orgId" = $1 AND body = 'in'`,
       [g.orgId],
     );
-    expect(theIn?.handledBy).toBe("llm");
+    // The AUDIT column, which says WHO decided. It read `llm` while the
+    // mega-prompt existed; the wire `handledBy` in the response is still
+    // `llm` for every owned message (`route.ts`'s note on the two
+    // fields), and this one names the engine.
+    expect(theIn?.handledBy).toBe("attendance-engine");
   });
 
   test("THE REGRESSION: a real IN misrouted `none` is dropped — with the floor off", async ({
@@ -127,11 +134,14 @@ const LIVE = process.env.MT_SIM_LIVE_LLM === "1";
     // This is §11.1's failure, reproduced deliberately rather than
     // discovered in production. It is the honest cost of step 5 and the
     // reason the recall number in the PR is the number that matters.
+    //
+    // Note the FACTS are supplied and are perfectly good. They are never
+    // asked for: `none` is not in `ENGINE_ROUTES`, so no extractor runs
+    // and the write is lost one layer before anything could decide it.
     const g = await createGroup(request, db, { attendance: [] });
-    setRouterStub({ enabled: true, floor: false, bodies: { in: "none" } });
 
     await g.postBatch([
-      { player: "alice", body: "in", verdict: { intent: "in", registerAttendance: "IN", react: "✅" } },
+      { player: "alice", body: "in", route: "none", facts: selfIn() },
     ]);
 
     expect(await g.attendanceOf("alice")).toBeNull();
@@ -148,20 +158,20 @@ const LIVE = process.env.MT_SIM_LIVE_LLM === "1";
     db,
   }) => {
     const g = await createGroup(request, db, { attendance: [] });
-    setRouterStub({ enabled: true, floor: true, bodies: { in: "none" } });
 
-    await g.postBatch([
-      { player: "alice", body: "in", verdict: { intent: "in", registerAttendance: "IN", react: "✅" } },
-    ]);
+    await g.postBatch([{ player: "alice", body: "in", route: "none", facts: selfIn() }], {
+      floor: true,
+    });
 
     expect(await g.attendanceOf("alice")).toMatchObject({ status: "CONFIRMED" });
     const row = await db.one<{ handledBy: string }>(
       `SELECT "handledBy" FROM "AnalyzedMessage" WHERE "orgId" = $1 AND body = 'in'`,
       [g.orgId],
     );
-    // Forced back onto the analysed path, and handled by the analyzer
-    // exactly as if the router had never said `none`.
-    expect(row?.handledBy).toBe("llm");
+    // Forced back onto an owned route — `routeFloor("in")` returns
+    // `self_att` — and decided by the engine exactly as if the router had
+    // never said `none`. It used to read `llm` for the same reason.
+    expect(row?.handledBy).toBe("attendance-engine");
   });
 
   test("the floor rescues an @mention registration too, and nothing else", async ({
@@ -170,22 +180,23 @@ const LIVE = process.env.MT_SIM_LIVE_LLM === "1";
   }) => {
     // `@Ehtisham Ul Haq In` routed `none` is the live-corpus failure the
     // mention half of the floor was built for; `@Henry Hill In` is the
-    // same shape against this fixture's roster.
+    // same shape against this fixture's roster. `routeFloor` returns
+    // `other_att` for it, which is an engine route, so the extractor is
+    // then asked and the claim below is what it finds.
     const g = await createGroup(request, db, { attendance: [] });
-    setRouterStub({
-      enabled: true,
-      floor: true,
-      bodies: { "@Henry Hill In": "none", "Zeeshan is out 😂": "none" },
-    });
 
-    await g.postBatch([
-      {
-        player: "alice",
-        body: "@Henry Hill In",
-        verdict: { intent: "in", registerFor: [{ name: "Henry Hill", action: "IN" }] },
-      },
-      { player: "pete", body: "Zeeshan is out 😂" },
-    ]);
+    await g.postBatch(
+      [
+        {
+          player: "alice",
+          body: "@Henry Hill In",
+          route: "none",
+          facts: otherFacts("Henry Hill", "in"),
+        },
+        { player: "pete", body: "Zeeshan is out 😂", route: "none" },
+      ],
+      { floor: true },
+    );
 
     expect(await g.attendanceOf("henry")).toMatchObject({ status: "CONFIRMED" });
     // "Zeeshan is out 😂" is a SENTENCE, not a bare declaration — the
@@ -197,68 +208,79 @@ const LIVE = process.env.MT_SIM_LIVE_LLM === "1";
     expect(zeeshan?.handledBy).toBe("router-gate");
   });
 
-  test("a gated message still counts as part of the batch for the guards that scan it", async ({
+  test("WHAT GATING COSTS: a protest the router calls banter cannot protect its author", async ({
     request,
     db,
   }) => {
-    // The banter-drop guard (route.ts) strips a third-party OUT when the
-    // TARGET also spoke in the same batch and did not corroborate it.
-    // It scans `fresh`. If the gate had removed the target's own message
-    // from that array, the guard would flip from "strip" to "apply" and
-    // drop a player who is actually in — a regression the gate must not
-    // introduce. So the gate narrows only what the MODEL sees.
+    // ══════════════════════════════════════════════════════════════════
+    // PORTED 2026-09-06, AND THE ANSWER INVERTED. READ THIS ONE.
+    // ══════════════════════════════════════════════════════════════════
+    //
+    // WAS: "a gated message still counts as part of the batch for the
+    // guards that scan it". The banter-drop guard lived in
+    // `analyze/route.ts`, scanned `fresh` — every message in the request,
+    // whatever its route — and stripped a third-party OUT when the TARGET
+    // "also spoke in the same batch and did not corroborate it". So a
+    // gated 😂 still protected its author, and the test's whole point was
+    // that the gate narrows what the MODEL sees and nothing else.
+    //
+    // IT NOW NARROWS BOTH, and deliberately. `pipeline/engine.ts`'s
+    // `banterRefusal` takes `batch: EngineMessage[]` — the messages the
+    // ENGINE OWNS — and refuses the drop only when the target's own
+    // message carries `subject: "sender", polarity: "in"`. Two things
+    // changed at once: the guard needs a CLAIM rather than any utterance,
+    // and a `none`-routed message is not in the batch to carry one. That
+    // function's header says why the narrower rule was chosen: "An
+    // admin's uncontested instruction is always honoured — that is the
+    // control case, and losing it would be its own incident."
+    //
+    // So this test MEASURES the cost rather than asserting a property
+    // that is no longer true. Both halves run against the same world,
+    // one routing apart, because the difference between them is the
+    // finding.
     const g = await createGroup(request, db, {
-      attendance: [{ key: "greg", status: "CONFIRMED" }],
+      attendance: [
+        { key: "greg", status: "CONFIRMED" },
+        { key: "dan", status: "CONFIRMED" },
+      ],
     });
-    setRouterStub({ enabled: true, floor: false, bodies: { "😂": "none" } });
 
+    // ── A. the protest is GATED. The drop lands. ─────────────────────
     await g.postBatch([
       {
-        player: "pete",
-        body: "Zair is out",
-        verdict: { intent: "out", registerFor: [{ name: "Zair", action: "OUT" }] },
+        player: "alice",
+        body: "@Match Time Greg is out",
+        tag: true,
+        route: "other_att",
+        facts: otherFacts("Greg", "out"),
       },
-      { player: "greg", body: "😂" },
+      { player: "greg", body: "im in", route: "none", facts: selfIn() },
     ]);
+    expect(
+      await g.attendanceOf("greg"),
+      "a gated protest is invisible to the guard — the measured cost of the gate",
+    ).toMatchObject({ status: "DROPPED" });
 
-    // Zair spoke and did not say he was out, so the guard strips it —
-    // exactly as it does with the gate off.
-    expect(await g.attendanceOf("greg")).toMatchObject({ status: "CONFIRMED" });
-  });
-
-  test("the IN safety net still sees a gated message as the author's latest", async ({
-    request,
-    db,
-  }) => {
-    // The Najib net (2026-05-08): intent:"in" with registerAttendance
-    // null is forced back to IN, but ONLY on the author's LAST message
-    // in the batch. `latestIdxByAuthor` is built from `fresh`, so a
-    // gated message must still occupy its index — otherwise the net
-    // would fire on a superseded message and register someone who had
-    // moved on.
-    const g = await createGroup(request, db, { attendance: [] });
-    setRouterStub({ enabled: true, floor: false, bodies: { "😂": "none" } });
-
-    await g.postBatch([
-      // intent "in" with NO registerAttendance — the net's trigger.
-      { player: "alice", body: "yeah go on then", verdict: { intent: "in", registerAttendance: null } },
-      { player: "alice", body: "😂" },
+    // ── B. the same protest, ROUTED. The drop is refused. ────────────
+    const h = await createGroup(request, db, {
+      attendance: [
+        { key: "greg", status: "CONFIRMED" },
+        { key: "dan", status: "CONFIRMED" },
+      ],
+    });
+    await h.postBatch([
+      {
+        player: "alice",
+        body: "@Match Time Greg is out",
+        tag: true,
+        route: "other_att",
+        facts: otherFacts("Greg", "out"),
+      },
+      { player: "greg", body: "im in", route: "self_att", facts: selfIn() },
     ]);
-
-    // The 😂 is the author's latest, so the net correctly does NOT fire
-    // — which is exactly what happens today with the gate off.
-    expect(await g.attendanceOf("alice")).toBeNull();
-  });
-
-  test("…and DOES fire when the gated message came first", async ({ request, db }) => {
-    const g = await createGroup(request, db, { attendance: [] });
-    setRouterStub({ enabled: true, floor: false, bodies: { "😂": "none" } });
-
-    await g.postBatch([
-      { player: "alice", body: "😂" },
-      { player: "alice", body: "yeah go on then", verdict: { intent: "in", registerAttendance: null } },
-    ]);
-
-    expect(await g.attendanceOf("alice")).toMatchObject({ status: "CONFIRMED" });
+    expect(
+      await h.attendanceOf("greg"),
+      "with the protest routed, corroboration sees it and the drop is refused",
+    ).toMatchObject({ status: "CONFIRMED" });
   });
 });

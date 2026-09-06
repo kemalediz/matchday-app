@@ -12,6 +12,48 @@
  *   corrected  — what a correct model emits. Asks: does the server
  *                execute a correct verdict correctly?
  *
+ * ═══════════════════════════════════════════════════════════════════════
+ * ⚠️ THIS SPEC IS THE ONE FAILING TEST IN THE SUITE, ON PURPOSE
+ * ═══════════════════════════════════════════════════════════════════════
+ *
+ * MEASURED 2026-09-06, after every other spec was ported off the verdict
+ * seam: **10 of 36 stubbed cases green, 24 recorded passes gone.** The
+ * scoreboard says `spurious_write 8 · wrong_write 3 · missed_write 10 ·
+ * speech 5`, and the missed-write rate is 27.8% against §10 step 3's
+ * go/no-go target of 2%.
+ *
+ * WHY, IN ONE SENTENCE: every case's `stub` block is a
+ * `CorpusStubVerdict`, `verdict:` is deleted, and
+ * `current-analyzer-pipeline.ts` therefore forwards NOTHING — so all 36
+ * run against a server that routes nothing and says nothing.
+ *
+ * ⚠️ AND THE TEN THAT STILL "PASS" ARE MOSTLY VACUOUS. Their expectation
+ * is that nothing happens, and a silent bot satisfies it for the wrong
+ * reason. S3 (past tense never registers), S11 (a conditional drop
+ * holds), S29 (banter drop refused) and S12b (a chase nudge is not a
+ * drop) are all in that set: they are green because nobody decided
+ * anything, not because the right decision was made. Do not read
+ * "10/36" as ten cases of live coverage.
+ *
+ * (The eight SPURIOUS writes are not silence. They come from the
+ * deterministic fast paths above the engine — `reconcilePastedRoster`
+ * and the bench-prompt reader — which still act on messages nobody
+ * routed. Worth its own look.)
+ *
+ * WHAT IT WOULD TAKE, and why it is not a mechanical port:
+ * `current-analyzer-pipeline.ts`'s header has the argument in full. In
+ * short, 25 of the 36 are `stubKind: "corrected"` and port directly
+ * (write the facts the text carries), but 11 are `historical` — "the
+ * verdict the model ACTUALLY EMITTED during the incident" — and there is
+ * no historical router or extractor output to port, because neither
+ * existed on the day. Every honest option changes what the corpus
+ * asserts, which is a decision about its contract and not a test
+ * migration. `README.md` says three times not to weaken a corpus
+ * expectation to make a suite green, so this is left RED rather than
+ * re-baselined, skipped, or filled with invented history.
+ *
+ * ── the original note, still true ───────────────────────────────────
+ *
  * ⚠️ THIS SPEC ASSERTS AGAINST A RECORDED BASELINE, NOT AGAINST ALL-PASS.
  *
  * §4 of MDs/analyzer-redesign-2026-08-31.md documents that the current

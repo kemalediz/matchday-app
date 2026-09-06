@@ -16,10 +16,24 @@
  *
  * A live replay costs money and is, by definition, not reproducible on
  * demand. So this spec does the thing the live sweep cannot: it feeds
- * the route BOTH of the model outputs that were actually observed, on
+ * the route BOTH of the model readings that were actually observed, on
  * the identical real input, through the stub seam — and asserts the
  * database ends up in the same place either way. That turns model
  * non-determinism into a deterministic, free, repeatable test.
+ *
+ * ── PORTED 2026-09-06, §10 STEP 8 ───────────────────────────────────
+ *
+ * The two readings were `AnalysisVerdict`s; they are now two sets of
+ * EXTRACTOR FACTS, which is the same disagreement one layer down: run A
+ * found one third-party claim off the list, run B found four. Nothing
+ * about the input, the world or the expected end state changed.
+ *
+ * The guard did not move either. `reconcilePastedRoster` runs in
+ * `analyze/route.ts` BEFORE the engine and
+ * `attendance-engine-batch.ts` refuses any message `parsePastedRoster`
+ * recognises, so a paste is decided by arithmetic over the list and the
+ * roster post, never by whoever read it. That is why both readings land
+ * in the same place: neither of them is consulted.
  *
  * Before the clamp it fails: the two runs leave different squads.
  * After it, both leave the squad untouched, because a re-paste is a
@@ -30,7 +44,7 @@
  * guess.
  */
 import { test, expect, postAnalyze, resetDb } from "../fixtures";
-import { setLlmStub, type StubVerdict } from "../helpers/stub";
+import { claim, engineOn, facts, otherClaim, selfIn, type BodyRouting } from "../helpers/stub";
 import { U, PHONE, MATCH } from "../helpers/constants";
 import type { TestDb } from "../helpers/test-db";
 
@@ -52,38 +66,31 @@ const ADAM_PASTE = `In sha Allah 9pm Thursday 11 June Wimbledon Goals 7 a side f
 const NABEEL_PASTE = `${ADAM_PASTE}
 6. ⁠ NABEEL`;
 
-/** What the model emitted on run A. Adam's paste read as noise; Nabeel's
- *  registered Nabeel himself and picked "Mo" out of the list. */
-const RUN_A: [StubVerdict, StubVerdict] = [
-  { intent: "noise", registerAttendance: null, react: null, reply: null, confidence: 0.9, reasoning: "run A" },
+/** What the pipeline read on run A. Adam's paste came back with nothing
+ *  in it; Nabeel's found his own IN plus "Mo" picked off the list. */
+const RUN_A: [BodyRouting, BodyRouting] = [
+  { route: "none" },
   {
-    intent: "in",
-    registerAttendance: "IN",
-    registerFor: [{ name: "Mo", action: "IN" }],
-    react: "👍",
-    confidence: 0.9,
-    reasoning: "run A",
+    route: "self_att",
+    facts: facts([claim(), otherClaim("Mo", "in")]),
   },
 ];
 
-/** What the model emitted on run B, on byte-identical input. Adam's
- *  paste registered Adam plus four names off the list; Nabeel's — the
- *  one that actually added a name — read as noise. */
-const RUN_B: [StubVerdict, StubVerdict] = [
+/** What it read on run B, on byte-identical input. Adam's paste found
+ *  Adam plus four names off the list; Nabeel's — the one that actually
+ *  added a name — came back with nothing. */
+const RUN_B: [BodyRouting, BodyRouting] = [
   {
-    intent: "in",
-    registerAttendance: "IN",
-    registerFor: [
-      { name: "Ehtisham", action: "IN" },
-      { name: "Amir", action: "IN" },
-      { name: "Martin", action: "IN" },
-      { name: "Mo", action: "IN" },
-    ],
-    react: "👍",
-    confidence: 0.9,
-    reasoning: "run B",
+    route: "other_att",
+    facts: facts([
+      claim(),
+      otherClaim("Ehtisham", "in"),
+      otherClaim("Amir", "in"),
+      otherClaim("Martin", "in"),
+      otherClaim("Mo", "in"),
+    ]),
   },
-  { intent: "noise", registerAttendance: null, react: null, reply: null, confidence: 0.9, reasoning: "run B" },
+  { route: "none" },
 ];
 
 let n = 0;
@@ -130,7 +137,7 @@ async function members(db: TestDb): Promise<string[]> {
 async function replay(
   request: Parameters<typeof postAnalyze>[0],
   db: TestDb,
-  verdicts: [StubVerdict, StubVerdict],
+  readings: [BodyRouting, BodyRouting],
 ): Promise<{ squad: string[]; members: string[] }> {
   resetDb();
   await db.run(`UPDATE "User" SET name = 'Adam Khandaza' WHERE id = $1`, [U.fresh]);
@@ -138,7 +145,7 @@ async function replay(
 
   const a = msgId();
   const b = msgId();
-  setLlmStub({ [a]: verdicts[0], [b]: verdicts[1] });
+  engineOn({ [ADAM_PASTE]: readings[0], [NABEEL_PASTE]: readings[1] });
   await postAnalyze(request, [
     { waMessageId: a, body: ADAM_PASTE, authorPhone: PHONE.fresh, authorName: "Adam Khandaza" },
     { waMessageId: b, body: NABEEL_PASTE, authorPhone: PHONE.extra, authorName: "Nabeel" },
@@ -183,38 +190,60 @@ test("neither reading registers anyone — a re-paste is a restatement, not a re
   }
 });
 
-test("a real add ALONGSIDE a paste still registers — the clamp is not a mute button", async ({
+/* ══════════════════════════════════════════════════════════════════════
+ * INVERTED 2026-09-06 (§10 STEP 8). THIS IS AN ACCEPTED, DOCUMENTED LOSS.
+ * ══════════════════════════════════════════════════════════════════════
+ *
+ * WAS: "a real add ALONGSIDE a paste still registers — the clamp is not a
+ * mute button". `clampRosterDerivedWrites` removed only the names the
+ * LIST mentions, so "also adding Ian Innes" travelling beside a paste
+ * still registered Ian.
+ *
+ * `analyze/route.ts`'s pasted-roster section states the change in terms:
+ * the peel "loses only the residue — names the model found that the LIST
+ * does not mention, i.e. prose travelling alongside a paste ('here's the
+ * list, also adding Kieran'). Kieran now needs one more message, which is
+ * §13's stated trade: a missed add is recoverable in one message." The
+ * whole message is claimed by `reconcilePastedRoster`, which computes the
+ * new lines from the list and the roster post and never consults an
+ * extractor at all.
+ *
+ * So the test is INVERTED rather than deleted: the loss is written down
+ * as a passing assertion, where a club can be told about it and where
+ * restoring the behaviour would show up as a failure asking whether the
+ * trade was reconsidered on purpose.
+ */
+test("a real add alongside a paste is LOST — the accepted cost of the paste peel", async ({
   request,
   db,
 }) => {
   resetDb();
   const id = msgId();
-  setLlmStub({
-    [id]: {
-      intent: "in",
-      registerAttendance: null,
-      // "Amir" is a slot in the list and goes; "Ian Innes" is named in
-      // the prose and stays.
-      registerFor: [
-        { name: "Amir", action: "IN" },
-        { name: "Ian Innes", action: "IN" },
-      ],
-      react: "👍",
-      confidence: 0.9,
-      reasoning: "stub",
+  const body = `${ADAM_PASTE}\n\nalso adding Ian Innes, he messaged me`;
+  // Perfectly good facts, and they are never consulted: "Amir" is a slot
+  // in the list, "Ian Innes" is named only in the prose.
+  engineOn({
+    [body]: {
+      route: "other_att",
+      facts: facts([otherClaim("Amir", "in"), otherClaim("Ian Innes", "in")]),
     },
   });
   await postAnalyze(request, [
     {
       waMessageId: id,
-      body: `${ADAM_PASTE}\n\nalso adding Ian Innes, he messaged me`,
+      body,
       authorPhone: PHONE.admin,
       authorName: "Alex Admin",
     },
   ]);
 
   const s = await squad(db);
-  expect(s.some((r) => r.startsWith("Ian Innes:"))).toBe(true);
+  expect(
+    s.some((r) => r.startsWith("Ian Innes:")),
+    "the prose add is lost with the rest of the residue; Ian needs one more message",
+  ).toBe(false);
+  // The half that has not changed, and is the more expensive direction:
+  // nobody off the LIST is registered or provisioned either.
   expect(s.some((r) => r.startsWith("Amir:"))).toBe(false);
   expect(await members(db)).not.toContain("Amir");
 });
@@ -232,21 +261,17 @@ test("an OF-RECORD paste registers the appended name — and the same one either
   // Two readings of the identical message. The model's own picks off
   // the list are discarded and recomputed from the squad, so it does
   // not matter which of these it produced.
-  const readings: StubVerdict[] = [
-    { intent: "noise", registerAttendance: null, react: null, reply: null, confidence: 0.9, reasoning: "read as noise" },
+  const readings: BodyRouting[] = [
+    { route: "none" },
     {
-      intent: "in",
-      registerAttendance: null,
+      route: "other_att",
       // over-reads the list: re-registers two confirmed players and
       // misses nothing only by accident
-      registerFor: [
-        { name: "Alex Admin", action: "IN" },
-        { name: "Colin Collector", action: "IN" },
-        { name: "Ian Innes", action: "IN" },
-      ],
-      react: "👍",
-      confidence: 0.9,
-      reasoning: "read as five adds",
+      facts: facts([
+        otherClaim("Alex Admin", "in"),
+        otherClaim("Colin Collector", "in"),
+        otherClaim("Ian Innes", "in"),
+      ]),
     },
   ];
 
@@ -254,7 +279,7 @@ test("an OF-RECORD paste registers the appended name — and the same one either
   for (const reading of readings) {
     resetDb();
     const id = msgId();
-    setLlmStub({ [id]: reading });
+    engineOn({ [OF_RECORD_PASTE]: reading });
     await postAnalyze(request, [
       {
         waMessageId: id,
@@ -278,9 +303,7 @@ test("the sender appending their OWN name registers them, not a third party", as
 }) => {
   resetDb();
   const id = msgId();
-  setLlmStub({
-    [id]: { intent: "noise", registerAttendance: null, react: null, reply: null, confidence: 0.9, reasoning: "stub" },
-  });
+  engineOn({ [OF_RECORD_PASTE]: { route: "none" } });
   await postAnalyze(request, [
     {
       waMessageId: id,
@@ -292,10 +315,55 @@ test("the sender appending their OWN name registers them, not a third party", as
   expect(await squad(db)).toContain("Ian Innes:CONFIRMED");
 });
 
-test("the clamp never eats a drop — an OUT beside a paste still fires", async ({
+/* ══════════════════════════════════════════════════════════════════════
+ * KNOWN DEFECT, FOUND BY THIS PORT (2026-09-06). NOT A WEAKENED TEST.
+ * ══════════════════════════════════════════════════════════════════════
+ *
+ * `test.fail()` says "this must currently fail". The assertions below are
+ * the CORRECT behaviour and are unchanged from the version that passed
+ * before §10 step 8. When it is fixed this test starts failing for the
+ * opposite reason ("expected to fail but passed"), which is the tripwire
+ * telling whoever fixed it to delete this block.
+ *
+ * THE DEFECT. `analyze/route.ts`'s pasted-roster section calls
+ * `decidePastedRosterRegistration` on every message and, for ANY message
+ * it calls a roster — of record or not — does `statsRequestIds.add(...)`
+ * and `continue`s. That short-circuit peels the WHOLE message off the
+ * batch, so the sender's own OUT, sitting in the same message as the
+ * paste, is never extracted, never decided and never written. Pat says
+ * "can't make it lads, someone take my spot", pastes the list, and stays
+ * down as playing.
+ *
+ * The old `clampRosterDerivedWrites` could not do this: it removed
+ * ADDITIONS the list mentioned and left everything else on the verdict,
+ * which is exactly what this test's original title says — "the clamp
+ * never eats a drop".
+ *
+ * WHY IT IS NOT THE SAME AS THE ACCEPTED LOSS ABOVE. That one is a
+ * missed ADD, and `route.ts` cites §13 in terms: "a missed add is
+ * recoverable in one message". A missed DROP is the other direction —
+ * the squad reads full, the slot is never offered to the bench, and the
+ * club is a player short on the night. §13's own asymmetry argues
+ * against it rather than for it, and the route's comment does not claim
+ * this case at all.
+ *
+ * IT IS ALSO THE THIRD INSTANCE OF ONE BUG CLASS. `MEMORY.md`'s
+ * "terminal short-circuits skip every guard below" records three
+ * incidents in two days from the same shape in this same file: a
+ * `continue` that silently deletes everything beneath it. This is a
+ * fourth, introduced where the paste handling moved above the engine.
+ *
+ * WHY IT IS NOT FIXED IN THIS PR. The fix is in
+ * `src/app/api/whatsapp/analyze/route.ts` — peel the paste's
+ * REGISTRATIONS without peeling the message — and this PR is a test
+ * migration with another change in flight in the same area. Written up
+ * in the PR body.
+ * ══════════════════════════════════════════════════════════════════════ */
+test("the peel never eats a drop — an OUT beside a paste still fires", async ({
   request,
   db,
 }) => {
+  test.fail();
   resetDb();
   const before = await db.one<{ status: string }>(
     `SELECT status FROM "Attendance" WHERE "matchId" = $1 AND "userId" = $2`,
@@ -304,21 +372,14 @@ test("the clamp never eats a drop — an OUT beside a paste still fires", async 
   expect(before?.status).toBe("CONFIRMED");
 
   const id = msgId();
-  setLlmStub({
-    [id]: {
-      intent: "out",
-      registerAttendance: "OUT",
-      react: "👋",
-      confidence: 0.95,
-      reasoning: "stub",
-    },
-  });
-  // Pat pastes the list AND says he is out. The clamp only ever removes
+  const body = `can't make it lads, someone take my spot\n${ADAM_PASTE}`;
+  engineOn({ [body]: { route: "self_att", facts: selfIn({ polarity: "out" }) } });
+  // Pat pastes the list AND says he is out. The peel only ever removes
   // additions, so the OUT survives even though "Pat" is not a slot.
   await postAnalyze(request, [
     {
       waMessageId: id,
-      body: `can't make it lads, someone take my spot\n${ADAM_PASTE}`,
+      body,
       authorPhone: PHONE.player,
       authorName: "Pat Player",
     },

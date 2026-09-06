@@ -112,8 +112,8 @@ describe("keyFingerprint", () => {
 });
 
 describe("assertSeamMatchesMode", () => {
-  const liveOk = { ANTHROPIC_API_KEY: "sk-ant-real", MT_TEST_LLM_STUB_FILE: "" };
-  const stubOk = { ANTHROPIC_API_KEY: "", MT_TEST_LLM_STUB_FILE: "/tmp/stub.json" };
+  const liveOk = { ANTHROPIC_API_KEY: "sk-ant-real", MT_TEST_DM_QA_STUB: "" };
+  const stubOk = { ANTHROPIC_API_KEY: "", MT_TEST_DM_QA_STUB: "1" };
 
   it("accepts a correctly wired live env", () => {
     expect(() => assertSeamMatchesMode("live", liveOk)).not.toThrow();
@@ -126,14 +126,14 @@ describe("assertSeamMatchesMode", () => {
   it("refuses a live run whose child env still carries a stub file", () => {
     // The real leak: buildTestEnv() DELETES the key from its overlay,
     // but the child is spawned with { ...process.env, ...overlay }, so
-    // an MT_TEST_LLM_STUB_FILE in the orchestrator's own environment
+    // an MT_TEST_DM_QA_STUB in the orchestrator's own environment
     // survives and the "live" sweep is silently stubbed.
     expect(() =>
-      assertSeamMatchesMode("live", { ...liveOk, MT_TEST_LLM_STUB_FILE: "/tmp/stub.json" }),
+      assertSeamMatchesMode("live", { ...liveOk, MT_TEST_DM_QA_STUB: "1" }),
     ).toThrow(E2EPreflightError);
     expect(() =>
-      assertSeamMatchesMode("live", { ...liveOk, MT_TEST_LLM_STUB_FILE: "/tmp/stub.json" }),
-    ).toThrow(/MT_TEST_LLM_STUB_FILE/);
+      assertSeamMatchesMode("live", { ...liveOk, MT_TEST_DM_QA_STUB: "1" }),
+    ).toThrow(/MT_TEST_DM_QA_STUB/);
   });
 
   it("refuses a live run with a blank key", () => {
@@ -151,8 +151,8 @@ describe("assertSeamMatchesMode", () => {
   });
 
   it("refuses a stubbed run with no stub seam at all", () => {
-    expect(() => assertSeamMatchesMode("stub", { ...stubOk, MT_TEST_LLM_STUB_FILE: "" })).toThrow(
-      /MT_TEST_LLM_STUB_FILE/,
+    expect(() => assertSeamMatchesMode("stub", { ...stubOk, MT_TEST_DM_QA_STUB: "" })).toThrow(
+      /MT_TEST_DM_QA_STUB/,
     );
   });
 });
@@ -580,7 +580,7 @@ describe("reachWatermark", () => {
  * the same class of unverifiable number PR #38 exists to kill.
  */
 describe("a live run cannot be secretly gated", () => {
-  const liveOkNoRouterStub = { ANTHROPIC_API_KEY: "sk-ant-real", MT_TEST_LLM_STUB_FILE: "" };
+  const liveOkNoRouterStub = { ANTHROPIC_API_KEY: "sk-ant-real", MT_TEST_DM_QA_STUB: "" };
 
   it("refuses a live run that can still see the router stub file", () => {
     expect(() =>
