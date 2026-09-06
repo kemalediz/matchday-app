@@ -135,15 +135,26 @@
  * WHY THE TAG IS NOT A PRE-FILTER HERE
  * ─────────────────────────────────────────────────────────────────────
  * `answer-batch.ts` refuses an untagged message before the extractor
- * runs, which is free and strictly conservative for its two routes. This
- * one cannot: two of `admin_ops`'s three actions require a tag and the
- * third does NOT — PR #33's `RECRUIT_COMMAND_IMPLIES_ADDRESSED` makes an
- * admin's recruit command a direct instruction to MatchTime on its own,
- * and that is the 2026-09-01 incident's actual fix. Which action a
- * message carries is only knowable AFTER extraction, so the tag is
- * enforced per action, in the engine, exactly where the contract's own
- * `ACTIONY_INTENTS` split lives. The cost is one extractor call on an
- * untagged `admin_ops` message.
+ * runs, which is free and strictly conservative for its two routes.
+ *
+ * ⚠️ THIS PARAGRAPH SAID THE OPPOSITE UNTIL 2026-09-06. It read: "two of
+ * `admin_ops`'s three actions require a tag and the third does NOT — PR
+ * #33's `RECRUIT_COMMAND_IMPLIES_ADDRESSED` makes an admin's recruit
+ * command a direct instruction to MatchTime on its own". That waiver was
+ * scope creep from the attendance path onto this one, and it made an
+ * untagged 20-person mass DM turn on a router coin flip (measured
+ * `admin_ops` 13/20 on one real phrasing). All THREE `admin_ops` actions
+ * now require a tag — see `RECRUIT_BLAST_REQUIRES_TAG`.
+ *
+ * IT IS STILL NOT A PRE-FILTER, and that is deliberate rather than
+ * leftover. Refusing untagged `admin_ops` messages before extraction
+ * would take them out of `ownedIds`, and an unowned id falls through to
+ * `route.ts`'s "NOBODY OWNED IT" branch, i.e. an operator DM per
+ * untagged admin-shaped line — trading one extractor call for a paging
+ * channel full of noise. Which action a message carries is only knowable
+ * AFTER extraction anyway, so the tag stays enforced per action, in the
+ * engine, exactly where the contract's own `ACTIONY_INTENTS` split lives.
+ * The cost is one extractor call on an untagged `admin_ops` message.
  *
  * ─────────────────────────────────────────────────────────────────────
  * THE RECRUIT BLAST IS DECIDED HERE AND RUN LATER
