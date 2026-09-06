@@ -8,22 +8,37 @@
  * send-time guard). Their IN/OUT reply registers them + resolves the
  * tentative.
  *
- * Deterministic: the LLM verdict is stubbed (conditional_in, flavour b),
- * and the scheduler clock is pinned via duePosts(now). No live model.
+ * Deterministic: the router and the attendance extractor are stubbed and
+ * the scheduler clock is pinned via duePosts(now). No live model.
+ *
+ * ── PORTED 2026-09-06, §10 STEP 8 ───────────────────────────────────
+ *
+ * `intent: "conditional_in"` was one word covering TWO opposite
+ * outcomes, and §3.2 S15 is the incident that split them: "I'll be the
+ * 14th if you're short" is a standing offer that should take a place,
+ * and "maybe, I'll confirm later" is personal uncertainty that should
+ * take none. The prompt distinguished them by flavour, in prose.
+ *
+ * `conditionOn` is that distinction as a field — `"squad"` versus
+ * `"self"` — and `attendance-engine-batch.ts:tentativeUserId` reads it
+ * directly: `contingent` plus `conditionOn: "self"` plus no write is what
+ * records the MAYBE and schedules the 24h chase. That function's own
+ * header says it is now the ONLY path that records a tentative from a
+ * group message, `executeVerdict` having been deleted, so this file is
+ * the only end-to-end cover the 24h chase has.
  */
 import { test, expect, resetDb } from "../fixtures";
 import { createGroup } from "./group";
-import type { StubVerdict } from "./group";
+import { selfIn } from "../helpers/stub";
 
-// Flavour (b) personal-uncertainty conditional: tentative, NO write.
-const TENTATIVE_VERDICT: StubVerdict = {
-  intent: "conditional_in",
-  registerAttendance: null,
-  react: "🤔",
-  reply: null,
-  confidence: 0.9,
-  reasoning: "sim: personal-uncertainty conditional → tentative",
+/** Flavour (b), personal uncertainty: tentative, NO write. */
+const TENTATIVE = {
+  route: "offer",
+  facts: selfIn({ contingent: true, conditionOn: "self", tense: "future", confidence: 0.9 }),
 };
+
+/** A firm IN, for the send-time guard's control. */
+const IN = { route: "self_att", facts: selfIn() };
 
 const HOUR = 60 * 60 * 1000;
 const DAY = 24 * HOUR;
@@ -64,9 +79,7 @@ test.describe("tentative availability follow-up (stubbed)", () => {
     const grp = (await mkGroup(request, db)).attach(request);
     const matchId = grp.matchId!;
 
-    const r = await grp.post("henry", "maybe, I'll confirm later", {
-      verdict: TENTATIVE_VERDICT,
-    });
+    const r = await grp.post("henry", "maybe, I'll confirm later", TENTATIVE);
     expect(r.intent).toBe("conditional_in");
 
     // NOT registered anywhere.
@@ -88,9 +101,7 @@ test.describe("tentative availability follow-up (stubbed)", () => {
     expect(Math.abs(dueAt - (kickoff - DAY))).toBeLessThan(60_000);
 
     // Repeat tentative → still exactly one row (idempotent, no reschedule).
-    await grp.post("henry", "still might, depends how my knee feels", {
-      verdict: TENTATIVE_VERDICT,
-    });
+    await grp.post("henry", "still might, depends how my knee feels", TENTATIVE);
     rows = await tentativeRows(db, matchId);
     expect(rows).toHaveLength(1);
   });
@@ -101,7 +112,7 @@ test.describe("tentative availability follow-up (stubbed)", () => {
   }) => {
     const grp = (await mkGroup(request, db)).attach(request);
     const matchId = grp.matchId!;
-    await grp.post("henry", "maybe later", { verdict: TENTATIVE_VERDICT });
+    await grp.post("henry", "maybe later", TENTATIVE);
 
     // Use generous margins to sidestep any tz ambiguity in how raw
     // Postgres timestamps round-trip through JS Date. The match is +3 days
@@ -137,10 +148,10 @@ test.describe("tentative availability follow-up (stubbed)", () => {
   }) => {
     const grp = (await mkGroup(request, db)).attach(request);
     const matchId = grp.matchId!;
-    await grp.post("henry", "maybe later", { verdict: TENTATIVE_VERDICT });
+    await grp.post("henry", "maybe later", TENTATIVE);
 
     // Henry later says a plain IN (group) → registered + tentative resolved.
-    await grp.post("henry", "in");
+    await grp.post("henry", "in", IN);
     const att = await grp.attendanceOf("henry");
     expect(att).not.toBeNull();
     expect(["CONFIRMED", "BENCH"]).toContain(att!.status);
@@ -162,7 +173,7 @@ test.describe("tentative availability follow-up (stubbed)", () => {
   }) => {
     const grp = (await mkGroup(request, db)).attach(request);
     const matchId = grp.matchId!;
-    await grp.post("henry", "maybe later", { verdict: TENTATIVE_VERDICT });
+    await grp.post("henry", "maybe later", TENTATIVE);
     expect(await grp.attendanceOf("henry")).toBeNull();
 
     // Henry replies IN by DM (the follow-up reply path).
@@ -186,7 +197,7 @@ test.describe("tentative availability follow-up (stubbed)", () => {
   }) => {
     const grp = (await mkGroup(request, db)).attach(request);
     const matchId = grp.matchId!;
-    await grp.post("henry", "maybe later", { verdict: TENTATIVE_VERDICT });
+    await grp.post("henry", "maybe later", TENTATIVE);
 
     const res = await grp.dm("henry", "OUT");
     expect((res.json as { handled?: string }).handled).toBe("tentative-followup");

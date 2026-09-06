@@ -13,6 +13,7 @@ import { test as base, expect, type Page, type APIRequestContext } from "@playwr
 import { signMagicLinkToken } from "@/lib/magic-link";
 import { testDb, TestDb } from "./helpers/test-db";
 import { E2E, REPO_ROOT } from "./helpers/env";
+import { clearPipelineStubs } from "./helpers/stub";
 import { U } from "./helpers/constants";
 
 export const test = base.extend<{ db: TestDb }>({
@@ -28,13 +29,24 @@ export const test = base.extend<{ db: TestDb }>({
 
 export { expect, U };
 
-/** Wipe + reseed the ISOLATED test DB to the canonical fixture world. */
+/**
+ * Wipe + reseed the ISOLATED test DB to the canonical fixture world, and
+ * empty BOTH pipeline stub seams.
+ *
+ * The stubs are cleared here rather than in each spec's `afterEach`
+ * because the two files are per-CHECKOUT and long-lived: a spec that
+ * arms a route and then fails leaves that route armed for whatever runs
+ * next, and the next spec would pass or fail against a world nobody
+ * wrote. `resetDb` is already the "start from a known world" call every
+ * spec file makes, and the routes and facts ARE part of that world now.
+ */
 export function resetDb(): void {
   execFileSync("npx", ["tsx", "e2e/helpers/seed-cli.ts"], {
     cwd: REPO_ROOT,
     stdio: "pipe",
     env: process.env,
   });
+  clearPipelineStubs();
 }
 
 /** Mint a magic-link token for a seeded user (test AUTH_SECRET). */

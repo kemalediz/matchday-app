@@ -1,12 +1,13 @@
 /**
  * Group-simulator regression corpus — INTERACTION CONTRACT.
  *
- * Commercialisation safety net. Drives the REAL analyze pipeline (LLM
- * stubbed) and proves MatchTime is CONSERVATIVE and PREDICTABLE:
+ * Commercialisation safety net. Drives the REAL analyze pipeline (router
+ * + extractor stubbed) and proves MatchTime is CONSERVATIVE and
+ * PREDICTABLE:
  *
  *  - It does NOTHING on banter / hypotheticals / past-tense / third-person
- *    chatter, EVEN when a canned action verdict is fed (the deterministic
- *    gate must suppress the action — DB unchanged, no posts, no reacts).
+ *    chatter, EVEN when the router calls the message attendance and a
+ *    live claim is sitting behind it (DB unchanged, no posts, no reacts).
  *  - It ACTS without a tag only on a player's own clear self-attendance.
  *  - It REQUIRES an @Match Time tag for questions / team ops.
  *  - The full-squad rollover never advances a casual "In" to next week.
@@ -17,7 +18,8 @@
 import type { APIRequestContext } from "@playwright/test";
 import { test, expect, resetDb } from "../fixtures";
 import type { TestDb } from "../helpers/test-db";
-import { createGroup, SimGroup, type StubVerdict } from "./group";
+import { createGroup, SimGroup } from "./group";
+import { otherFacts, selfIn, selfOut } from "../helpers/stub";
 
 test.describe.configure({ mode: "serial" });
 
@@ -25,23 +27,52 @@ test.beforeAll(async () => {
   resetDb();
 });
 
-// A canned ACTION verdict — fed deliberately on noise cases to PROVE the
-// server-side gate suppresses the action regardless of what the LLM said.
-const inVerdict: StubVerdict = {
-  intent: "in",
-  registerAttendance: "IN",
-  react: "👍",
-  confidence: 0.9,
-  reasoning: "stub: canned IN to test the gate suppresses it",
+// ── PORTED 2026-09-06, §10 STEP 8 ────────────────────────────────────
+//
+// The noise cases used to feed a canned ACTION VERDICT and assert the
+// gate suppressed it. A verdict was a decision, so "the model decided to
+// register him and the server refused" was a sentence you could write.
+// It is not one now: the extractor reports CLAIMS, and the engine is the
+// only thing that decides.
+//
+// So the canned action is expressed one layer up — the ROUTER is told
+// the message is attendance and the EXTRACTOR is told it carries a
+// perfectly good IN claim — and the assertion is unchanged: nothing is
+// written and nothing is said. That is a stronger statement than the old
+// one, because it survives the whole engine rather than a single `if`.
+
+/**
+ * The hypothetical. "If I was in the team it won't be ruined" is routed
+ * as attendance and DOES carry an IN claim — the text contains one — but
+ * `tense: "hypothetical"` is what the sentence really says, and the
+ * engine vetoes on the field.
+ *
+ * ⚠️ WHAT THIS TEST NO LONGER PROVES, stated rather than buried. It used
+ * to feed `registerAttendance: "IN"` and assert that
+ * `looksLikeHypotheticalOrPast` — a regex over the BODY, in
+ * `analyze/route.ts` — refused it whatever the model said. That regex is
+ * on the far side of the engine's short-circuit now (§9's "becomes a
+ * schema field": `tense`), so there is no second, text-level opinion
+ * behind the extractor. If the extractor calls this sentence
+ * `tense: "present"`, the player IS registered. The corpus is where that
+ * risk is measured, against the real model, on real messages; this file
+ * pins what the engine does once the field is right.
+ */
+const CANNED_IN = { route: "self_att", facts: selfIn({ tense: "hypothetical" }) };
+
+/** The two bodies this file posts most. */
+const IN = { route: "self_att", facts: selfIn() };
+const OUT = { route: "self_att", facts: selfOut() };
+
+/** A question the answer engine really owns, with the facts its own
+ *  extractor returns. The old `questionVerdict(reply)` carried the ANSWER;
+ *  the answer is composed from the database now, so a stub that supplied
+ *  one would be supplying the thing under test. */
+const askTeams = { route: "question", facts: { topic: "squad", personRef: null, statedCount: null } };
+const generateTeams = {
+  route: "balancer",
+  facts: { action: "generate", includeRefs: [], teamNames: null, swaps: [], pairings: [] },
 };
-const questionVerdict = (reply: string): StubVerdict => ({
-  intent: "question",
-  registerAttendance: null,
-  react: null,
-  reply,
-  confidence: 0.9,
-  reasoning: "stub: canned question answer",
-});
 
 // ── Case #1: today's Sutton Lads transcript — all must be IGNORED ──────
 test.describe("Case #1 — today's Sutton Lads transcript (all noise)", () => {
@@ -59,7 +90,12 @@ test.describe("Case #1 — today's Sutton Lads transcript (all noise)", () => {
 
   // The exact transcript lines (paraphrased only to fit fictitious roster
   // names where a real handle appeared). Each one must be a no-op.
-  const transcript: Array<{ key: string; body: string; verdict?: StubVerdict }> = [
+  const transcript: Array<{
+    key: string;
+    body: string;
+    route?: string;
+    facts?: Record<string, unknown>;
+  }> = [
     { key: "pete", body: "@Nabeel bro I was second in line to play" },
     {
       key: "dan",
@@ -81,8 +117,9 @@ test.describe("Case #1 — today's Sutton Lads transcript (all noise)", () => {
     {
       key: "liam",
       body: "If I was in the team it won't be ruined",
-      // THE false-IN bug: hypothetical fed as an IN verdict → must NOT write.
-      verdict: inVerdict,
+      // THE false-IN bug: a hypothetical, routed as attendance with a
+      // live IN claim behind it → must NOT write.
+      ...CANNED_IN,
     },
     { key: "mike", body: "Martin and ayaaz on the same team is ridiculous" },
     { key: "noah", body: "Fair point, Martin has 7 goals this season" },
@@ -94,7 +131,14 @@ test.describe("Case #1 — today's Sutton Lads transcript (all noise)", () => {
     const before = await grp.counts();
     const jobsBefore = (await grp.botJobs()).length;
 
-    const r = await grp.postBatch(transcript.map((t) => ({ player: t.key, body: t.body, verdict: t.verdict })));
+    const r = await grp.postBatch(
+      transcript.map((t) => ({
+        player: t.key,
+        body: t.body,
+        ...(t.route ? { route: t.route } : {}),
+        ...(t.facts ? { facts: t.facts } : {}),
+      })),
+    );
 
     // No outbound posts/DMs.
     expect(r.groupPosts).toEqual([]);
@@ -133,25 +177,23 @@ test.describe("positive controls", () => {
 
   test('bare "In" (no tag) → registers CONFIRMED', async ({ request, db }) => {
     const grp = await group(request, db);
-    const r = await grp.post("greg", "In");
+    const r = await grp.post("greg", "In", IN);
     expect(r.react).toBe("✅");
     expect(await grp.confirmed()).toContain("Greg Gale");
   });
 
   test('bare "Out" (no tag) → drops', async ({ request, db }) => {
     const grp = await group(request, db);
-    await grp.post("henry", "in"); // get henry confirmed first
+    await grp.post("henry", "in", IN); // get henry confirmed first
     expect(await grp.confirmed()).toContain("Henry Hill");
-    const r = await grp.post("henry", "Out");
+    const r = await grp.post("henry", "Out", OUT);
     expect(r.react).toBe("👋");
     expect(await grp.dropped()).toContain("Henry Hill");
   });
 
   test('untagged "what are the teams?" → noise (no reply)', async ({ request, db }) => {
     const grp = await group(request, db);
-    const r = await grp.post("pete", "what are the teams?", {
-      verdict: questionVerdict("Red: …, Yellow: …"),
-    });
+    const r = await grp.post("pete", "what are the teams?", askTeams);
     expect(r.react).toBeNull();
     expect(r.reply).toBeNull();
     expect(r.groupPosts).toEqual([]);
@@ -159,11 +201,10 @@ test.describe("positive controls", () => {
 
   test('"@Match Time what are the teams?" (tagged) → answers', async ({ request, db }) => {
     const grp = await group(request, db);
-    const r = await grp.post(
-      "pete",
-      "@Match Time what are the teams?",
-      { verdict: questionVerdict("Here's the squad so far …"), tag: true },
-    );
+    const r = await grp.post("pete", "@Match Time what are the teams?", {
+      ...askTeams,
+      tag: true,
+    });
     expect(r.reply).not.toBeNull();
   });
 
@@ -186,16 +227,7 @@ test.describe("positive controls", () => {
       })
     ).attach(request);
     const r = await grp.post("owner", "@Match Time generate the teams", {
-      verdict: {
-        intent: "generate_teams_request",
-        react: "⚽",
-        reply: null,
-        confidence: 0.95,
-        teamNames: null,
-        includeNames: null,
-        teamOverrides: null,
-        reasoning: "stub: generate",
-      },
+      ...generateTeams,
       tag: true,
     });
     // The composed team line-up appears (Red/Yellow default labels).
@@ -220,18 +252,7 @@ test.describe("positive controls", () => {
         ],
       })
     ).attach(request);
-    const r = await grp.post("owner", "generate the teams", {
-      verdict: {
-        intent: "generate_teams_request",
-        react: "⚽",
-        reply: null,
-        confidence: 0.95,
-        teamNames: null,
-        includeNames: null,
-        teamOverrides: null,
-        reasoning: "stub: generate but untagged",
-      },
-    });
+    const r = await grp.post("owner", "generate the teams", generateTeams);
     expect(r.groupPosts).toEqual([]);
     expect(r.reply).toBeNull();
     expect(r.react).toBeNull();
@@ -266,14 +287,7 @@ test.describe("third-party adds tag-free; drops/swaps still tagged", () => {
       [grp.matchId, name],
     );
 
-  const addRashad: StubVerdict = {
-    intent: "in",
-    registerAttendance: null,
-    registerFor: [{ name: "Rashad", action: "IN" }],
-    react: "👍",
-    confidence: 0.9,
-    reasoning: "stub: untagged third-party IN add",
-  };
+  const addRashad = { route: "other_att", facts: otherFacts("Rashad", "in") };
 
   test('untagged "Add Rashad please" → registers Rashad, NOT the sender (gate + relay guard)', async ({
     request,
@@ -281,7 +295,7 @@ test.describe("third-party adds tag-free; drops/swaps still tagged", () => {
   }) => {
     const grp = (await mkGroup(request, db)).attach(request);
     // greg is NOT in the seeded squad — he's only adding Rashad, not joining.
-    const r = await grp.post("greg", "Add Rashad please", { verdict: addRashad });
+    const r = await grp.post("greg", "Add Rashad please", addRashad);
     // The gate must NOT suppress it: handled by the LLM path.
     expect(r.handledBy).toBe("llm");
     const att = await attendanceByName(grp, "Rashad");
@@ -299,14 +313,8 @@ test.describe("third-party adds tag-free; drops/swaps still tagged", () => {
     const before = await grp.confirmed();
     expect(before).toContain("Pete Power");
     const r = await grp.post("alice", "Pete can't make it tonight", {
-      verdict: {
-        intent: "out",
-        registerAttendance: null,
-        registerFor: [{ name: "Pete Power", action: "OUT" }],
-        react: "👋",
-        confidence: 0.9,
-        reasoning: "stub: untagged third-party OUT — must be gated",
-      },
+      route: "other_att",
+      facts: otherFacts("Pete Power", "out"),
     });
     // Untagged drop of another player → noise, DB untouched.
     expect(r.intent).toBe("noise");
@@ -321,10 +329,7 @@ test.describe("third-party adds tag-free; drops/swaps still tagged", () => {
     db,
   }) => {
     const grp = (await mkGroup(request, db)).attach(request);
-    const r = await grp.post("pete", "@Match Time add Rashad", {
-      verdict: addRashad,
-      tag: true,
-    });
+    const r = await grp.post("pete", "@Match Time add Rashad", { ...addRashad, tag: true });
     expect(r.handledBy).toBe("llm");
     const att = await attendanceByName(grp, "Rashad");
     expect(att, "Rashad must be registered when tagged too").not.toBeNull();
@@ -352,7 +357,7 @@ test.describe("full-squad rollover", () => {
     const nextWeek = await grp.addMatch({ daysFromNow: 7 }); // empty next-week match
 
     // A casual "In" while tonight is FULL.
-    const r = await grp.post("greg", "in");
+    const r = await grp.post("greg", "in", IN);
 
     // Must land on THIS week as BENCH (squad full), NOT next week.
     expect(r.react).toBe("🪑");

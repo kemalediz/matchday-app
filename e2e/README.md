@@ -94,38 +94,52 @@ coordination and no ritual.
 |---|---|---|
 | **Router stub** — `gateBatch` reads the route (and the step-5/6/7 flags) out of a JSON file instead of calling Haiku | `src/lib/pipeline/gate.ts`, `src/lib/pipeline/route-flags.ts` | `MT_TEST_ROUTER_STUB_FILE` |
 | **Extractor stub** — every extractor returns canned RAW JSON (so `parseFacts` still runs for real), or throws a real 529 | `src/lib/pipeline/extractor-stub.ts` | `MT_TEST_EXTRACTOR_STUB_FILE` |
-| Per-request flag overrides for a LIVE A/B — `x-mt-attendance-engine`, `x-mt-engine-routes` | `src/lib/pipeline/gate.ts`, `src/lib/pipeline/route-flags.ts` | `MT_TEST_MODE=1` |
+| Per-request flag override for a LIVE A/B — `x-mt-engine-routes` | `src/lib/pipeline/route-flags.ts` | `MT_TEST_MODE=1` |
 | Clock override for scheduler windows — `x-test-now` header on `/api/whatsapp/due-posts` | `src/app/api/whatsapp/due-posts/route.ts` → `computeDuePosts(groupId, nowOverride?)` | `MT_TEST_MODE=1` |
-| DM-Q&A stub — `answerScopedQuestion` returns the SCOPED CONTEXT itself instead of calling Anthropic, so specs assert the no-leak guarantee structurally (no raw phone digits ever enter the model's context; 📵 flags admin-only) | `src/lib/dm-qa.ts` | `MT_TEST_LLM_STUB_FILE` |
+| DM-Q&A stub — `answerScopedQuestion` returns the SCOPED CONTEXT itself instead of calling Anthropic, so specs assert the no-leak guarantee structurally (no raw phone digits ever enter the model's context; 📵 flags admin-only) | `src/lib/dm-qa.ts` | `MT_TEST_DM_QA_STUB` |
 | ~~LLM stub — `analyzeBatch` reads verdicts from a JSON file~~ | ~~`src/lib/message-analyzer.ts`~~ | **GONE (§10 step 8)** |
 
-**The verdict seam is dead and the env var is not.** §10 step 8 (2026-09-06)
-deleted `analyzeBatch`, `SYSTEM_PROMPT` and `AnalysisVerdict`, so nothing reads
-the contents of `MT_TEST_LLM_STUB_FILE` any more — but `dm-qa.ts` still keys its
-own stub off the variable *being set*, so the harness keeps setting it.
+**The verdict seam is gone and so is the name it shared.** §10 step 8
+(2026-09-06) deleted `analyzeBatch`, `SYSTEM_PROMPT` and `AnalysisVerdict`;
+the port that followed deleted `setLlmStub`, `StubVerdict` and `verdict:` with
+them. `MT_TEST_LLM_STUB_FILE` had been doing two jobs — the verdict file's path
+AND `dm-qa.ts`'s stub flag, which only ever tested it for truthiness — so the
+surviving half was renamed **`MT_TEST_DM_QA_STUB`** (`src/lib/dm-qa.ts`,
+`e2e/helpers/env.ts`, `e2e/helpers/live-llm.ts`). Same behaviour, a name that
+says what it does.
 
-**`npm run test:e2e` is red, on purpose.** Measured on 2026-09-06:
+**`npm run test:e2e` has ONE failing test, on purpose.** Measured on
+2026-09-07:
 
 ```
-40 failed · 150 passed · 80 skipped · 82 did not run   (1.5m)
+1 failed · 265 passed · 80 skipped · 0 did not run   (1.2m)
 ```
 
-Every failure is a spec addressing the server through `verdict:` / `setLlmStub`
-and therefore driving a decider that no longer exists: it compiles, it runs, and
-every assertion that something was written fails because the server routes
-nothing it was told about, owns nothing and stays silent. (The 82 that "did not
-run" are the rest of the serial files those failures aborted, so the real number
-is larger.) They are **left failing rather than deleted or re-baselined** — each
-pins a shipped behaviour of the apply path — and the full list, the measured
-numbers and the shape of the port are in `e2e/helpers/stub.ts`'s header.
-`e2e/sim/attendance-engine.spec.ts` is the worked example: 25/25 green against
-the router and extractor seams.
+Before the port, on the same commit range:
 
-Two of the forty need an **inversion** rather than a port, because what they
-assert is genuinely gone: `sim/attendance-engine-overload.spec.ts` ("the analyzer
-takes the whole batch" — it does not exist, the messages are lost) and
-`sim/router-gate.spec.ts` ("with the gate OFF…" — `ROUTER_GATE_ENABLED` was
-deleted with the analyzer it reverted to).
+```
+40 failed · 150 passed · 80 skipped · 82 did not run   (1.7m)
+```
+
+The one failure is **`e2e/sim/corpus.spec.ts`** — the stubbed incident-corpus
+sweep, whose 36 cases still carry `CorpusStubVerdict` blocks that nothing reads.
+It is left red rather than skipped or re-baselined because porting it requires a
+DECISION about what `stubKind: "historical"` means once the component that erred
+is deleted. `e2e/corpus/README.md` has the options and their costs; the spec's
+own header has the measured numbers.
+
+Two files were **inverted** rather than ported, because what they asserted is
+genuinely gone: `sim/attendance-engine-overload.spec.ts` (the analyzer no longer
+takes a failed batch — the writes are LOST, and the sweep now prints a loss rate)
+and `sim/router-gate.spec.ts`'s gate-off case (`ROUTER_GATE_ENABLED` was deleted
+with the analyzer it reverted to).
+
+**Two tests are marked `test.fail()` against real defects this port found**, so
+the suite stays green while the bugs stay loud:
+`sim/guest-name-ask.spec.ts` (the one-ask-per-player dedupe has no writer, so
+MatchTime nags) and `api/pasted-roster.spec.ts` (a paste peels the whole message,
+so an OUT beside a paste is swallowed). Each carries the full account at its
+site.
 
 ### Architecture notes
 
@@ -261,7 +275,11 @@ submission with a merged-away player (covered in `web/rate.spec.ts`).
 - Reseed with `resetDb()` in `beforeAll` if the spec mutates state.
 - Never import `@/lib/*` modules that touch Prisma from a spec — use the
   `db` fixture (pg) or extend `helpers/lib-tests.ts`.
-- Stub analyzer verdicts with `setLlmStub({ [waMessageId]: {...} })`
-  immediately before the POST.
+- Say what the ROUTER answered and what the EXTRACTOR found, per message:
+  `g.post("pete", "in", { route: "self_att", facts: selfIn() })`, or
+  `engineOn({ "<body>": { route, facts } })` for the `api/` specs that POST
+  through `postAnalyze`. Builders live in `e2e/helpers/stub.ts`. Never stub a
+  DECISION — there is nothing left that takes one, and the engine deciding for
+  itself is what these specs are for.
 - New fixture rows: extend `helpers/constants.ts` + `helpers/seed.ts`;
   keep phones inside `07700 900xxx`.

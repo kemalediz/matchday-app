@@ -22,7 +22,32 @@
  */
 import { test, expect, resetDb } from "../fixtures";
 import { createGroup } from "./group";
-import { clearRouterStub, setRouterStub } from "../helpers/stub";
+import { clearRouterStub } from "../helpers/stub";
+import { selfIn } from "../helpers/stub";
+
+/* ── PORTED 2026-09-06, §10 STEP 8 ────────────────────────────────────
+ *
+ * Every case here posted a bare 👍 with `verdict: { registerAttendance:
+ * "IN" }` sitting behind it, and asserted whether the ANALYZER got to
+ * see it. There is no analyzer, so "did it reach the analyzer?" is now
+ * "did it reach an OWNER?", and the verdict is a `self_att` claim the
+ * attendance extractor returns.
+ *
+ * The MECHANISM under test is untouched, and it is the reason this file
+ * exists: `awaiting-answer.ts` moves a message OUT of `none` when — and
+ * only when — the database says MatchTime is waiting on THIS sender for
+ * THIS match. All five negative cases (resolved, stale, another club's,
+ * and the two shapes of "nothing open") still assert that the 👍 is
+ * thrown away, and they are the population that outnumbers the positive
+ * by hundreds to one.
+ *
+ * ONE CASE WAS DELETED — "with the gate OFF, an open slot changes
+ * nothing at all". `ROUTER_GATE_ENABLED` is deleted (`pipeline/gate.ts`)
+ * along with the analyzer its off position reverted to; there is no
+ * gate-off arm left to compare against. `gate.ts`'s essay and
+ * `__tests__/gate.test.ts`'s tombstone carry the argument.
+ */
+const THUMB = { route: "none", facts: selfIn() };
 
 const LIVE = process.env.MT_SIM_LIVE_LLM === "1";
 
@@ -62,22 +87,16 @@ async function openBenchSlot(
       await openBenchSlot(db, g.matchId!, `offer-open-${g.orgId}`);
 
       // The router says exactly what it said in production: `none`.
-      setRouterStub({ enabled: true, floor: false, bodies: { "👍": "none" } });
-
-      await g.postBatch([
-        {
-          player: "alice",
-          body: "👍",
-          verdict: { intent: "in", registerAttendance: "IN", react: "✅" },
-        },
-      ]);
+      await g.postBatch([{ player: "alice", body: "👍", ...THUMB }]);
 
       const row = await db.one<{ handledBy: string }>(
         `SELECT "handledBy" FROM "AnalyzedMessage" WHERE "orgId" = $1 AND body = '👍'`,
         [g.orgId],
       );
-      // It reached the analyzer: `llm`, not the gate's own tag.
-      expect(row?.handledBy).toBe("llm");
+      // It reached an OWNER. `awaiting` rewrote `none` to an engine
+      // route, so the audit column names the engine; it read `llm` while
+      // the analyzer was the thing on the far side of that rewrite.
+      expect(row?.handledBy).toBe("attendance-engine");
       expect(await g.attendanceOf("alice")).toMatchObject({ status: "CONFIRMED" });
     });
 
@@ -92,15 +111,7 @@ async function openBenchSlot(
       const g = await createGroup(request, db, {
         attendance: [{ key: "alice", status: "BENCH" }],
       });
-      setRouterStub({ enabled: true, floor: false, bodies: { "👍": "none" } });
-
-      await g.postBatch([
-        {
-          player: "alice",
-          body: "👍",
-          verdict: { intent: "in", registerAttendance: "IN", react: "✅" },
-        },
-      ]);
+      await g.postBatch([{ player: "alice", body: "👍", ...THUMB }]);
 
       expect(await g.attendanceOf("alice")).toMatchObject({ status: "BENCH" });
       const row = await db.one<{ handledBy: string; reasoning: string }>(
@@ -124,14 +135,7 @@ async function openBenchSlot(
         [id],
       );
 
-      setRouterStub({ enabled: true, floor: false, bodies: { "👍": "none" } });
-      await g.postBatch([
-        {
-          player: "alice",
-          body: "👍",
-          verdict: { intent: "in", registerAttendance: "IN", react: "✅" },
-        },
-      ]);
+      await g.postBatch([{ player: "alice", body: "👍", ...THUMB }]);
 
       expect(await g.attendanceOf("alice")).toMatchObject({ status: "BENCH" });
     });
@@ -148,14 +152,7 @@ async function openBenchSlot(
       });
       await openBenchSlot(db, g.matchId!, `offer-stale-${g.orgId}`, 120);
 
-      setRouterStub({ enabled: true, floor: false, bodies: { "👍": "none" } });
-      await g.postBatch([
-        {
-          player: "alice",
-          body: "👍",
-          verdict: { intent: "in", registerAttendance: "IN", react: "✅" },
-        },
-      ]);
+      await g.postBatch([{ player: "alice", body: "👍", ...THUMB }]);
 
       expect(await g.attendanceOf("alice")).toMatchObject({ status: "BENCH" });
     });
@@ -167,41 +164,21 @@ async function openBenchSlot(
       const g = await createGroup(request, db, {
         attendance: [{ key: "alice", status: "BENCH" }],
       });
-      setRouterStub({ enabled: true, floor: false, bodies: { "👍": "none" } });
-      await g.postBatch([
-        {
-          player: "alice",
-          body: "👍",
-          verdict: { intent: "in", registerAttendance: "IN", react: "✅" },
-        },
-      ]);
+      await g.postBatch([{ player: "alice", body: "👍", ...THUMB }]);
 
       expect(await g.attendanceOf("alice")).toMatchObject({ status: "BENCH" });
     });
 
-    test("with the gate OFF, an open slot changes nothing at all", async ({ request, db }) => {
-      // The revert has to stay a revert: `ROUTER_GATE_ENABLED` unset and
-      // every line behaves as it did on `b03d96b`, open question or not.
-      const g = await createGroup(request, db, {
-        attendance: [{ key: "alice", status: "BENCH" }],
-      });
-      await openBenchSlot(db, g.matchId!, `offer-gateoff-${g.orgId}`);
-      clearRouterStub();
-
-      await g.postBatch([
-        {
-          player: "alice",
-          body: "👍",
-          verdict: { intent: "in", registerAttendance: "IN", react: "✅" },
-        },
-      ]);
-
-      expect(await g.attendanceOf("alice")).toMatchObject({ status: "CONFIRMED" });
-      const gated = await db.count(
-        `SELECT count(*)::int FROM "AnalyzedMessage" WHERE "orgId" = $1 AND "handledBy" = 'router-gate'`,
-        [g.orgId],
-      );
-      expect(gated).toBe(0);
-    });
+    /* ── DELETED 2026-09-06 (§10 step 8): "with the gate OFF, an open
+     * slot changes nothing at all".
+     *
+     * It set `clearRouterStub()` so `ROUTER_GATE_ENABLED` fell back to
+     * the environment (off) and asserted the 👍 registered anyway, via
+     * the analyzer, with no `router-gate` row anywhere. The flag is
+     * deleted from `pipeline/gate.ts` and so is the analyzer, so there is
+     * no off arm and nothing for it to have reverted to; `routerIsNeeded()`
+     * takes no arguments and returns true. `__tests__/gate.test.ts`
+     * ("names no predicate for a flag that was deleted") is the tombstone
+     * for the name itself. */
   },
 );

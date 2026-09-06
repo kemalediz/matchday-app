@@ -7,21 +7,56 @@
  * it, a full squad must DM nobody, and the blast is idempotent per match.
  *
  * REWRITTEN 2026-09-01. The trigger used to be `looksLikeRecruitRequest`,
- * a regex that claimed the whole message. It is gone; recruit is now an
- * extracted verdict FACT, so every case below carries an explicit
- * `recruitRequest` in its stub — that IS the classification under test,
- * and in stubbed mode we assert what the SERVER does with it. Whether the
- * real model sets the flag correctly is the live sweep's job.
+ * a regex that claimed the whole message. It is gone; recruit is an
+ * extracted FACT, so every case below carries it explicitly — that IS the
+ * classification under test, and in stubbed mode we assert what the
+ * SERVER does with it. Whether the real model reports it correctly is the
+ * live sweep's job.
+ *
+ * ── PORTED 2026-09-06, §10 STEP 8 ───────────────────────────────────
+ *
+ * `verdict.recruitRequest: true` became `AttendanceFacts.sideRequests:
+ * ["recruit"]`, and the change is not a rename. The old flag sat BESIDE
+ * an intent, so "Najib is out. We need one more player." had to choose
+ * which of the two things it was; the 2026-09-01 incident at the bottom
+ * of this file is what happened when the regex chose. `sideRequests` is a
+ * LIST alongside the claims, so a message carries both by construction
+ * and `route.ts` runs the blast in the batch-final pass, after the drop
+ * has landed.
+ *
+ * The ADMIN GATE is unchanged and still lives in the same place:
+ * `attendance-engine-batch.ts` sets `recruitRequest` only when
+ * `senderIsAdmin`, so a non-admin's ask is ignored rather than refused —
+ * exactly the 2026-09-01 behaviour this file already recorded.
+ *
+ * The bodies route `unsure` where they carry no attendance claim at all.
+ * That is the honest route for "lads we need a few more players": it is
+ * attendance-SHAPED, the router cannot settle it, and since step 8
+ * `unsure` is an engine route, so the extractor is asked and the
+ * `sideRequests` entry is what it finds. `admin_ops`'s own `recruit`
+ * action is the OTHER recogniser and it requires an @Match Time tag;
+ * every ask in this file is untagged, exactly as production was.
  *
  * The behaviour these tests pin is otherwise unchanged: same action, same
- * copy, same admin gate, same idempotency. What is new is the last block:
- * a message that drops a player AND asks for a replacement must do both,
- * in that order, and speak exactly once.
+ * copy, same admin gate, same idempotency. The last block is the one that
+ * matters most: a message that drops a player AND asks for a replacement
+ * must do both, in that order, and speak exactly once.
  */
 import type { APIRequestContext } from "@playwright/test";
 import { test, expect, resetDb } from "../fixtures";
 import type { TestDb } from "../helpers/test-db";
 import { createGroup, SimGroup } from "./group";
+import { facts, otherClaim } from "../helpers/stub";
+
+/** A bare recruit ask: no claims, one side request. */
+const RECRUIT = { route: "unsure", facts: facts([], { sideRequests: ["recruit"] }) };
+
+/** A named third-party drop that ALSO asks for cover — the 2026-09-01
+ *  shape, as one set of facts rather than two competing intents. */
+const dropAndRecruit = (name: string) => ({
+  route: "other_att",
+  facts: facts([otherClaim(name, "out")], { sideRequests: ["recruit"] }),
+});
 
 test.describe.configure({ mode: "serial" });
 
@@ -54,13 +89,34 @@ const recruitDms = (grp: SimGroup) =>
 
 test("explicit shortage from an admin → invite DMs to recent non-responders with phones", async ({ request, db }) => {
   const grp = await group(request, db);
-  const r = await grp.post("owner", "lads we need a few more players for tuesday", {
-    verdict: { intent: "noise", recruitRequest: true, confidence: 0.95, reasoning: "stub: recruit ask, nothing else" },
-  });
-  expect(r.handledBy).toBe("fast-path");
-  expect(r.intent).toBe("recruit_recent");
+  const r = await grp.post("owner", "lads we need a few more players for tuesday", RECRUIT);
+  // ── TWO AUDIT LABELS CHANGED, MEASURED, AND NEITHER IS THE ACTION ──
+  //
+  // WAS: `handledBy: "fast-path"`, `intent: "recruit_recent"`. The
+  // batch-final pass in `route.ts` only relabels a recruit result when it
+  // finds `handledBy === "ignored"` or a `noise` / `unclear` intent — the
+  // shape a PURE recruit ask had when the verdict "carried nothing".
+  // Under the engine it carries something: `unsure` is an owned route, so
+  // the message is `handledBy: "llm"` (the wire label every engine-owned
+  // message reports) and `intentFor` reads the `recruit` side request as
+  // `replacement_request`.
+  //
+  // The ACTION is unchanged and is what the rest of this test asserts:
+  // three DMs, to the right people, with the right copy, and one honest
+  // reply. `augmentAnalysis` still stamps `action: "recruit:3"` on the
+  // row, so "was a blast sent, and to how many" is still one query. The
+  // label change is recorded in the PR body rather than smuggled in here.
+  expect(r.handledBy).toBe("llm");
+  expect(r.intent).toBe("replacement_request");
   expect(r.react).toBe("✅");
   expect(r.reply).toContain("DM'd 3 recent players");
+  const row = await grp.db.one<{ action: string }>(
+    `SELECT action FROM "AnalyzedMessage" WHERE "orgId" = $1 AND body = $2`,
+    [grp.orgId, "lads we need a few more players for tuesday"],
+  );
+  // "none+recruit:3" — the engine's own action for the message ("none",
+  // no attendance write) with the blast appended by `augmentAnalysis`.
+  expect(row?.action, "the audit row still names the blast and its size").toContain("recruit:3");
 
   const dms = await recruitDms(grp);
   expect(dms).toHaveLength(3);
@@ -93,10 +149,7 @@ test("explicit shortage from an admin → invite DMs to recent non-responders wi
 test("repeating the request never re-DMs the same players for the same match", async ({ request, db }) => {
   const grp = await group(request, db);
   const before = (await recruitDms(grp)).length;
-  const r = await grp.post("owner", "still need more players lads", {
-    verdict: { intent: "noise", recruitRequest: true, confidence: 0.95, reasoning: "stub: recruit ask again" },
-  });
-  expect(r.intent).toBe("recruit_recent");
+  const r = await grp.post("owner", "still need more players lads", RECRUIT);
   // Branch 3: candidates existed but were ALL pinged on the earlier call —
   // honest "awaiting replies" copy, not the misleading "already responded".
   expect(r.reply).toContain("waiting on their replies");
@@ -111,13 +164,8 @@ test('"list the players" is a roster question — NEVER a recruit blast', async 
   // NOT be misrouted to a recruit blast) is preserved.
   const r = await grp.post("owner", "@Match Time can you list the players for tuesday?", {
     tag: true,
-    verdict: {
-      intent: "question",
-      reply: "Here's the squad so far: 2/8 confirmed.",
-      react: null,
-      confidence: 0.95,
-      reasoning: "stub: roster answer",
-    },
+    route: "question",
+    facts: { topic: "squad", personRef: null, statedCount: null },
   });
   expect(r.intent).not.toBe("recruit_recent");
   expect(r.handledBy).toBe("llm");
@@ -127,16 +175,13 @@ test('"list the players" is a roster question — NEVER a recruit blast', async 
 test("a non-admin's recruit request DMs nobody and says nothing", async ({ request, db }) => {
   const grp = await group(request, db);
   const before = (await recruitDms(grp)).length;
-  const r = await grp.post("pete", "get more players in for tuesday", {
-    verdict: { intent: "noise", recruitRequest: true, confidence: 0.95, reasoning: "stub: non-admin recruit ask" },
-  });
+  const r = await grp.post("pete", "get more players in for tuesday", RECRUIT);
   // CHANGED 2026-09-01: the old path reacted 🔒. That react was only ever
   // reachable because the regex had already claimed the whole message —
   // the denial and the swallow were the same act. Now the flag is simply
   // ignored for a non-admin and the rest of the message flows through the
   // normal path, which for a bare ask is silence.
-  expect(r.intent).not.toBe("recruit_recent");
-  expect(r.reply).toBeNull();
+  expect(r.reply, "a non-admin's ask is ignored, not refused out loud").toBeNull();
   expect((await recruitDms(grp)).length).toBe(before);
 });
 
@@ -149,10 +194,7 @@ test("full squad → recruit DMs nobody and says so", async ({ request, db }) =>
   expect((await grp.counts()).confirmed).toBe(8);
 
   const before = (await recruitDms(grp)).length;
-  const r = await grp.post("alice", "anyone free? we need players", {
-    verdict: { intent: "noise", recruitRequest: true, confidence: 0.95, reasoning: "stub: recruit ask at a full squad" },
-  });
-  expect(r.intent).toBe("recruit_recent");
+  const r = await grp.post("alice", "anyone free? we need players", RECRUIT);
   expect(r.reply).toContain("already full");
   expect((await recruitDms(grp)).length).toBe(before);
 });
@@ -211,16 +253,11 @@ test.describe("multi-intent: a drop and a recruit ask in one message", () => {
     const res = await grp.postBatch([
       {
         player: "owner",
-        // UNTAGGED, exactly as production was.
+        // UNTAGGED, exactly as production was. `RECRUIT_COMMAND_IMPLIES_ADDRESSED`
+        // (PR #33) is why an admin's recruit command clears the interaction
+        // contract without a tag, and `engine.ts:317` is where that lives.
         body: BODY,
-        verdict: {
-          intent: "out",
-          registerAttendance: null,
-          registerFor: [{ name: "Jake Jolly", action: "OUT" }],
-          recruitRequest: true,
-          confidence: 0.95,
-          reasoning: "stub: a third-party OUT and a recruit ask in one message",
-        },
+        ...dropAndRecruit("Jake Jolly"),
       },
     ]);
 
@@ -255,14 +292,7 @@ test.describe("multi-intent: a drop and a recruit ask in one message", () => {
       {
         player: "pete",
         body: "Ivan is out. We need one more player.",
-        verdict: {
-          intent: "out",
-          registerAttendance: null,
-          registerFor: [{ name: "Ivan Ice", action: "OUT" }],
-          recruitRequest: true,
-          confidence: 0.95,
-          reasoning: "stub: non-admin third-party OUT plus recruit ask",
-        },
+        ...dropAndRecruit("Ivan Ice"),
       },
     ]);
     expect(res.results).toHaveLength(1);

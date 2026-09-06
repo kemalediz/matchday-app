@@ -6,12 +6,12 @@
  * Opt-in: this whole describe block only runs when MT_SIM_LIVE_LLM=1.
  * When the flag is OFF (the default for `npm run test:sim` /
  * `npm run test:e2e`), the entire file is SKIPPED — so it never breaks the
- * stubbed suite (where inferVerdict() returns undefined for these complex
- * sentences and the bot would otherwise stay silent and fail the asserts).
+ * stubbed suite, where these bodies carry no `route` or `facts` and the
+ * bot would stay silent and fail the asserts.
  *
- * In live mode the harness IGNORES any `verdict` option (group.ts postBatch
- * skips setLlmStub and ignores canned verdicts), so we pass NO verdict —
- * the model produces the verdict from the natural-language body.
+ * In live mode the harness writes NEITHER stub file (`group.ts`'s postBatch
+ * skips both under MT_SIM_LIVE_LLM), so the real router and the real
+ * extractors read these sentences for themselves.
  *
  * Three cases, each in its own fresh group, serial:
  *   1. self-replace (non-admin "replace me with Aydın") → direct swap, no 👍

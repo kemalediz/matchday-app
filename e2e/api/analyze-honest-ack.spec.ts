@@ -14,9 +14,26 @@
  * The other half of the contract, tested just as hard: a legitimate
  * no-op must NOT produce an apology. An OUT from someone who was never
  * down, and a repeat IN from a confirmed player, are both normal.
+ *
+ * ── PORTED 2026-09-06, §10 STEP 8 ───────────────────────────────────
+ *
+ * The trigger moved and the guarantee did not. `resolveAttendanceAck`
+ * (`lib/attendance-write-outcome.ts`) is unchanged and is still what
+ * decides this; what changed is who hands it the failures. It used to be
+ * `executeVerdict`; it is now `engineOutcome.failures`, assembled in
+ * `attendance-engine-batch.ts` from the writes that THREW, and read at
+ * `analyze/route.ts`'s `if (ack.failed)`.
+ *
+ * The cheerful text those cases were written against — "You're in Ian!
+ * Squad's looking good 💪" — was `verdict.reply`, and there is no longer
+ * any channel by which a model-authored sentence enters the route. So
+ * the assertions that mattered are kept (nothing landed, nothing claims
+ * it did, the row says `error`, the reply says something TRUE) and the
+ * ones that only said "the model's lie did not survive" are gone with
+ * the lie.
  */
 import { test, expect, postAnalyze, resetDb } from "../fixtures";
-import { setLlmStub } from "../helpers/stub";
+import { engineOn, otherFacts, selfIn, selfOut } from "../helpers/stub";
 import { U, MATCH } from "../helpers/constants";
 import { testDb, type TestDb } from "../helpers/test-db";
 
@@ -71,8 +88,6 @@ const confirmedCount = (db: TestDb) =>
     [MATCH.upcoming],
   );
 
-const CHEERFUL = "You're in Ian! Squad's looking good 💪";
-
 test.beforeAll(async () => {
   resetDb();
 });
@@ -85,16 +100,7 @@ test.afterAll(async () => {
 test("a FAILED IN write never gets a cheerful confirmation", async ({ request, db }) => {
   await blockAttendanceWrites(db, [U.fresh]);
   const id = msgId();
-  setLlmStub({
-    [id]: {
-      intent: "in",
-      registerAttendance: "IN",
-      react: "👍",
-      reply: CHEERFUL,
-      confidence: 0.96,
-      reasoning: "stub",
-    },
-  });
+  engineOn({ "im in for tuesday": { route: "self_att", facts: selfIn() } });
   const res = await postAnalyze(request, [
     { waMessageId: id, body: "im in for tuesday", authorPhone: "447700900009", authorName: "Ian Innes" },
   ]);
@@ -106,6 +112,9 @@ test("a FAILED IN write never gets a cheerful confirmation", async ({ request, d
   expect(await attendanceRow(db, U.fresh)).toBeNull();
 
   // 2. So we must NOT claim it did — no cheerful text, no ✅ tick.
+  //    (The cheerful text used to be the model's; the composer would now
+  //    have written "You're in for Tuesday" from the write itself, which
+  //    is why `resolveAttendanceAck` still has to run.)
   expect(r.reply ?? "").not.toContain("You're in");
   expect(r.react).toBeNull();
 
@@ -126,16 +135,7 @@ test("a FAILED IN write never gets a cheerful confirmation", async ({ request, d
 test("a FAILED OUT write tells them they are still down as playing", async ({ request, db }) => {
   await blockAttendanceWrites(db, [U.player]);
   const id = msgId();
-  setLlmStub({
-    [id]: {
-      intent: "out",
-      registerAttendance: "OUT",
-      react: "👋",
-      reply: "No worries Pat, you're out. Squad is 3/5 now.",
-      confidence: 0.95,
-      reasoning: "stub",
-    },
-  });
+  engineOn({ "cant make tuesday sorry": { route: "self_att", facts: selfOut() } });
   const res = await postAnalyze(request, [
     { waMessageId: id, body: "cant make tuesday sorry", authorPhone: "447700900003", authorName: "Pat Player" },
   ]);
@@ -152,43 +152,28 @@ test("a FAILED OUT write tells them they are still down as playing", async ({ re
 
 test("a SUCCESSFUL IN is completely unchanged", async ({ request, db }) => {
   const id = msgId();
-  setLlmStub({
-    [id]: {
-      intent: "in",
-      registerAttendance: "IN",
-      react: "👍",
-      reply: CHEERFUL,
-      confidence: 0.96,
-      reasoning: "stub",
-    },
-  });
+  engineOn({ "im in for tuesday": { route: "self_att", facts: selfIn() } });
   const res = await postAnalyze(request, [
     { waMessageId: id, body: "im in for tuesday", authorPhone: "447700900009", authorName: "Ian Innes" },
   ]);
   const r = res.results.find((x: { waMessageId: string }) => x.waMessageId === id);
 
   expect((await attendanceRow(db, U.fresh))?.status).toBe("CONFIRMED");
-  expect(r.react).toBe("✅"); // server recomputes from the real slot
-  expect(r.handledBy).toBe("llm");
+  expect(r.react).toBe("✅"); // computed from the slot the write took
+  expect(r.handledBy).toBe("llm"); // the WIRE field, unchanged for every owner
   expect(r.reply ?? "").not.toContain("Sorry");
   const row = await analyzed(db, id);
-  expect(row?.handledBy).toBe("llm");
+  // The AUDIT field, which says WHO decided. It read `llm` while the
+  // mega-prompt existed and now names the engine — the one assertion in
+  // this file whose VALUE changed.
+  expect(row?.handledBy).toBe("attendance-engine");
   expect(row?.action).toBe("IN");
 });
 
 test("an OUT from someone with no row is a legitimate no-op, not a failure", async ({ request, db }) => {
   const id = msgId();
   expect(await attendanceRow(db, U.extra)).toBeNull(); // Zara was never down
-  setLlmStub({
-    [id]: {
-      intent: "out",
-      registerAttendance: "OUT",
-      react: "👋",
-      reply: "No worries Zara, squad is 4/5 now.",
-      confidence: 0.9,
-      reasoning: "stub",
-    },
-  });
+  engineOn({ "im out lads": { route: "self_att", facts: selfOut() } });
   const before = await confirmedCount(db);
   const res = await postAnalyze(request, [
     { waMessageId: id, body: "im out lads", authorPhone: "447700900010", authorName: "Zara Zest" },
@@ -206,23 +191,18 @@ test("an OUT from someone with no row is a legitimate no-op, not a failure", asy
 test("a repeat IN from an already-confirmed player is idempotent, not a failure", async ({ request, db }) => {
   const id = msgId();
   const before = await confirmedCount(db);
-  setLlmStub({
-    [id]: {
-      intent: "in",
-      registerAttendance: "IN",
-      react: "👍",
-      reply: "Already got you down Ian 👍",
-      confidence: 0.9,
-      reasoning: "stub",
-    },
-  });
+  engineOn({ "in again": { route: "self_att", facts: selfIn() } });
   const res = await postAnalyze(request, [
     { waMessageId: id, body: "in again", authorPhone: "447700900009", authorName: "Ian Innes" },
   ]);
   const r = res.results.find((x: { waMessageId: string }) => x.waMessageId === id);
 
   expect(r.handledBy).toBe("llm");
-  expect(r.react).toBe("✅");
+  // NO react, where the old path gave ✅. `pipeline/engine.ts:reactFor`
+  // is reached only when a write LANDS, and a repeat IN from a confirmed
+  // player moves nothing. The property this test is named for is the one
+  // below it: the second IN is not a duplicate and not a failure.
+  expect(r.react).toBeNull();
   expect(r.reply ?? "").not.toContain("Sorry");
   expect(await confirmedCount(db)).toBe(before); // no duplicate
   expect(
@@ -236,17 +216,7 @@ test("a repeat IN from an already-confirmed player is idempotent, not a failure"
 test("a FAILED third-party registration is not confirmed either", async ({ request, db }) => {
   await blockAttendanceWrites(db, [U.extra]);
   const id = msgId();
-  setLlmStub({
-    [id]: {
-      intent: "in",
-      registerAttendance: null,
-      registerFor: [{ name: "Zara Zest", action: "IN" }],
-      react: "👍",
-      reply: "Zara's in 👍",
-      confidence: 0.9,
-      reasoning: "stub",
-    },
-  });
+  engineOn({ "zara is in as well": { route: "other_att", facts: otherFacts("Zara Zest", "in") } });
   const res = await postAnalyze(request, [
     { waMessageId: id, body: "zara is in as well", authorPhone: "447700900001", authorName: "Alex Admin" },
   ]);

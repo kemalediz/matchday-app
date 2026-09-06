@@ -1,10 +1,10 @@
 /**
- * Analyzer apply-path integration tests — /api/whatsapp/analyze.
+ * Apply-path integration tests — /api/whatsapp/analyze.
  *
- * Each test writes the verdict it wants the "LLM" to return, POSTs a
- * batch the way the Pi bot does, and asserts the deterministic
- * server-side apply path via direct DB reads. No Anthropic call, no
- * WhatsApp send (BotJobs are just rows).
+ * Each test says what the ROUTER answered and what the EXTRACTOR found
+ * for a body, POSTs a batch the way the Pi bot does, and asserts the
+ * deterministic server-side apply path via direct DB reads. No Anthropic
+ * call, no WhatsApp send (BotJobs are just rows).
  *
  * Tests are serial and share cumulative state on the UPCOMING match:
  *   start    4/5 confirmed (admin, collector, player, third) + Ben on bench
@@ -14,25 +14,24 @@
  *   T4 BENCH admin demotes Tom (registerFor BENCH) → BENCH, slot freed
  *
  * ════════════════════════════════════════════════════════════════════════
- * ⚠️ §10 STEP 8 (2026-09-06): THIS FILE STUBS A DECIDER THAT NO LONGER
- *    EXISTS. SIX OF ITS TESTS ARE EXPECTED TO FAIL; THREE WERE DELETED.
+ * PORTED 2026-09-06 (§10 STEP 8). SIX CASES MOVED SEAM; THREE WERE
+ * DELETED EARLIER, AND THIS IS WHERE THEY WENT.
  * ════════════════════════════════════════════════════════════════════════
  *
- * `setLlmStub` wrote the file `analyzeBatch` read. `analyzeBatch`,
+ * The verdict seam wrote the file `analyzeBatch` read. `analyzeBatch`,
  * `SYSTEM_PROMPT`, `AnalysisVerdict` and `executeVerdict` are all
- * deleted, so the stub now changes nothing: the server routes nothing,
- * no owner claims anything, and every assertion below that something was
- * WRITTEN will fail. See `e2e/helpers/stub.ts`'s header for the full
- * account and the list of the ~20 specs in the same position.
+ * deleted. The six cases that pin a shipped behaviour of the apply path
+ * — capacity, the bench-slot offer, a demote that must not open one, the
+ * batch-final squad post, the banter-drop guard, the retry dedupe — are
+ * ported here to `engineOn({ body: { route, facts } })`, which is the
+ * same seam `e2e/sim/attendance-engine.spec.ts` drives.
  *
- * THE SIX SURVIVING VERDICT TESTS ARE LEFT FAILING, NOT DELETED. Each
- * pins a shipped behaviour of the apply path — capacity, the bench-slot
- * offer, a demote that must not open one, the batch-final squad post,
- * the banter-drop guard — and all six are portable: the same case
- * expressed as a route plus extractor facts, the way
- * `e2e/sim/attendance-engine.spec.ts` now does it. Deleting them to make
- * the suite green would delete the only end-to-end coverage of those
- * paths at the exact moment the layer above them was replaced.
+ * TWO ASSERTION VALUES CHANGED, both for the same reason, and each says
+ * so at its own site: a third-party move reacts 👍 rather than 🪑,
+ * because `pipeline/engine.ts:reactFor` gives a status react only when
+ * the SENDER's own row moved, and the `AnalyzedMessage.handledBy` audit
+ * column reads `attendance-engine` rather than `llm` (the WIRE field in
+ * the response is still `llm` for every owned message).
  *
  * ── THE THREE THAT WERE DELETED, AND WHERE EACH IS COVERED NOW ───────
  *
@@ -63,13 +62,13 @@
  * logic remains unit-tested against real production reasoning strings in
  * `src/lib/__tests__/out-safety-net.test.ts`.
  *
- * Restating the tests here against a `setLlmStub` verdict would be
+ * Restating those three here against a verdict would be
  * asserting that a deleted guard still fires on input nothing can
  * produce — a green tick over nothing, which is the shape this codebase
  * hunts rather than writes.
  */
 import { test, expect, postAnalyze, resetDb } from "../fixtures";
-import { setLlmStub } from "../helpers/stub";
+import { engineOn, otherFacts, selfIn, selfOut } from "../helpers/stub";
 import { U, MATCH } from "../helpers/constants";
 import type { TestDb } from "../helpers/test-db";
 
@@ -99,11 +98,9 @@ const confirmedCount = (db: TestDb) =>
     [MATCH.upcoming],
   );
 
-test("IN verdict registers the sender as CONFIRMED", async ({ request, db }) => {
+test("a self IN claim registers the sender as CONFIRMED", async ({ request, db }) => {
   const id = msgId();
-  setLlmStub({
-    [id]: { intent: "in", registerAttendance: "IN", react: "👍", confidence: 0.95, reasoning: "stub" },
-  });
+  engineOn({ "Count me in for Tuesday lads": { route: "self_att", facts: selfIn() } });
   const res = await postAnalyze(request, [
     { waMessageId: id, body: "Count me in for Tuesday lads", authorPhone: "447700900009", authorName: "Ian Innes" },
   ]);
@@ -117,9 +114,7 @@ test("IN verdict registers the sender as CONFIRMED", async ({ request, db }) => 
 
 test("IN on a full squad lands on the BENCH", async ({ request, db }) => {
   const id = msgId();
-  setLlmStub({
-    [id]: { intent: "in", registerAttendance: "IN", react: "👍", confidence: 0.95, reasoning: "stub" },
-  });
+  engineOn({ "in for tuesday too": { route: "self_att", facts: selfIn() } });
   const res = await postAnalyze(request, [
     { waMessageId: id, body: "in for tuesday too", authorPhone: "447700900010", authorName: "Zara Zest" },
   ]);
@@ -131,10 +126,13 @@ test("IN on a full squad lands on the BENCH", async ({ request, db }) => {
   expect(await confirmedCount(db)).toBe(5); // capacity respected
 });
 
-test("OUT verdict drops the sender and opens a bench-slot offer", async ({ request, db }) => {
+test("a self OUT claim drops the sender and opens a bench-slot offer", async ({ request, db }) => {
   const id = msgId();
-  setLlmStub({
-    [id]: { intent: "out", registerAttendance: "OUT", react: "👋", confidence: 0.95, reasoning: "stub" },
+  engineOn({
+    "Sorry lads, something came up tonight, count me out": {
+      route: "self_att",
+      facts: selfOut(),
+    },
   });
   const res = await postAnalyze(request, [
     { waMessageId: id, body: "Sorry lads, something came up tonight, count me out", authorPhone: "447700900003", authorName: "Pat Player" },
@@ -156,27 +154,27 @@ test("OUT verdict drops the sender and opens a bench-slot offer", async ({ reque
 test("third-party BENCH demote: CONFIRMED → BENCH, slot freed, no duplicate", async ({ request, db }) => {
   const before = await confirmedCount(db);
   const id = msgId();
-  setLlmStub({
-    [id]: {
-      intent: "question",
-      registerFor: [{ name: "Tom Third", action: "BENCH" }],
-      reply: "Done — Tom Third has moved to the bench. A confirmed slot is open.",
-      react: "✅",
-      confidence: 0.95,
-      reasoning: "stub: admin demote",
+  engineOn({
+    "@Match Time move Tom to the bench please": {
+      route: "other_att",
+      facts: otherFacts("Tom Third", "bench"),
     },
   });
   const res = await postAnalyze(request, [
     { waMessageId: id, body: "@Match Time move Tom to the bench please", authorPhone: "447700900001", authorName: "Alex Admin", botMentioned: true },
   ]);
   const r = res.results.find((x: { waMessageId: string }) => x.waMessageId === id);
-  expect(r.react).toBe("🪑");
-  // The reply passes through exactly once, unmodified. This used to be
-  // "the safety net must NOT double-announce when registerFor already
-  // carries the BENCH entry"; the bench-demote net is deleted (§10 step
-  // 6/8), so there is nothing left that could double-announce and the
-  // assertion is now simply that a demote's reply is not rewritten.
-  expect(r.reply).toContain("Tom Third has moved to the bench");
+  // 👍, not 🪑: Alex's own row did not move, and a 🪑 on his message would
+  // read as Alex being benched. `reactFor(status, self)` is the one place
+  // that decides it.
+  expect(r.react).toBe("👍");
+  // The move is announced ONCE, and the sentence is the composer's. It
+  // used to be `verdict.reply` passing through, with the assertion that
+  // the deleted bench-demote net did not double it; there is nothing left
+  // that could speak twice, so what is asserted is that the move is
+  // announced at all and names the player it moved.
+  expect(r.reply).toContain("Tom");
+  expect((r.reply.match(/Tom/g) ?? []).length).toBe(1);
 
   const att = await attendance(db, U.third);
   expect(att?.status).toBe("BENCH");
@@ -196,41 +194,73 @@ test("third-party BENCH demote: CONFIRMED → BENCH, slot freed, no duplicate", 
   expect(offer).toBeNull();
 });
 
-test("multiple squad-state replies collapse into ONE batch-final status post", async ({ request, db }) => {
-  // ⚠️ THE CUMULATIVE STATE IN THIS COMMENT IS STALE. The bench-demote
-  // net's test (deleted §10 step 8 — see the tombstone below) was what
-  // put Ian on the bench, so the numbers below no longer describe the
-  // world this test runs in. Left as written rather than re-derived,
-  // because the whole file needs porting off the dead verdict seam and a
-  // corrected count against a decider that does nothing would be a
-  // fiction dressed as a fix. Fix the counts as part of the port.
+test("two squad questions in one batch: two answers, one roster, no contradiction", async ({ request, db }) => {
+  // ── THE COMMENT THAT USED TO BE HERE WAS A KNOWN-STALE COUNT ──────
   //
-  // State here (as of the version that last ran): 2/5 confirmed (Alex,
-  // Colin), bench = Ben + Zara + Tom + Ian, Pat dropped. Two stubbed verdicts both emit contradictory
-  // squad-state replies (the Sutton Lads 2026-06-12 failure shape) —
-  // the route must silence all but the last and replace it with the
-  // deterministic status post computed from the post-batch DB snapshot.
+  // It described a world produced by a test that had already been
+  // deleted, said so, and asked the next person to fix it as part of the
+  // port. This is that fix: the counts are READ rather than hard-coded,
+  // so the case cannot go stale again and still says the thing that
+  // matters — the number in the post is the number in the table.
+  //
+  // ── AND THE COLLAPSE IS NARROWER THAN IT WAS. MEASURED. ──────────
+  //
+  // The old title was "multiple squad-state replies collapse into ONE
+  // batch-final status post", and the old body fed two CONTRADICTORY
+  // model-authored replies ("We're 5/5 — full squad", "Bench is empty")
+  // so the collapse could be seen silencing one and replacing the other.
+  //
+  // Neither can be authored now: both answers are composed from the same
+  // `SquadState` read out of the database, so they cannot disagree. What
+  // this batch actually produces is TWO sends — the roster post for the
+  // `count` question and a one-line "On the bench: …" for the `bench`
+  // one — because `composeSquadStateReply`'s collapse only claims replies
+  // that SHOW SQUAD STATE, and the bench line is not one.
+  //
+  // That is a real difference from the old behaviour and it is asserted
+  // rather than glossed: two people asked two different questions and
+  // both got a true answer, which is not the failure this file is named
+  // for. The failure it IS named for is two posts that contradict each
+  // other, and that is what the assertions below rule out.
   const idA = msgId();
   const idB = msgId();
-  setLlmStub({
-    [idA]: { intent: "question", reply: "We're 5/5 — full squad ✅", react: null, confidence: 0.95, reasoning: "stub" },
-    [idB]: { intent: "question", reply: "Bench is empty — no standby players.", react: null, confidence: 0.95, reasoning: "stub" },
+  engineOn({
+    "@Match Time are we full for tuesday?": {
+      route: "question",
+      facts: { topic: "count", personRef: null, statedCount: null },
+    },
+    "@Match Time who's on the bench?": {
+      route: "question",
+      facts: { topic: "bench", personRef: null, statedCount: null },
+    },
   });
+  const before = await confirmedCount(db);
   const res = await postAnalyze(request, [
     { waMessageId: idA, body: "@Match Time are we full for tuesday?", authorPhone: "447700900001", authorName: "Alex Admin", botMentioned: true },
     { waMessageId: idB, body: "@Match Time who's on the bench?", authorPhone: "447700900002", authorName: "Colin Collector", botMentioned: true },
   ]);
-  const rA = res.results.find((x: { waMessageId: string }) => x.waMessageId === idA);
-  const rB = res.results.find((x: { waMessageId: string }) => x.waMessageId === idB);
-  expect(rA.reply).toBeNull(); // earlier squad-state reply silenced
-  expect(rB.reply).toContain("Based on all the messages I've picked up");
-  expect(rB.reply).toContain("*2/5*"); // batch-final truth, not the stale stub claims
-  expect(rB.reply).toContain("*Playing:*");
-  expect(rB.reply).toContain("*Bench (4):*"); // bench shown in the same post
-  expect(rB.reply).not.toContain("Bench is empty");
+  const spoke = res.results
+    .map((x: { reply: string | null }) => x.reply ?? "")
+    .filter((t: string) => t.length > 0);
+  expect(spoke.length, "both questions are answered").toBe(2);
 
-  // No attendance side-effects from question verdicts.
-  expect(await confirmedCount(db)).toBe(2);
+  // Exactly ONE of them carries the roster block. Two roster posts in one
+  // batch is §3.2 S36 and is the thing the collapse exists to stop.
+  const rosters = spoke.filter((t: string) => t.includes("*Playing:*"));
+  expect(rosters, `one roster post per batch, got ${JSON.stringify(spoke)}`).toHaveLength(1);
+  expect(rosters[0]).toContain(`${before}/5`);
+
+  // And they AGREE, because both are arithmetic over the same rows: the
+  // bench named in the short answer is the bench listed in the roster.
+  const bench = await db.all<{ name: string }>(
+    `SELECT u.name FROM "Attendance" a JOIN "User" u ON u.id = a."userId"
+      WHERE a."matchId" = $1 AND a.status = 'BENCH'`,
+    [MATCH.upcoming],
+  );
+  for (const b of bench) for (const t of spoke) expect(t).toContain(b.name);
+
+  // A question answers; it never writes.
+  expect(await confirmedCount(db)).toBe(before);
 });
 
 test("banter-drop guard: third-party OUT for a player active in the batch is refused", async ({ request, db }) => {
@@ -243,16 +273,13 @@ test("banter-drop guard: third-party OUT for a player active in the batch is ref
 
   const idChat = msgId();
   const idBanter = msgId();
-  setLlmStub({
-    [idChat]: { intent: "noise", react: null, reply: null, confidence: 1, reasoning: "stub" },
-    [idBanter]: {
-      intent: "out",
-      registerFor: [{ name: "Colin", action: "OUT" }],
-      reply: "Colin is out 😂 We're 1/5 — need 4 more",
-      react: "👋",
-      confidence: 0.9,
-      reasoning: "stub: banter misread as drop",
-    },
+  // The extractor CORRECTLY reports the OUT claim — the text contains
+  // one — which is §6.2's point exactly: deciding it is banter needs
+  // corroboration only the engine can see. Colin's own message carries
+  // the IN claim that contradicts it.
+  engineOn({
+    "😂😂 never, I'm playing": { route: "self_att", facts: selfIn() },
+    "Colin is out lads 😂😂": { route: "other_att", facts: otherFacts("Colin", "out") },
   });
   const res = await postAnalyze(request, [
     { waMessageId: idChat, body: "😂😂 never, I'm playing", authorPhone: "447700900002", authorName: "Colin Collector" },
@@ -294,9 +321,7 @@ test("banter-drop guard: third-party OUT for a player active in the batch is ref
 
 test("duplicate waMessageId is deduped (bot retry safety)", async ({ request }) => {
   const id = msgId();
-  setLlmStub({
-    [id]: { intent: "noise", react: null, reply: null, confidence: 1, reasoning: "stub" },
-  });
+  engineOn({ "noise message": { route: "none" } });
   const body = { waMessageId: id, body: "noise message", authorPhone: "447700900001", authorName: "Alex Admin" as string | null };
   await postAnalyze(request, [body]);
   const second = await postAnalyze(request, [body]);

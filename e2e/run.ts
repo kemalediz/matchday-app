@@ -82,8 +82,8 @@ async function assertLlmSeamReady(): Promise<void> {
     console.log(
       `[e2e] LLM: STUBBED — routes come from ${E2E.ROUTER_STUB_FILE}, facts from ` +
         `${E2E.EXTRACTOR_STUB_FILE}; ANTHROPIC_API_KEY is pinned empty, so this run cannot ` +
-        `call a model or spend anything. (${E2E.LLM_STUB_FILE} is written too, but since ` +
-        `§10 step 8 nothing reads it — see e2e/helpers/stub.ts.)`,
+        `call a model or spend anything. (MT_TEST_DM_QA_STUB is set too, which makes ` +
+        `dm-qa.ts answer with the scoped context itself — see e2e/helpers/stub.ts.)`,
     );
     return;
   }
@@ -123,7 +123,7 @@ function assertMeterSawTraffic(meter: AnthropicMeter, playwrightExitCode: number
         `since §10 step 8 is exactly what "every route flag is off" looks like: no error, no ` +
         `verdict, just a bot that said nothing.\n` +
         `  Check the spec selection, and that no MT_TEST_ROUTER_STUB_FILE / ` +
-        `MT_TEST_EXTRACTOR_STUB_FILE / MT_TEST_LLM_STUB_FILE is set in your shell. Step 7's ` +
+        `MT_TEST_EXTRACTOR_STUB_FILE / MT_TEST_DM_QA_STUB is set in your shell. Step 7's ` +
         `four route flags default ON, so a *_ENGINE_ENABLED=0 left in the environment is the ` +
         `other thing that produces this.`,
     );

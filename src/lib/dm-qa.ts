@@ -171,13 +171,20 @@ export async function answerScopedQuestion(args: {
   includePhoneFlags?: boolean;
 }): Promise<ScopedAnswer | null> {
   const apiKey = process.env.ANTHROPIC_API_KEY;
-  // TEST-ONLY seam (mirrors MT_TEST_LLM_STUB_FILE in message-analyzer):
-  // the e2e suite runs with no Anthropic key. Instead of calling the
-  // model we return the SCOPED CONTEXT itself as the "answer", so specs
-  // can assert the no-leak guarantee STRUCTURALLY — raw phone digits are
-  // physically absent from what the LLM would see, and the 📵 flags only
-  // appear for admins. Inert in prod (the env var is never set there).
-  const stubMode = !!process.env.MT_TEST_LLM_STUB_FILE;
+  // TEST-ONLY seam: the e2e suite runs with no Anthropic key. Instead of
+  // calling the model we return the SCOPED CONTEXT itself as the
+  // "answer", so specs can assert the no-leak guarantee STRUCTURALLY —
+  // raw phone digits are physically absent from what the LLM would see,
+  // and the 📵 flags only appear for admins. Inert in prod (the env var
+  // is never set there).
+  //
+  // RENAMED from `MT_TEST_LLM_STUB_FILE` (2026-09-06). That name was
+  // shared with `analyzeBatch`'s verdict-stub FILE, which §10 step 8
+  // deleted; this reader never opened the file and only ever tested the
+  // variable for truthiness, so a shared name meant one variable
+  // standing for two unrelated seams. `e2e/helpers/stub.ts`'s header has
+  // the full account.
+  const stubMode = !!process.env.MT_TEST_DM_QA_STUB;
   if (!apiKey && !stubMode) return null;
 
   const org = await db.organisation.findUnique({
