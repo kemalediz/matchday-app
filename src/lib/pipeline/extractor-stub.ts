@@ -1,6 +1,9 @@
 /**
- * TEST-ONLY seam for the extractors, mirroring `MT_TEST_LLM_STUB_FILE`
- * (`message-analyzer.ts`) and `MT_TEST_ROUTER_STUB_FILE` (`gate.ts`).
+ * TEST-ONLY seam for the extractors, mirroring `MT_TEST_ROUTER_STUB_FILE`
+ * (`gate.ts`). It used to name `MT_TEST_LLM_STUB_FILE`
+ * (`message-analyzer.ts`) as the other sibling; that seam went with
+ * `analyzeBatch` in §10 step 8, so the router stub is the only one left
+ * to compare against.
  *
  * §10 step 6 puts the extractor on the WRITE path, and a write path
  * that can only be exercised by spending money is a write path nobody
@@ -16,8 +19,9 @@
  * guarantees shape, never semantics).
  *
  * Never set in production. `e2e/helpers/live-llm.ts` refuses a "live"
- * run that can still see a stub seam, the same way it refuses one that
- * can still see the analyzer's.
+ * run that can still see a stub seam — the analyzer's used to be on that
+ * list and was removed with the analyzer in §10 step 8; the refusal
+ * itself is unchanged and still covers this one and the router's.
  */
 import { readFileSync } from "node:fs";
 import type { PipelineModel } from "./llm";
@@ -42,8 +46,15 @@ export interface ExtractorStubConfig {
    * stand-in for it.
    */
   fail?: string[];
-  /** EVERY extractor call fails. The total-overload edge, where the
-   *  engine owns nothing and the analyzer must take the whole batch. */
+  /** EVERY extractor call fails. The total-overload edge.
+   *
+   *  It used to say "where the engine owns nothing and the analyzer must
+   *  take the whole batch". §10 step 8 deleted the analyzer: the engine
+   *  owns nothing and NOBODY takes the batch — every message goes silent
+   *  and onto one deduped operator DM. That is precisely why this seam
+   *  is worth keeping. `attendance-engine-batch.ts` carries its
+   *  degradations through the empty return so the reasons survive, and
+   *  this flag is what proves it. */
   failAll?: boolean;
 }
 

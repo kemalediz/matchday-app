@@ -9,8 +9,25 @@
  *
  * Nothing in this module writes to the database, sends a message,
  * queues a notification or touches the live analyze route. It returns a
- * PROPOSAL and a PROJECTION, and the harness persists them so the two
- * pipelines can be diffed over the same traffic.
+ * PROPOSAL and a PROJECTION.
+ *
+ * ⚠️ THERE IS NO LONGER A SECOND PIPELINE TO DIFF AGAINST. That sentence
+ * used to end "…and the harness persists them so the two pipelines can
+ * be diffed over the same traffic", which was the whole point of this
+ * module for three months. §10 step 8 deleted `analyzeBatch`, the
+ * 19,850-token `SYSTEM_PROMPT` and `executeVerdict`, and retired the
+ * shadow window-analyzer with them — there is nothing on the other side
+ * of the diff (`window-analyzer.ts` carries the tombstone, and
+ * `pipeline/shadow.ts`, which repointed the shadow harness at this dry
+ * run, was deleted outright).
+ *
+ * WHAT THIS MODULE IS FOR NOW, and it is still worth having: it is the
+ * only way to run router → extractors → engine → composer over real
+ * traffic WITHOUT writing anything. Its two callers are
+ * `scripts/dryrun-pipeline.ts` and `e2e/corpus/dryrun-pipeline.ts`,
+ * which call `runPipeline` directly. Both cost real money and are run by
+ * hand. (The `none`-bucket sweep does NOT come through here: it has its
+ * own `toWindowShape` in `none-shadow.ts`.)
  *
  * The router is the only SERIAL dependency; extractors fan out (§11.4).
  */

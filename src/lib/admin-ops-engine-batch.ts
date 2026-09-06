@@ -23,40 +23,113 @@
  *   | `reminders` feature  | `engine.ts` — `state.features.reminders`  |
  *   | 60-day window        | `engine.ts` — the shipped grace and bound |
  *   | `subReminderDm`      | HERE, as a carve-out: a muted player's    |
- *   |                      | message is handed back so the analyzer    |
- *   |                      | sends the shipped 🔕 sentence             |
- *   | missing phone        | `engine.ts` degrades → handed back, so    |
- *   |                      | the analyzer sends the shipped 🤔 line    |
+ *   |                      | message is DECLINED — see the correction  |
+ *   | missing phone        | `engine.ts` degrades → declined, same     |
  *
- * The last two are deliberate. Both shipped branches answer the player
- * with a specific sentence and a specific react, and inventing a second
- * wording for a shipped sentence is how two bots start disagreeing with
- * each other in the same group. Handing the message back costs one
- * analyzer call and gives the player the exact words they get today.
+ * ── THE LAST TWO ROWS SAID SOMETHING THAT STOPPED BEING TRUE ─────────
+ *
+ * Until 2026-09-06 they read "handed back so the analyzer sends the
+ * shipped 🔕 sentence" and "handed back, so the analyzer sends the
+ * shipped 🤔 line", and the paragraph under them ended:
+ *
+ *   "Both shipped branches answer the player with a specific sentence
+ *    and a specific react, and inventing a second wording for a shipped
+ *    sentence is how two bots start disagreeing with each other in the
+ *    same group. Handing the message back costs one analyzer call and
+ *    gives the player the exact words they get today."
+ *
+ * §10 step 8 deleted `analyzeBatch`, the 19,850-token `SYSTEM_PROMPT`
+ * and `executeVerdict`. NOBODY SENDS THOSE TWO SENTENCES NOW. A player
+ * who muted reminder DMs and then asks for one gets silence instead of
+ * the 🔕 line; a reminder for somebody with no phone number on record
+ * gets silence instead of the 🤔 line. Both land on the operator DM
+ * (`lib/operator-note.ts`) and neither reaches the player.
+ *
+ * THE ARGUMENT FOR NOT REIMPLEMENTING THEM IS UNCHANGED AND STILL GOOD —
+ * a second wording of a shipped sentence is how two bots start
+ * disagreeing — but the price went from "one analyzer call" to "the
+ * player is told nothing". These are the two clearest candidates in this
+ * file for a follow-up that composes the shipped sentences
+ * deterministically, in the shape of §10 step 8's four peels
+ * (`bench-prompt-answer.ts`, `pasted-roster-registration.ts`). That is a
+ * behaviour change and belongs in its own PR, not smuggled into a
+ * deletion. Recorded here so the next reader does not have to rediscover
+ * it from a silent group.
  *
  * ─────────────────────────────────────────────────────────────────────
- * FAIL OPEN, ALWAYS
+ * IT OWNS NOTHING RATHER THAN GUESSING, AND SINCE 2026-09-06 "OWNS
+ * NOTHING" MEANS SILENCE
  * ─────────────────────────────────────────────────────────────────────
- *   • `ADMIN_OPS_ENGINE_ENABLED` is off      → owns nothing
- *   • step 5's gate skipped it               → owns nothing
- *   • the router never mentioned the id      → owns nothing
- *   • the state load threw                   → owns nothing
- *   • the opt-out lookup threw               → owns nothing
- *   • the extractor call threw               → THAT message handed back
- *   • the facts are not admin facts          → handed back
- *   • admin action `other`                   → handed back (the
+ * This table used to sit under "FAIL OPEN, ALWAYS", with every "handed
+ * back" meaning "the analyzer decides it, which is today's behaviour and
+ * therefore cannot be a regression". §10 step 8 deleted the analyzer.
+ * A declined message reaches `route.ts:1664` unowned: SILENCE in the
+ * group, an `AnalyzedMessage` row, and one line on the deduped operator
+ * DM (`lib/operator-note.ts`).
+ *
+ * It is a real behaviour change, accepted in §11.5's own words — "a
+ * router with nine routes and an engine with explicit rules will do
+ * nothing instead… the club will experience it as 'the bot got dumber'
+ * before they experience it as 'the bot stopped being wrong'" — and on
+ * this route it is money-adjacent, so read the rows rather than the
+ * heading.
+ *
+ *   • `ADMIN_OPS_ENGINE_ENABLED` is off      → owns nothing → SILENCE +
+ *                                              note. The flag is KEPT
+ *                                              and now defaults ON; only
+ *                                              0/false/no/off turn it
+ *                                              off (`route-flags.ts`).
+ *   • step 5's gate skipped it               → owns nothing, and NO
+ *                                              note: `composeOperatorNote`
+ *                                              drops every `none` route
+ *   • the router never mentioned the id      → owns nothing → SILENCE +
+ *                                              note
+ *   • the state load threw                   → owns nothing → SILENCE +
+ *                                              note
+ *   • the opt-out lookup threw               → owns nothing → SILENCE +
+ *                                              note
+ *   • the extractor call threw               → THAT message goes SILENT
+ *                                              and onto the note. ONE
+ *                                              attempt: `extractors.ts`
+ *                                              retries the four
+ *                                              attendance routes only.
+ *   • the facts are not admin facts          → SILENCE + note
+ *   • admin action `other`                   → SILENCE + note. This row
+ *                                              used to add "the
  *                                              mega-prompt still has
  *                                              intents this route does
- *                                              not model)
- *   • payment tracking is off for the org    → handed back
+ *                                              not model", which was the
+ *                                              whole reason declining
+ *                                              was safe. Those intents
+ *                                              are now modelled by
+ *                                              nobody — §14.3's "least
+ *                                              designed part of this
+ *                                              document", with the note
+ *                                              as its only backstop.
+ *   • payment tracking is off for the org    → SILENCE. The club said
+ *                                              no; nothing failed.
  *   • no genuinely COMPLETED, non-historical
- *     match to credit against                → handed back
- *   • the sender muted reminder DMs          → handed back
- *   • the engine threw                       → owns nothing
+ *     match to credit against                → SILENCE + note. A payment
+ *                                              nobody credited, and the
+ *                                              note is the only notice.
+ *   • the sender muted reminder DMs          → SILENCE + note, where it
+ *                                              used to be the shipped 🔕
+ *                                              sentence. See the
+ *                                              correction above.
+ *   • the engine threw                       → owns nothing → SILENCE +
+ *                                              note, no retry
+ *                                              (`decide()` is pure)
  *   • the engine proposed a write this path
- *     cannot apply                           → owns nothing, loudly
+ *     cannot apply                           → owns nothing, loudly →
+ *                                              SILENCE + note
  *   • an apply threw                         → owned, but SILENT, and
- *                                              the failure is reported
+ *                                              the failure is reported.
+ *                                              NOTE: owned means
+ *                                              `operator-note.ts` never
+ *                                              sees it — an owner
+ *                                              claimed the id — so
+ *                                              `describeAdminOpsBatch`'s
+ *                                              log line is the signal.
  *
  * ─────────────────────────────────────────────────────────────────────
  * WHY THE TAG IS NOT A PRE-FILTER HERE
@@ -210,7 +283,7 @@ export async function runAdminOpsBatch(args: {
   } catch (err) {
     const detail = `${ADMIN_OPS_APPLY_DEGRADED_PREFIX} state load failed (${
       err instanceof Error ? err.message : String(err)
-    }); the analyzer keeps the batch`;
+    }); nobody handles these messages — they go silent and onto this note`;
     console.error("[admin-ops-engine] state load failed:", err);
     return empty([detail]);
   }
@@ -221,11 +294,17 @@ export async function runAdminOpsBatch(args: {
   } catch (err) {
     // The opt-out is a promise MatchTime made to a player who asked it
     // to stop messaging them. A lookup that failed is not permission to
-    // DM them anyway — own nothing and let the analyzer, which does its
-    // own lookup, decide.
+    // DM them anyway, so own nothing.
+    //
+    // It used to add "and let the analyzer, which does its own lookup,
+    // decide". §10 step 8 deleted the analyzer and its lookup with it,
+    // so this is now the only decision: no reminder is set, nobody is
+    // DM'd, and an admin is told on the note. The promise is still kept
+    // — which was always the point of the branch — but nothing else
+    // happens either.
     const detail = `${ADMIN_OPS_APPLY_DEGRADED_PREFIX} the reminder opt-out lookup failed (${
       err instanceof Error ? err.message : String(err)
-    }); the analyzer keeps the batch`;
+    }); nobody handles these messages — they go silent and onto this note`;
     console.error("[admin-ops-engine] opt-out lookup failed:", err);
     return empty([detail]);
   }
@@ -262,9 +341,14 @@ export async function runAdminOpsBatch(args: {
       }
       const failure = res.degradations.find((d) => /failed|could not be parsed/i.test(d.detail));
       if (failure) {
+        // ONE attempt: `extractors.ts` retries the four attendance
+        // routes and not this one. Until §10 step 8 this line said
+        // "handing this message back to the analyzer" — it named a
+        // deleted function, and it told an operator reading the DM that
+        // the message was safe at the moment it was lost.
         degradations.push(
           `${ADMIN_OPS_APPLY_DEGRADED_PREFIX} ${m.waMessageId}: ${failure.detail} — ` +
-            `handing this message back to the analyzer`,
+            `nobody handles this message: no reply in the group, and it is on this note`,
         );
         return;
       }
@@ -280,8 +364,18 @@ export async function runAdminOpsBatch(args: {
   // but never scored — because the `score` route needs it to be. Money
   // does not: crediting a payment against a match nobody has recorded a
   // result for, or against a seeded backfill row, is not a shape this
-  // owns. When the two disagree, the analyzer keeps the message and its
-  // own query picks the older COMPLETED match, exactly as today.
+  // owns.
+  //
+  // WHAT HAPPENS WHEN THE TWO DISAGREE, corrected 2026-09-06. This used
+  // to end: "the analyzer keeps the message and its own query picks the
+  // older COMPLETED match, exactly as today." §10 step 8 deleted the
+  // analyzer AND its query. Nobody picks the older match: the payment is
+  // not credited, the group is told nothing, and the admin gets a line
+  // on the operator DM naming the message and the reason. The
+  // conservative choice is unchanged and still right — money credited
+  // against the wrong match is the failure §13 calls unrecoverable — but
+  // it is now paid for in uncredited payments rather than in one
+  // analyzer call, and this is real money on Sutton FC.
   const completed = state.completedMatch;
   const paymentMatchId =
     completed && completed.status === "COMPLETED" && !completed.isHistorical
@@ -299,17 +393,24 @@ export async function runAdminOpsBatch(args: {
   // message still needs happens OUTSIDE the loop: it reaches `decide()`
   // with `facts: {kind:"none"}` (so `assertCoverage` still sees one
   // outcome per input id and the window is intact for its neighbours),
-  // it gets no entry in `outcomes` (so the analyze route leaves its
-  // verdict alone and the analyzer decides it), and its reason is
-  // already in `degradations` before the `continue` runs.
+  // it gets no entry in `outcomes` (so the analyze route finds no owner
+  // and records it as unowned — silence plus the operator note, since
+  // §10 step 8 deleted the verdict it used to leave alone), and its
+  // reason is already in `degradations` before the `continue` runs.
   const ownedIds = new Set<string>();
   for (const m of candidates) {
     const facts = factsById.get(m.waMessageId);
     if (!facts) continue; // extraction failed; already reported above.
+    // NAMED `hand` FOR A HAND-BACK IT NO LONGER PERFORMS. The name is
+    // kept because every call site below reads `hand("why")`, and
+    // renaming a helper inside a documentation-correction pass is how
+    // such a pass acquires a bug. The SENTENCE is corrected: an operator
+    // reads it on their phone, and "handing this message back to the
+    // analyzer" named a function deleted in §10 step 8.
     const hand = (why: string) =>
       degradations.push(
         `${ADMIN_OPS_APPLY_DEGRADED_PREFIX} ${m.waMessageId}: ${why} — ` +
-          `handing this message back to the analyzer`,
+          `nobody handles this message: no reply in the group, and it is on this note`,
       );
 
     if (facts.kind !== "admin") {
@@ -318,19 +419,31 @@ export async function runAdminOpsBatch(args: {
     }
 
     if (facts.action === "other") {
-      // The mega-prompt still models admin intents this route does not:
-      // `show_teams_request` phrasings that land here, stats asks, and
-      // anything §14.3 calls "the least designed part of this document".
-      // A silent shrug is the failure this design exists to remove.
+      // This used to read: "The mega-prompt still models admin intents
+      // this route does not: `show_teams_request` phrasings that land
+      // here, stats asks, and anything §14.3 calls 'the least designed
+      // part of this document'. A silent shrug is the failure this
+      // design exists to remove."
+      //
+      // §10 step 8 deleted the mega-prompt, so nothing models them and
+      // the shrug is what happens — with the operator note as the thin
+      // thing separating it from §9's signature failure. `other` is the
+      // widest hole this file has, and it is deliberately a wide hole
+      // rather than a guess.
       hand("admin action \"other\" has no deterministic handler on this path");
       continue;
     }
 
     if (facts.action === "bulk_payment") {
       if (!state.features.paymentTracking) {
-        // The org-level kill switch (`route.ts:3779-3786`). Either way
-        // the bot is silent; going through the analyzer keeps the
-        // `AnalyzedMessage` trail identical to today's.
+        // The org-level kill switch (`route.ts:3779-3786`). The bot is
+        // silent either way, which is the club's own choice.
+        //
+        // It used to add that "going through the analyzer keeps the
+        // `AnalyzedMessage` trail identical to today's". Since §10 step
+        // 8 the row is written by `route.ts:1664` instead, tagged
+        // `ignored` with `no owner: route=admin_ops` and this reason
+        // appended — a different row, same question answerable from it.
         hand("payment tracking is off for this org");
         continue;
       }
@@ -345,10 +458,20 @@ export async function runAdminOpsBatch(args: {
 
     if (facts.action === "reminder" && m.senderUserId && muted.has(m.senderUserId)) {
       // The per-category opt-out (`route.ts:3955-3967`). The player
-      // asked MatchTime to stop DMing them and the shipped path answers
-      // that out loud with a 🔕 rather than swallowing the request. That
-      // sentence lives in the analyzer; a second wording of it here is
-      // how two bots start disagreeing in one group.
+      // asked MatchTime to stop DMing them, so no DM is queued — and
+      // that half of the behaviour is intact and is the half that
+      // matters legally.
+      //
+      // WHAT IS LOST, PLAINLY. The shipped path "answers that out loud
+      // with a 🔕 rather than swallowing the request", and this comment
+      // used to justify declining on the grounds that "that sentence
+      // lives in the analyzer; a second wording of it here is how two
+      // bots start disagreeing in one group". §10 step 8 deleted the
+      // analyzer, so the 🔕 sentence is not sent by anybody: the player
+      // asks for a reminder and MatchTime says nothing at all. The
+      // no-second-wording argument is still right; the price is now a
+      // confused player rather than one analyzer call. See the header
+      // for why the fix is its own PR.
       hand("the sender has muted reminder DMs (subReminderDm=false)");
       continue;
     }
@@ -375,9 +498,14 @@ export async function runAdminOpsBatch(args: {
   try {
     result = (deps.decide ?? decideDefault)({ messages: engineMessages, state, now });
   } catch (err) {
+    // No retry: `decide()` is pure over `{messages, state, now}`, so the
+    // same input throws the same way. (It used to be safe to be terse
+    // here because the analyzer picked the batch up; since §10 step 8
+    // this is the end of the line for every `admin_ops` message in the
+    // window.)
     const detail = `${ADMIN_OPS_APPLY_DEGRADED_PREFIX} the engine threw (${
       err instanceof Error ? err.message : String(err)
-    }); the analyzer keeps the batch`;
+    }); nobody handles these messages — they go silent and onto this note`;
     console.error("[admin-ops-engine] the engine threw:", err);
     return empty([...degradations, detail]);
   }
@@ -408,8 +536,8 @@ export async function runAdminOpsBatch(args: {
   if (foreign.length > 0) {
     const detail =
       `${ADMIN_OPS_APPLY_DEGRADED_PREFIX} the engine proposed ${foreign.length} write(s) this ` +
-      `path cannot apply (${[...new Set(foreign)].join(", ")}); owning nothing and the ` +
-      `analyzer keeps the batch`;
+      `path cannot apply (${[...new Set(foreign)].join(", ")}); owning nothing — these ` +
+      `messages go silent and onto this note`;
     console.error(`[admin-ops-engine] ${detail}`);
     return empty([...degradations, detail]);
   }

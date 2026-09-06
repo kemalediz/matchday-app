@@ -13,6 +13,17 @@
  * attendance write the gate would have lost, and both are the same
  * thing: **a bare `👍`**.
  *
+ * ⚠️ READ THAT MEASUREMENT IN ITS OWN TENSE. It was taken while the
+ * analyzer existed and "skipped the analyzer" was the thing being
+ * counted. §10 step 8 deleted `analyzeBatch`, the 19,850-token
+ * `SYSTEM_PROMPT` and `executeVerdict`, so what a `none` route skips now
+ * is EVERY OWNER: the message is answered by nobody, and only an
+ * operator DM records it (`route.ts:1664`, `lib/operator-note.ts`). The
+ * numbers below are unchanged and still the reason this file exists —
+ * what changed is the price of the two it rescues. Each was a player's
+ * slot then and is a player's slot now, but nothing else is looking any
+ * more. `pipeline/gate.ts` carries the full argument.
+ *
  *   1. 2026-05-05T07:45:08.806Z, Aydın Kocahal, `👍` → production wrote
  *      `IN`. It answered the `PendingBenchConfirmation` MatchTime had
  *      opened for him 32 minutes earlier.
@@ -32,10 +43,12 @@
  * banter far more often than it is a registration — `👍👍` and
  * `🙏🙏🙏👍` from Nabeel on 2026-06-18, `👍` from David on 2026-07-14,
  * every one of them `noise`. A floor entry matching `👍` would force all
- * of them to the analyzer regardless of what they answered, which is the
- * floor doing CLASSIFICATION: exactly what PR #33 deleted, and what
- * PR #42 measured as a complete no-op (183 floor claims, **zero**
- * rescues).
+ * of them past the gate regardless of what they answered (the original
+ * wording was "to the analyzer"; since §10 step 8 the far end of that
+ * channel is the attendance engine, because `unsure` is an owned route),
+ * which is the floor doing CLASSIFICATION: exactly what PR #33 deleted,
+ * and what PR #42 measured as a complete no-op (183 floor claims,
+ * **zero** rescues).
  *
  * The information is not in the token. It is in the conversation, and
  * the part of the conversation that MatchTime writes down is its own
@@ -59,7 +72,12 @@
  * it runs before sender resolution, so at route time a message has an
  * author NAME and no user id. Widening to the group is therefore the
  * only shape available, and it is the safe direction — it can only add
- * analyzer calls, never remove one. Measured cost below.
+ * EXTRACTOR calls, never remove one. (It said "analyzer calls" until
+ * 2026-09-06; the rescue rewrites `none` → `unsure`, and `unsure` has
+ * been an owned engine route since §10 step 8. Without that membership
+ * this rescue would now rescue a message into silence, which is the one
+ * way this file could be made worthless without touching it.) Measured
+ * cost below.
  *
  * ─────────────────────────────────────────────────────────────────────
  * WHY THERE IS A TTL
@@ -68,7 +86,9 @@
  * A `BenchSlotOffer` lives until kickoff. One real offer
  * (`cmpleeq960000wm9kov23qexz`) stayed open for **22 hours**. Nobody is
  * answering a question 22 hours later, and treating all of it as "still
- * waiting" would drag a day of banter into the analyzer for nothing.
+ * waiting" would drag a day of banter into the attendance extractor for
+ * nothing (measured, and written, when the far end was the analyzer; the
+ * waste is the same shape and now costs an extractor call each).
  *
  * Measured over the same 1,723 messages, messages inside an open window:
  *
@@ -80,7 +100,7 @@
  *
  * An hour is the knee and it clears both real cases (10.0 min and
  * 32.6 min) comfortably. It is also six Pi flush windows, so an answer
- * that took two or three flushes to reach the analyzer is still inside
+ * that took two or three flushes to reach the pipeline is still inside
  * it.
  *
  * PURE. Not one import, no clock of its own, no database. The rows come
@@ -109,8 +129,10 @@ export interface AwaitingQuestion {
  *
  * See the essay above for the measurement this number comes from. It is
  * deliberately a constant rather than a flag: a knob here is a knob on
- * how much banter reaches the analyzer, and the honest way to change it
- * is to re-run the recall sweep.
+ * how much banter reaches the attendance extractor — and, in the other
+ * direction, on how many real answers go silent, which is what a `none`
+ * costs since §10 step 8. The honest way to change it is to re-run the
+ * recall sweep.
  */
 export const GROUP_QUESTION_TTL_MS = 60 * 60 * 1000;
 

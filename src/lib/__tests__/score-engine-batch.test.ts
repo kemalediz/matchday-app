@@ -317,14 +317,21 @@ describe("every failure hands the message back to the analyzer", () => {
     expect(res.degradations.join(" ")).toMatch(/state load failed.*pg is down/);
   });
 
-  it("an extractor that throws hands THAT message back, carrying the reason", async () => {
+  it("an extractor that throws disowns THAT message, carrying the reason", async () => {
+    // This asserted /handing this message back to the analyzer/ until
+    // §10 step 8 deleted the analyzer. The score is now simply not
+    // recorded, and the degradation is the ONLY notice anybody gets —
+    // `lib/operator-note.ts` prints it beside the lost message on the
+    // admin DM. Asserting the sentence asserts the operator is told the
+    // truth.
     const { model } = stubModel({ [WON]: WON_FACTS }, { throwOn: "Red won" });
     const r = recorder(model, playedWorld());
     const res = await run({ messages: [msg({ body: WON })], model, deps: r.deps });
     expect(res.ownedIds.size).toBe(0);
     expect(r.recorded).toEqual([]);
     expect(res.degradations.join(" ")).toMatch(/529 Overloaded/);
-    expect(res.degradations.join(" ")).toMatch(/handing this message back to the analyzer/);
+    expect(res.degradations.join(" ")).toMatch(/nobody records this score/);
+    expect(res.degradations.join(" ")).not.toMatch(/analyzer/i);
   });
 
   it("an extractor that returns a shape this path cannot apply hands it back", async () => {

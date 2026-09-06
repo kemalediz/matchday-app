@@ -98,8 +98,11 @@ export interface RoutedMessage {
    * unanswerable, and the obvious proxy — counting `source === "floor"`
    * — is wrong in a way that flatters the floor: it counts every
    * override, including `other_att → self_att`, which changes nothing
-   * about whether the analyzer sees the message. A rescue is
-   * specifically `overrodeRoute === "none"`. That mistake was made and
+   * about whether the message reaches an OWNER at all (this said "the
+   * analyzer" until §10 step 8 deleted it; both routes are in
+   * `gate.ts`'s `ENGINE_ROUTES`, so the far end is the attendance
+   * engine either way). A rescue is specifically
+   * `overrodeRoute === "none"`. That mistake was made and
    * caught in the first full recall sweep, where it reported 136
    * rescues against a true count of 0.
    */
@@ -214,9 +217,16 @@ export interface AttendanceFacts {
  * `other` reaches `engine.ts`'s `default:` branch, which degrades — an
  * operator note and not one word to the group. So the most ordinary
  * question a Sunday-league group asks was silence, while the mega-prompt
- * it is replacing answers it today and says so in its own words:
- * *"Asking about squad numbers, venue, kickoff time … 21:30 at
- * <venue>"* (`message-analyzer.ts:455-457`).
+ * it was replacing still answered it, in its own words: *"Asking about
+ * squad numbers, venue, kickoff time … 21:30 at <venue>"*
+ * (`message-analyzer.ts:455-457`, as it stood before §10 step 8 deleted
+ * it).
+ *
+ * PAST TENSE ON PURPOSE. That comparison is what made adding `fixture`
+ * a REQUIREMENT of step 8 rather than an improvement: the moment the
+ * mega-prompt went, "what time is kickoff?" would have been answered by
+ * nobody at all. There is no path left that answers a `fixture` question
+ * except this topic.
  *
  * `state.kickoffLabel` and `state.venue` are already loaded and already
  * pre-formatted for exactly this. Nothing new is read; a topic that had
@@ -283,7 +293,7 @@ export interface ScoreFacts {
 export interface AdminFacts {
   kind: "admin";
   /**
-   * `recruit` was added by §10 step 7 part 2, and it is the one admin
+   * `recruit` was added by §10 step 7 part 2, and it was the one admin
    * action the mega-prompt could still do that nothing else could.
    *
    * "@Match Time message all players who played in the last 5 matches
@@ -293,6 +303,11 @@ export interface AdminFacts {
    * this route was `verdict.recruitRequest` on the 19,850-token prompt
    * (`route.ts:1548` → `inviteRecentPlayers`). A route cannot leave the
    * mega-prompt while one of its real phrasings only works there.
+   *
+   * §10 step 8 then deleted the prompt, so this field is no longer the
+   * second of two recognisers: it is the ONLY one. Remove it and an
+   * admin's recruit ask falls to `other`, which nothing owns — silence
+   * plus an operator note.
    */
   action: "bulk_payment" | "reminder" | "recruit" | "other";
   /** bulk_payment */
@@ -406,7 +421,17 @@ export interface SquadState {
    * whatever its score, and `handleScore` refuses to overwrite a result
    * that is already recorded. Owning less on purpose — a score landing
    * on a match two weeks older than the one the group is talking about
-   * is a worse outcome than the analyzer keeping the message.
+   * is a worse outcome than nobody recording it.
+   *
+   * (Until §10 step 8 that read "…than the analyzer keeping the
+   * message", and the alternative really was a second recorder. It is
+   * not any more: `analyzeBatch` is deleted, so "owning less" here means
+   * the result is not written at all and an admin is told on the
+   * operator DM. The narrowing is still the right call —
+   * `route.ts:3462`'s "losing the score entirely is a worse failure
+   * mode" is about losing it, not about mis-filing it — but it is now a
+   * choice between two losses rather than between a loss and a
+   * fallback.)
    */
   completedMatch: {
     id: string;
@@ -478,8 +503,10 @@ export type ProposedWrite =
        * RUN THE BALANCER AND POST THE LINE-UPS — §10 step 8's carve-out
        * for the club's most-used command. 23 occurrences in 120 days on
        * Sutton FC, more than every question shape combined, so deleting
-       * the mega-prompt without an owner for it would take the feature
-       * with it.
+       * the mega-prompt without an owner for it would have taken the
+       * feature with it. The prompt IS deleted now, so this write and
+       * `team-ops-engine-batch.ts` are the whole of "generate the
+       * teams".
        *
        * ONE write rather than a `generate` plus a handful of
        * `attendance` writes, deliberately. The force-include is

@@ -744,6 +744,68 @@ async function handleAnalyzeRequest(request: Request) {
   // asked them about their own slot — the purest self-attendance there
   // is, and `interaction-contract.ts` exempts exactly that. Requiring a
   // tag there would mean ignoring the answer to our own question.
+  //
+  // ═════════════════════════════════════════════════════════════════
+  // WHAT A PEEL SKIPS. ASK THIS, NOT "IS MY NEW CODE CORRECT?"
+  // ═════════════════════════════════════════════════════════════════
+  //
+  // This file's worst bug class is a terminal branch that silently
+  // deletes every guard beneath it — three incidents in two days. A peel
+  // is terminal by construction: it pushes a result and adds the id to
+  // `statsRequestIds`, which the ONE splice below removes from `fresh`.
+  // So the message skips EVERYTHING after this point. Enumerated, with
+  // why each is covered, subsumed or inapplicable:
+  //
+  //   the router                    Inapplicable. The peel already knows
+  //                                 what the message is, from a database
+  //                                 row or a whole-message match. Paying
+  //                                 Haiku to label it would be paying for
+  //                                 an answer we have.
+  //   all five owners               COVERED, and this is the POINT. Two
+  //                                 deciders for one message is two
+  //                                 replies for one message. The engine
+  //                                 independently refuses a pasted roster
+  //                                 (`attendance-engine-batch.ts:280`)
+  //                                 and a sender with an open bench
+  //                                 prompt (`:264`), so those two are
+  //                                 belt AND braces; the swaps are peeled
+  //                                 only because nothing else models a
+  //                                 `TeamAssignment` move.
+  //   the operator note             SUBSUMED. The note is for a message
+  //                                 NOBODY handled. A peel handled it,
+  //                                 and its `AnalyzedMessage` row records
+  //                                 what it did.
+  //   the unresolved-sender nudge   Inapplicable to three of the four
+  //                                 (they need no sender), and for the
+  //                                 bench answer the trigger IS a
+  //                                 resolved `senderUserId` — an
+  //                                 unresolved sender cannot be on the
+  //                                 `PendingBenchConfirmation` list, so
+  //                                 the peel never fires for one.
+  //   the react/status audit        Inapplicable: no peel emits a
+  //                                 registration react (✅/🪑/👋).
+  //   the batch-final squad post    NOT skipped for the one peel that
+  //                                 changes the squad. The pasted-roster
+  //                                 ack is `SQUAD_POST_MARKER`, and the
+  //                                 composer's candidate filter admits it
+  //                                 by name. The first draft did not, and
+  //                                 a paste that had just registered four
+  //                                 players said NOTHING — see the note
+  //                                 on `pastedRosterAck` below.
+  //
+  // ⚠️ THE ONE REAL COST, stated rather than discovered later: a peeled
+  // message is spliced out of `fresh`, so it is absent from the WINDOW
+  // the owners reason over. §10 step 6 is emphatic that this matters —
+  // "taking a message OUT of the batch changed what the mega-prompt
+  // concluded about the message NEXT to it". The splice is not new (the
+  // stats link, the blast, group→DM and help have always been spliced),
+  // but this change adds four shapes to it, and one of them —
+  // a bench-prompt answer — is attendance-shaped. If a batch ever
+  // contained both a bench answer and a third-party claim about that
+  // same player, the corroboration policy would not see the answer.
+  // Judged acceptable because the corroboration policy looks for a
+  // SELF-DROP, and a bench answer is neither, but it is a genuine
+  // narrowing and it is written down here rather than left to be found.
 
   // ── 1 + 2. COLOUR SWAP and TEAM SWAP ───────────────────────────────
   //

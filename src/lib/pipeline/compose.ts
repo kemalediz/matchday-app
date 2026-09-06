@@ -6,9 +6,10 @@
  * Numbers and names are never model-authored, so they cannot be wrong,
  * so nothing needs to check them afterwards."
  *
- * That last clause is a deletion list. Every one of these exists only
- * because the model authors user-visible squad text and gets it wrong,
- * and every one has nothing left to do once this file is the only path:
+ * That last clause was a deletion list, and §10 step 8 SPENT it. Every
+ * one of these existed only because the model authored user-visible
+ * squad text and got it wrong, and every one had nothing left to do once
+ * this file became the only path:
  *
  *   enforceCanonicalRoster        message-analyzer.ts:1482-1623, 140 lines
  *   rewriteOverconfidentPromotion message-analyzer.ts:1639-1710
@@ -16,6 +17,19 @@
  *   enforceProximity              message-analyzer.ts:1335-1379
  *   the squad-status collapse     route.ts:1508-1582
  *   the 👍→✅/🪑 last-mile rewrite  route.ts:2151-2161
+ *
+ * The line references above are to the files AS THEY STOOD BEFORE
+ * 2026-09-06 and will not resolve: `analyzeBatch`, the 19,850-token
+ * `SYSTEM_PROMPT` and `executeVerdict` are deleted, and every guard
+ * whose input was a field on `AnalysisVerdict` went with them. They are
+ * kept as written because they are the receipt — §9's "no longer
+ * possible: the error class becomes unrepresentable, so the guard has
+ * nothing to guard", spent rather than promised. The per-guard proofs
+ * are in the commit that deleted them.
+ *
+ * WHICH MAKES THIS FILE THE ONLY PATH, LITERALLY. There is no second
+ * composer to be corrected any more, and nothing downstream re-reads
+ * what this produces. A sentence composed wrongly here is sent.
  *
  * THE HONEST-ACK PATTERN, MADE STRUCTURAL. The composer runs on the
  * PROJECTED state — the world as it will be after the proposed writes —
@@ -142,7 +156,11 @@ export function compose(result: EngineResult): ComposedOutput {
         // `composeSquadStateReply` would drop this whole answer and post
         // the roster instead: the person who asked what time kickoff is
         // would get a list of names and no time. The same trap the STATS
-        // and OPTIONS answers are still handed back for.
+        // and OPTIONS answers are still refused for — and since §10 step
+        // 8 "refused" means unanswered rather than handed to the
+        // analyzer, which is why `answer_fixture` composes a bare
+        // sentence with no count in it rather than being refused too.
+        // See `answer-batch.ts`'s `ANSWERABLE_TOPICS`.
         const where = state.venue.trim();
         utterances.push({
           messageId: s.messageId,
@@ -179,10 +197,12 @@ export function compose(result: EngineResult): ComposedOutput {
       }
 
       case "answer_phones": {
-        // SQUAD-SCOPED, like the rule it replaces. `message-analyzer.ts`
-        // answers this from "the Confirmed and Bench lists in the Match
-        // Context", and the question it is answering is "anyone IN THE
-        // SQUAD without a number?".
+        // SQUAD-SCOPED, like the rule it replaced. `message-analyzer.ts`
+        // answered this from "the Confirmed and Bench lists in the Match
+        // Context", and the question it was answering is "anyone IN THE
+        // SQUAD without a number?". (That prompt is deleted as of §10
+        // step 8; the scoping rule is kept because it is right, not
+        // because anything still enforces it from the other side.)
         //
         // `state.roster` is EVERY active membership, so an org-scoped
         // answer on a club that has been provisioning named guests for

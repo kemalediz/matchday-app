@@ -57,9 +57,23 @@ export type EnginePaymentWrite = Extract<ProposedWrite, { kind: "payment_credit"
 export type EngineReminderWrite = Extract<ProposedWrite, { kind: "reminder" }>;
 
 /**
- * Prefix on every degradation this layer reports, so the analyze route's
- * partial-response admin DM can match a TYPED marker instead of
- * prefix-matching free-text reasoning.
+ * Prefix on every degradation this layer reports. Mirrors
+ * `ENGINE_APPLY_DEGRADED_PREFIX` for step 6.
+ *
+ * ⚠️ WHAT THE DM ACTUALLY IS, corrected 2026-09-06. §10 step 8 replaced
+ * the analyze route's inline partial-response net with
+ * `lib/operator-note.ts`, which selects on the TYPED fact "no owner
+ * claimed this id" and never reads prose. So this prefix is no longer
+ * what triggers the DM — nothing regex-matches it any more, which is
+ * exactly what §9 asked for. It is now (a) the audit trail on the
+ * `AnalyzedMessage` row and (b) the marker a human scans for in the
+ * log. The line AFTER the message id is what an admin reads on their
+ * phone, because `composeOperatorNote` prints it verbatim as the "why"
+ * beside the lost message. Write those sentences for that reader.
+ *
+ * On THIS path the sentence is money-adjacent (S21 — `PaymentCredit`,
+ * `Attendance.paidAt`, live on Sutton FC), so "nobody credited this
+ * payment" has to be legible to an admin at a glance.
  */
 export const ADMIN_OPS_APPLY_DEGRADED_PREFIX = "admin-ops-engine: degraded —";
 

@@ -4,9 +4,20 @@
  * `(facts, squad state, actor, org features) → decisions`. Pure: no I/O,
  * no model, no clock (the caller injects `now`). This is where the 36%
  * of the 18,315-token prompt that §3.2 categorises as **B** — "a
- * decision that should be deterministic code" — goes to live, and it is
+ * decision that should be deterministic code" — went to live, and it is
  * exhaustively unit tested in `__tests__/engine.test.ts`, one describe
  * block per incident.
+ *
+ * THE OTHER 64% IS NOT SOMEWHERE ELSE. §10 step 8 deleted the prompt
+ * (measured at 19,850 tokens by the time it went; 18,315 is the figure
+ * §3.2 counted), `analyzeBatch` and `executeVerdict`. So this file is no
+ * longer "the deterministic third of a decider that still exists" — for
+ * every route an owner claims, it is the ONLY decider, and a message no
+ * owner claims is answered by nobody: silence in the group plus one
+ * deduped operator DM (`route.ts:1664`, `lib/operator-note.ts`). Read
+ * every `degrade()` below with that in mind. A degradation used to mean
+ * "the analyzer will take this"; it now means "MatchTime says nothing
+ * and an admin is told".
  *
  * WHAT IT MUST NEVER DO
  * ---------------------
@@ -1039,9 +1050,10 @@ export function decide(input: EngineInput): EngineResult {
       //   • `swap` HAS AN OWNER ALREADY. `route.ts`'s
       //     `handleTeamSwapIfApplicable` / `handleColorSwapIfApplicable`
       //     is a deterministic pre-peel that runs on the RAW BODY with no
-      //     verdict at all, so it survives the mega-prompt's deletion
-      //     untouched. Owning it here would put two deciders on one
-      //     message, which is the failure this file is organised to
+      //     verdict at all, so it survived the mega-prompt's deletion
+      //     untouched — §10 step 8 moved it UP out of the loop rather
+      //     than through it. Owning it here would put two deciders on
+      //     one message, which is the failure this file is organised to
       //     prevent.
       //   • `rename` IS NOT A GENERATE. Mapping it onto
       //     generate-with-names would re-run the balancer over line-ups
@@ -1215,8 +1227,17 @@ export function decide(input: EngineInput): EngineResult {
         //
         // The alternative — falling through to the aggregate branch — is
         // worse: it would credit a NUMBER for people the message named
-        // and nobody could identify. So the message goes back to the
-        // analyzer, which is the one direction that cannot invent money.
+        // and nobody could identify.
+        //
+        // WHERE THE MESSAGE GOES, corrected 2026-09-06. This used to end
+        // "so the message goes back to the analyzer, which is the one
+        // direction that cannot invent money". §10 step 8 deleted the
+        // analyzer. Refusing still cannot invent money — that is the
+        // whole point and it is unchanged — but nothing credits it
+        // either: the payment is not recorded, the group is told
+        // nothing, and the admin gets one line on the operator DM naming
+        // the message. On a live club with real money that is the
+        // correct direction and a worse silence than before, both.
         if (refs.length > 0 && covered.length === 0) {
           degrade(
             `payment credit names ${refs.length} player(s) (${refs.join(", ")}) and none of them ` +
@@ -1267,9 +1288,19 @@ export function decide(input: EngineInput): EngineResult {
           // `route.ts:3968-3974` answers this in the group rather than
           // swallowing it ("I don't have your number on file yet"). The
           // engine has no copy for that, and inventing a second wording
-          // for a shipped sentence is how two bots start disagreeing —
-          // so the message degrades and `admin-ops-engine-batch.ts`
-          // hands it back to the analyzer, which still says it.
+          // for a shipped sentence is how two bots start disagreeing.
+          //
+          // ⚠️ WHAT THE DEGRADATION NOW COSTS. This used to end "so the
+          // message degrades and `admin-ops-engine-batch.ts` hands it
+          // back to the analyzer, which still says it". §10 step 8
+          // deleted the analyzer: NOBODY says it. A member with no phone
+          // number who asks for a reminder gets total silence, and only
+          // an admin sees the operator note. The no-second-wording
+          // argument still holds; the price is a confused player rather
+          // than one analyzer call. `admin-ops-engine-batch.ts`'s header
+          // lists this and the `subReminderDm` branch as the two
+          // clearest candidates for a follow-up that composes the
+          // shipped sentences deterministically.
           degrade("reminder requested by a member with no phone number on file");
           return;
         }

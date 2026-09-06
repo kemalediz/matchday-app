@@ -528,16 +528,22 @@ describe("every failure hands the message back to the analyzer", () => {
     expect(res.degradations.join(" ")).toMatch(/state load failed.*pg is down/);
   });
 
-  it("an extractor that throws hands THAT message back", async () => {
+  it("an extractor that throws disowns THAT message", async () => {
+    // This asserted /handing this message back to the analyzer/ until
+    // §10 step 8 deleted the analyzer. Nothing credits the payment now;
+    // the degradation is what `lib/operator-note.ts` prints on the admin
+    // DM, so asserting the sentence asserts the operator is told the
+    // truth rather than that a message is safe.
     const { model } = stubModel({ [PAY]: PAY_FACTS }, { throwOn: "Amir paid" });
     const r = recorder(model, paidWorld());
     const res = await run({ messages: [msg({ body: PAY })], deps: r.deps });
     expect(res.ownedIds.size).toBe(0);
     expect(r.credits).toEqual([]);
-    expect(res.degradations.join(" ")).toMatch(/handing this message back to the analyzer/);
+    expect(res.degradations.join(" ")).toMatch(/nobody handles this message/);
+    expect(res.degradations.join(" ")).not.toMatch(/analyzer/i);
   });
 
-  it('admin action "other" goes back to the mega-prompt, which still models it', async () => {
+  it('admin action "other" is owned by nobody, and says so', async () => {
     const { model } = stubModel({ [PAY]: { ...PAY_FACTS, action: "other" } });
     const r = recorder(model, paidWorld());
     const res = await run({ messages: [msg({ body: PAY })], deps: r.deps });

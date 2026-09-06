@@ -10,13 +10,19 @@
  * Three rules, in order of how much damage they prevent:
  *
  *   1. A raw digit string is never a person. The 2026-05-05 Izzet/Elnur
- *      incident (`a5a150a`) had the analyzer read the wire's `@lid`
+ *      incident (`a5a150a`) had the then-analyzer read the wire's `@lid`
  *      form; the failure mode on the other side of it is provisioning a
  *      member literally called "158055467598020".
  *   2. A relationship is never a person. `isPlaceholderGuestName` from
  *      `guest-name-ask.ts` is reused rather than reimplemented — §4.1
- *      measured the current analyzer provisioning "Amir's brother" into
- *      a paid squad six times out of six.
+ *      measured the then-incumbent analyzer provisioning "Amir's
+ *      brother" into a paid squad six times out of six.
+ *
+ *   (Both are cited in the past tense on purpose. §10 step 8 deleted
+ *   `analyzeBatch` and the 19,850-token `SYSTEM_PROMPT`, so neither
+ *   decider exists to be corrected any more. These three rules are not a
+ *   second opinion on somebody else's output — they are the only thing
+ *   standing between a quoted `personRef` and a row in the database.)
  *   3. Ambiguity BAILS. Two members whose names both match gets no
  *      write and a loud degradation, never a coin flip.
  */

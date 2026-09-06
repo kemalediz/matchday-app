@@ -4,11 +4,13 @@
  * Split out of `awaiting-answer.ts` on purpose. `router.ts` and
  * `gate.ts` are imported by `e2e/replay/router-recall-live.ts`, a plain
  * `tsx` script with no server and no database, and by the Playwright
- * worker — `gate.ts` already carries the note that its
- * `message-analyzer` import "has to stay type-only" for exactly this
- * reason. So the predicates live in the pure module and the three
- * queries live here, and nothing in the router's import graph pulls in
- * Prisma.
+ * worker. `gate.ts` used to carry the same note about its type-only
+ * `message-analyzer` import; §10 step 8 deleted that import along with
+ * `AnalysisVerdict`, and kept the note, because THE CONSTRAINT OUTLIVED
+ * THE IMPORT: any future Prisma-touching import from `gate.ts` or
+ * `router.ts` has to be type-only for exactly this reason. So the
+ * predicates live in the pure module and the three queries live here,
+ * and nothing in the router's import graph pulls in Prisma.
  *
  * READ-ONLY BY CONSTRUCTION: every statement in this file is a
  * `findMany`. The gate never writes.

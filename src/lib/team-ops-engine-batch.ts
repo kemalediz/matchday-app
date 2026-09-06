@@ -72,29 +72,78 @@
  *     does lose.
  *
  * ─────────────────────────────────────────────────────────────────────
- * FAIL OPEN, ALWAYS — the same rule as steps 5, 6 and 7
+ * IT OWNS NOTHING RATHER THAN GUESSING — AND THIS FILE NEVER GOT TO
+ * CALL THAT "FAIL OPEN"
  * ─────────────────────────────────────────────────────────────────────
- *   • `BALANCER_ENGINE_ENABLED` is off      → owns nothing
- *   • step 5's gate skipped it              → owns nothing
- *   • the router never mentioned the id     → owns nothing
- *   • the message is UNTAGGED               → owns nothing (see below)
- *   • the state load threw                  → owns nothing
- *   • the feature load threw                → owns nothing
+ * Its siblings' tables were headed "FAIL OPEN, ALWAYS" and every row of
+ * them ended "the analyzer decides this message, which is today's
+ * behaviour and therefore cannot be a regression". This module was
+ * written in §10 step 8 itself — the change that deleted `analyzeBatch`,
+ * the 19,850-token `SYSTEM_PROMPT` and `executeVerdict` — so it has
+ * never had an analyzer to fall open onto, and the heading is corrected
+ * rather than inherited.
+ *
+ * "Owns nothing" here means what it means everywhere else after step 8:
+ * the message reaches `route.ts:1664` unowned, MatchTime says NOTHING to
+ * the group, an `AnalyzedMessage` row records it, and one line goes onto
+ * a deduped operator DM (`lib/operator-note.ts`). §11.5 accepted that
+ * loss in advance: "a router with nine routes and an engine with
+ * explicit rules will do nothing instead… the club will experience it as
+ * 'the bot got dumber' before they experience it as 'the bot stopped
+ * being wrong'."
+ *
+ *   • `BALANCER_ENGINE_ENABLED` is off      → owns nothing → SILENCE +
+ *                                             operator note. KEPT and
+ *                                             now defaulting ON; only
+ *                                             0/false/no/off turn it off
+ *                                             (`route-flags.ts`).
+ *   • step 5's gate skipped it              → owns nothing, and NO note:
+ *                                             `composeOperatorNote`
+ *                                             drops every `none` route
+ *   • the router never mentioned the id     → owns nothing → SILENCE +
+ *                                             note
+ *   • the message is UNTAGGED               → owns nothing (see below) →
+ *                                             SILENCE + note
+ *   • the state load threw                  → owns nothing → SILENCE +
+ *                                             note
+ *   • the feature load threw                → owns nothing → SILENCE +
+ *                                             note
  *   • team balancing is OFF for the org     → owned, and SILENT, which
  *                                             is the shipped org gate
- *                                             (`route.ts:3128`)
- *   • the extractor call threw              → THAT message handed back
- *   • the facts are not team facts          → handed back
- *   • the action is not `generate`          → handed back
- *   • the engine threw                      → owns nothing
+ *                                             (`route.ts:3128`). OWNED
+ *                                             is the point: an owner
+ *                                             claimed the id, so no note
+ *                                             fires for a feature an
+ *                                             admin switched off.
+ *   • the extractor call threw              → THAT message goes SILENT
+ *                                             and onto the note. ONE
+ *                                             attempt: `extractors.ts`
+ *                                             retries the four
+ *                                             attendance routes only.
+ *   • the facts are not team facts          → SILENCE + note
+ *   • the action is not `generate`          → SILENCE + note (`show`
+ *                                             belongs to
+ *                                             `answer-batch.ts`;
+ *                                             `swap` to the
+ *                                             deterministic pre-peel;
+ *                                             `rename` to nobody, on
+ *                                             purpose — see above)
+ *   • the engine threw                      → owns nothing → SILENCE +
+ *                                             note, and no retry
+ *                                             (`decide()` is pure)
  *   • the engine proposed a write this path
- *     cannot apply                          → owns nothing, loudly
+ *     cannot apply                          → owns nothing, loudly →
+ *                                             SILENCE + note
  *   • no match qualifies                    → owned; the shipped
  *                                             sentence, the shipped 🤔
  *   • the balancer declined                 → owned; the shipped
  *                                             sentence, the shipped 🤔
  *   • the apply threw                       → owned, but SILENT, and
- *                                             the failure is reported
+ *                                             the failure is reported.
+ *                                             Owned means no note — the
+ *                                             log line from
+ *                                             `describeTeamOpsBatch` is
+ *                                             the signal.
  *
  * ─────────────────────────────────────────────────────────────────────
  * THE TAG IS REQUIRED, UNCONDITIONALLY
@@ -267,7 +316,10 @@ export interface TeamOpsBatchDeps extends TeamOpsApplyDeps {
  * the result carries a `Set` and a `Map`, and one frozen-by-convention
  * instance handed to every caller is one `.add()` away from leaking one
  * request's state into the next. It takes the accumulated degradations
- * so a fail-open never loses the reason it happened.
+ * so a decline never loses the reason it happened — and after §10 step 8
+ * those lines are `composeOperatorNote`'s only source for the "why" it
+ * prints beside each lost message, so losing them would leave an admin
+ * told that something went wrong and not what.
  */
 function empty(degradations: string[] = []): TeamOpsBatchResult {
   return {
@@ -499,8 +551,13 @@ export async function runTeamOpsBatch(args: {
   } catch (err) {
     // `decide` throws on a coverage violation, which is right — that is
     // a bug in the engine, not a bad model day. It must not 500 the
-    // analyze request: nothing has been written, so owning nothing is a
-    // complete fail-open.
+    // analyze request: nothing has been written, so owning nothing costs
+    // the batch its teams and costs the database no corruption.
+    //
+    // NOT a "fail-open" — the word its siblings used while there was an
+    // analyzer to fall open onto. Every `balancer`-generate message in
+    // this window goes silent and onto the operator note. No retry
+    // either: `decide()` is pure, so the same input throws the same way.
     const detail = `${TEAM_OPS_APPLY_DEGRADED_PREFIX} the engine threw (${
       err instanceof Error ? err.message : String(err)
     }); no teams were generated`;

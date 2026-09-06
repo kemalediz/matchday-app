@@ -18,25 +18,66 @@
  *      `COMPLETED` one → both loaders widened, documented on the field.
  *
  * ─────────────────────────────────────────────────────────────────────
- * FAIL OPEN, ALWAYS — the same rule as steps 6 and 7 part 1
+ * IT OWNS NOTHING RATHER THAN GUESSING, AND SINCE 2026-09-06 THAT MEANS
+ * THE SCORE IS SIMPLY NOT RECORDED
  * ─────────────────────────────────────────────────────────────────────
- * Every failure mode lands on "the analyzer decides this message", which
- * is today's behaviour and therefore cannot be a regression:
+ * This table used to sit under "FAIL OPEN, ALWAYS — the same rule as
+ * steps 6 and 7 part 1", and every row ended "the analyzer decides this
+ * message, which is today's behaviour and therefore cannot be a
+ * regression". §10 step 8 deleted `analyzeBatch`, the 19,850-token
+ * `SYSTEM_PROMPT` and `executeVerdict`. Nothing decides these now.
  *
- *   • `SCORE_ENGINE_ENABLED` is off        → owns nothing
- *   • step 5's gate skipped it             → owns nothing
- *   • the router never mentioned the id    → owns nothing
- *   • no match has been played yet         → owns nothing
- *   • the state load threw                 → owns nothing
- *   • the extractor call threw             → THAT message is handed back
- *   • the extracted shape is not a score   → handed back
- *   • the engine threw                     → owns nothing
+ * A `score` message this module declines reaches `route.ts:1664`
+ * unowned: SILENCE in the group, an `AnalyzedMessage` row, and one line
+ * on the deduped operator DM (`lib/operator-note.ts`). THAT IS A REAL
+ * BEHAVIOUR CHANGE, and it is the one this file should be read most
+ * carefully about, because `route.ts:3457-3462` already named the cost
+ * in its own words: *"losing the score entirely is a worse failure
+ * mode"*. A lost score is a match with no result, no Elo movement and no
+ * MoM — and unlike a lost question, nobody in the group can tell by
+ * looking. The operator note is the only thing that says so.
+ *
+ * §11.5 accepted the loss in advance: "a router with nine routes and an
+ * engine with explicit rules will do nothing instead… the club will
+ * experience it as 'the bot got dumber' before they experience it as
+ * 'the bot stopped being wrong'."
+ *
+ *   • `SCORE_ENGINE_ENABLED` is off        → owns nothing → SILENCE +
+ *                                            operator note. The flag is
+ *                                            KEPT and now defaults ON;
+ *                                            only 0/false/no/off turn it
+ *                                            off (`route-flags.ts`).
+ *   • step 5's gate skipped it             → owns nothing, and NO note:
+ *                                            `composeOperatorNote` drops
+ *                                            every `none` route
+ *   • the router never mentioned the id    → owns nothing → SILENCE +
+ *                                            note
+ *   • no match has been played yet         → owns nothing → SILENCE +
+ *                                            note
+ *   • the state load threw                 → owns nothing → SILENCE +
+ *                                            note
+ *   • the extractor call threw             → THAT message goes SILENT
+ *                                            and onto the note. ONE
+ *                                            attempt only: `extractors.ts`
+ *                                            retries the four attendance
+ *                                            routes and not this one.
+ *   • the extracted shape is not a score   → SILENCE + note
+ *   • the engine threw                     → owns nothing → SILENCE +
+ *                                            note, and no retry
+ *                                            (`decide()` is pure)
  *   • the engine proposed a write that is
- *     not a score                          → owns nothing, loudly
+ *     not a score                          → owns nothing, loudly →
+ *                                            SILENCE + note
  *   • the score write itself threw         → owned, but SILENT, and the
  *                                            failure is reported (see
  *                                            "an ack must not outrun the
- *                                            write" below)
+ *                                            write" below). NOTE: owned
+ *                                            means `operator-note.ts`
+ *                                            does NOT see it — an owner
+ *                                            claimed the id. The
+ *                                            degradation still reaches
+ *                                            the log through
+ *                                            `describeScoreBatch`.
  *
  * ─────────────────────────────────────────────────────────────────────
  * NO TAG IS REQUIRED, AND THAT IS THE CONTRACT, NOT AN OVERSIGHT
@@ -165,13 +206,18 @@ export interface ScoreBatchDeps extends ScoreApplyDeps {
 }
 
 /**
- * "This module owns nothing; the analyzer keeps the batch."
+ * "This module owns nothing." It used to say "; the analyzer keeps the
+ * batch", which named where the score went. Since §10 step 8 it goes
+ * nowhere: the message reaches `route.ts:1664` unowned and the result is
+ * never recorded.
  *
  * A FUNCTION, not a shared const, for the reason step 6's is: the result
  * carries a `Set` and a `Map`, and one frozen-by-convention instance
  * handed to every caller is one `.add()` away from leaking one request's
  * state into the next. It takes the accumulated degradations so a
- * fail-open never loses the reason it happened.
+ * decline never loses the reason it happened — those lines are now
+ * `composeOperatorNote`'s only source for the "why" beside each lost
+ * message, and for a score they are the only notice anybody gets.
  */
 function empty(degradations: string[] = []): ScoreBatchResult {
   return {
@@ -210,11 +256,13 @@ export async function runScoreBatch(args: {
       ? await deps.loadState(orgId, now)
       : await (await import("./pipeline/load-state")).loadSquadState(orgId, now);
   } catch (err) {
-    // Fail open. Owning nothing means the analyzer decides, which is
-    // what happens today.
+    // Owning nothing. That used to be a fail-OPEN — "the analyzer
+    // decides, which is what happens today" — and since §10 step 8 it is
+    // a fail-QUIET: any result reported in this window is not recorded,
+    // and the only notice is the line below.
     const detail = `${SCORE_APPLY_DEGRADED_PREFIX} state load failed (${
       err instanceof Error ? err.message : String(err)
-    }); the analyzer keeps the batch`;
+    }); nobody records these scores — they go silent and onto this note`;
     console.error("[score-engine] state load failed:", err);
     return empty([detail]);
   }
@@ -258,15 +306,27 @@ export async function runScoreBatch(args: {
       }
       const failure = res.degradations.find((d) => /failed|could not be parsed/i.test(d.detail));
       if (failure) {
-        // §11.4 says "fail closed and surface it". Closed here would
-        // mean losing the score, which `route.ts:3462` calls the worse
-        // failure mode by name — so the message goes back to the
+        // §11.4 says "fail closed and surface it". Closed here means
+        // LOSING THE SCORE, which `route.ts:3462` calls the worse
+        // failure mode by name.
+        //
+        // WHAT USED TO STAND HERE: "so the message goes back to the
         // analyzer, which still has the mega-prompt and still records
         // it. That is this step's own revert, applied per message and
-        // automatically, and it costs one analyzer call.
+        // automatically, and it costs one analyzer call." §10 step 8
+        // deleted the mega-prompt. There is no revert and no second
+        // recorder: a failed score extraction means the match keeps no
+        // result until a human notices. The line below is what makes
+        // "until a human notices" bounded — it is printed on the
+        // operator DM beside the message that was lost.
+        //
+        // ONE ATTEMPT. `extractors.ts` retries only the four attendance
+        // routes, where silence costs a player their slot within hours.
+        // A score can be re-reported the next day; that is the whole of
+        // the asymmetry, and it is a judgement, not an oversight.
         degradations.push(
           `${SCORE_APPLY_DEGRADED_PREFIX} ${m.waMessageId}: ${failure.detail} — ` +
-            `handing this message back to the analyzer`,
+            `nobody records this score: no reply in the group, and it is on this note`,
         );
         return;
       }
@@ -285,9 +345,10 @@ export async function runScoreBatch(args: {
   // message still needs happens OUTSIDE the loop: it reaches `decide()`
   // with `facts: {kind:"none"}` (so `assertCoverage` still sees one
   // outcome per input id and the window is intact for its neighbours),
-  // it gets no entry in `outcomes` (so the analyze route leaves its
-  // verdict alone and the analyzer decides it), and its reason is
-  // already in `degradations` before the `continue` runs.
+  // it gets no entry in `outcomes` (so the analyze route finds no owner
+  // and records it as unowned — silence plus the operator note, since
+  // §10 step 8 deleted the verdict it used to leave alone), and its
+  // reason is already in `degradations` before the `continue` runs.
   const ownedIds = new Set<string>();
   for (const m of candidates) {
     const facts = factsById.get(m.waMessageId);
@@ -295,7 +356,8 @@ export async function runScoreBatch(args: {
     if (facts.kind !== "score") {
       degradations.push(
         `${SCORE_APPLY_DEGRADED_PREFIX} ${m.waMessageId}: the score extractor returned ` +
-          `"${facts.kind}" facts — handing this message back to the analyzer`,
+          `"${facts.kind}" facts — nobody records this score: no reply in the group, ` +
+          `and it is on this note`,
       );
       continue;
     }
@@ -329,11 +391,16 @@ export async function runScoreBatch(args: {
   } catch (err) {
     // `decide` throws on a coverage violation, which is right — that is
     // a bug in the engine, not a bad model day. It must not 500 the
-    // analyze request: nothing has been written and the analyzer batch
-    // has not been decided, so owning nothing is a complete fail-open.
+    // analyze request: nothing has been written yet, so owning nothing
+    // costs the batch its score and costs the database no corruption.
+    //
+    // It used to call that "a complete fail-open", because "the analyzer
+    // batch has not been decided". There is no analyzer batch since §10
+    // step 8, so this is a fail-quiet with a receipt. No retry:
+    // `decide()` is pure, so the same input throws the same way.
     const detail = `${SCORE_APPLY_DEGRADED_PREFIX} the engine threw (${
       err instanceof Error ? err.message : String(err)
-    }); the analyzer keeps the batch`;
+    }); nobody records these scores — they go silent and onto this note`;
     console.error("[score-engine] the engine threw:", err);
     return empty([...degradations, detail]);
   }
@@ -368,8 +435,8 @@ export async function runScoreBatch(args: {
   if (foreign.length > 0) {
     const detail =
       `${SCORE_APPLY_DEGRADED_PREFIX} the engine proposed ${foreign.length} write(s) this ` +
-      `path cannot apply (${[...new Set(foreign)].join(", ")}); owning nothing and the ` +
-      `analyzer keeps the batch`;
+      `path cannot apply (${[...new Set(foreign)].join(", ")}); owning nothing — these ` +
+      `messages go silent and onto this note`;
     console.error(`[score-engine] ${detail}`);
     return empty([...degradations, detail]);
   }
@@ -398,8 +465,10 @@ export async function runScoreBatch(args: {
     if (u.messageId === null) {
       // A batch-level post is the squad post, which only a squad CHANGE
       // produces — and this path makes none. If one ever appeared it
-      // would be a second post beside the analyzer's, so it is dropped
-      // and recorded rather than sent.
+      // would be a SECOND squad post in the same batch, beside the
+      // attendance engine's. (It used to say "beside the analyzer's";
+      // since §10 step 8 the attendance engine is the only thing that
+      // composes one.) So it is dropped and recorded rather than sent.
       degradations.push(
         `${SCORE_APPLY_DEGRADED_PREFIX} a batch-level post was composed on the score path; dropped`,
       );

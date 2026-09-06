@@ -387,13 +387,14 @@ describe("an extractor failure hands the message BACK to the analyzer", () => {
     };
     const d = deps({ model: broken });
     const r = await run([msg()], d);
-    // NOT owned → the route leaves it in `batchInputs` and the
-    // 18,315-token prompt decides it, exactly as it does today.
+    // NOT owned. Since §10 step 8 there is nothing behind this file, so
+    // "not owned" means silence in the group plus one line on the
+    // operator DM (`lib/operator-note.ts`) — not a hand-back.
     expect(r.ownedIds.size).toBe(0);
     expect(r.outcomes.size).toBe(0);
     expect(d.registered).toEqual([]);
     // Loud, not silent: the reason is on the record for the operator.
-    expect(r.degradations.join(" ")).toMatch(/handing this message back to the analyzer/);
+    expect(r.degradations.join(" ")).toMatch(/nobody handles this message/);
     warn.mockRestore();
   });
 
@@ -554,7 +555,7 @@ describe("an extractor failure hands the message BACK to the analyzer", () => {
       expect(r.degradations.join("\n")).toContain(id);
     }
     expect(
-      r.degradations.filter((x) => /handing this message back to the analyzer/.test(x)),
+      r.degradations.filter((x) => /nobody handles this message/.test(x)),
     ).toHaveLength(3);
     expect(warn.mock.calls.map((c) => String(c[0])).join("\n")).toMatch(/3 of 3/);
     warn.mockRestore();

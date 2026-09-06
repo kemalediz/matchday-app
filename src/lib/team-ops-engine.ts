@@ -12,8 +12,8 @@
  * ─────────────────────────────────────────────────────────────────────
  * WHY THIS EXISTS AT ALL
  * ─────────────────────────────────────────────────────────────────────
- * §10 step 8 deletes the 19,850-token `SYSTEM_PROMPT`. Before it can,
- * every route it decided needs a deterministic owner, and
+ * §10 step 8 deleted the 19,850-token `SYSTEM_PROMPT`. Before it could,
+ * every route it decided needed a deterministic owner, and
  * `generate_teams_request` was the last big hole: measured over 120 days
  * of production `AnalyzedMessage` rows on Sutton FC it occurred **23
  * times** — the single most common tagged command to MatchTime, more
@@ -66,17 +66,21 @@ import type { ProposedWrite } from "./pipeline/types";
 export type EngineGenerateTeamsWrite = Extract<ProposedWrite, { kind: "generate_teams" }>;
 
 /**
- * Prefix on every degradation this layer reports, so the analyze route's
- * partial-response admin DM can match a TYPED marker instead of
- * prefix-matching free-text reasoning. Mirrors
+ * Prefix on every degradation this layer reports. Mirrors
  * `SCORE_APPLY_DEGRADED_PREFIX` and `ADMIN_OPS_APPLY_DEGRADED_PREFIX`.
  *
- * ⚠️ THESE LINES ARE NOW WRITTEN FOR A HUMAN, not for a fallback
- * classifier. Until step 8 a "handed back" message went to the
+ * ⚠️ THESE LINES ARE WRITTEN FOR A HUMAN, not for a fallback
+ * classifier. Until §10 step 8 a "handed back" message went to the
  * mega-prompt, which still answered it; with `analyzeBatch` deleted it
- * goes to `route.ts`'s catch-all, which is SILENT to the group plus one
- * deduped operator note. So every string below has to tell an admin
+ * goes to `route.ts:1664`'s catch-all, which is SILENT to the group plus
+ * one deduped operator note. So every string below has to tell an admin
  * reading a DM what MatchTime did not do, and why.
+ *
+ * The DM itself is `lib/operator-note.ts`, and it selects on the TYPED
+ * fact "no owner claimed this id" — NOT on this prefix. Nothing
+ * regex-matches this string, which is §9's "fix the mechanism" spent
+ * rather than promised; `composeOperatorNote` prints the clause after
+ * the message id verbatim as the "why" on the admin's phone.
  */
 export const TEAM_OPS_APPLY_DEGRADED_PREFIX = "team-ops-engine: degraded —";
 
