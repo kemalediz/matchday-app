@@ -63,7 +63,7 @@
  * This table used to sit under "FAIL OPEN, ALWAYS", with every "handed
  * back" meaning "the analyzer decides it, which is today's behaviour and
  * therefore cannot be a regression". §10 step 8 deleted the analyzer.
- * A declined message reaches `route.ts:1664` unowned: SILENCE in the
+ * A declined message reaches `route.ts`'s "NOBODY OWNED IT" branch unowned: SILENCE in the
  * group, an `AnalyzedMessage` row, and one line on the deduped operator
  * DM (`lib/operator-note.ts`).
  *
@@ -441,7 +441,7 @@ export async function runAdminOpsBatch(args: {
         //
         // It used to add that "going through the analyzer keeps the
         // `AnalyzedMessage` trail identical to today's". Since §10 step
-        // 8 the row is written by `route.ts:1664` instead, tagged
+        // 8 the row is written by `route.ts`'s "NOBODY OWNED IT" branch instead, tagged
         // `ignored` with `no owner: route=admin_ops` and this reason
         // appended — a different row, same question answerable from it.
         hand("payment tracking is off for this org");

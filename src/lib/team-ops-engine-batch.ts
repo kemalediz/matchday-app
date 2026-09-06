@@ -84,7 +84,7 @@
  * rather than inherited.
  *
  * "Owns nothing" here means what it means everywhere else after step 8:
- * the message reaches `route.ts:1664` unowned, MatchTime says NOTHING to
+ * the message reaches `route.ts`'s "NOBODY OWNED IT" branch unowned, MatchTime says NOTHING to
  * the group, an `AnalyzedMessage` row records it, and one line goes onto
  * a deduped operator DM (`lib/operator-note.ts`). §11.5 accepted that
  * loss in advance: "a router with nine routes and an engine with
@@ -404,7 +404,7 @@ export async function runTeamOpsBatch(args: {
         intent: "noise",
         action: "none",
         reasoning: `${TEAM_OPS_HANDLED_BY} (${m.route}): team balancing is off for this org; ` +
-          `MatchTime is deliberately silent on this capability (route.ts:3113-3128)`,
+          `MatchTime is deliberately silent on this capability`,
         matchId: null,
         teamsGenerated: false,
         writeFailed: false,

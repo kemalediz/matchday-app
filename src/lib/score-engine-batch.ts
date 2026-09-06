@@ -27,7 +27,7 @@
  * regression". §10 step 8 deleted `analyzeBatch`, the 19,850-token
  * `SYSTEM_PROMPT` and `executeVerdict`. Nothing decides these now.
  *
- * A `score` message this module declines reaches `route.ts:1664`
+ * A `score` message this module declines reaches `route.ts`'s "NOBODY OWNED IT" branch
  * unowned: SILENCE in the group, an `AnalyzedMessage` row, and one line
  * on the deduped operator DM (`lib/operator-note.ts`). THAT IS A REAL
  * BEHAVIOUR CHANGE, and it is the one this file should be read most
@@ -208,7 +208,7 @@ export interface ScoreBatchDeps extends ScoreApplyDeps {
 /**
  * "This module owns nothing." It used to say "; the analyzer keeps the
  * batch", which named where the score went. Since §10 step 8 it goes
- * nowhere: the message reaches `route.ts:1664` unowned and the result is
+ * nowhere: the message reaches `route.ts`'s "NOBODY OWNED IT" branch unowned and the result is
  * never recorded.
  *
  * A FUNCTION, not a shared const, for the reason step 6's is: the result

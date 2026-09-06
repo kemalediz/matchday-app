@@ -63,7 +63,7 @@
  * §10 step 8 deleted `analyzeBatch`, the 19,850-token `SYSTEM_PROMPT`
  * and `executeVerdict`. Nothing decides these messages now.
  *
- * A message this module declines reaches `route.ts:1664` unowned and
+ * A message this module declines reaches `route.ts`'s "NOBODY OWNED IT" branch unowned and
  * gets three things: SILENCE in the group, an `AnalyzedMessage` row, and
  * one line on a deduped operator DM (`lib/operator-note.ts`). That is a
  * REAL BEHAVIOUR CHANGE and it is worth being blunt about here, because
@@ -444,7 +444,7 @@ export interface AnswerBatchDeps {
 /**
  * "This module owns nothing." It used to say "; the analyzer keeps the
  * batch", which named where those messages went. Since §10 step 8 they
- * go nowhere: each reaches `route.ts:1664` unowned and becomes silence
+ * go nowhere: each reaches `route.ts`'s "NOBODY OWNED IT" branch unowned and becomes silence
  * plus a line on the operator DM.
  *
  * A FUNCTION, not a shared const, for the same reason step 6's is: the

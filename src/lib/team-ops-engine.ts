@@ -72,7 +72,7 @@ export type EngineGenerateTeamsWrite = Extract<ProposedWrite, { kind: "generate_
  * ⚠️ THESE LINES ARE WRITTEN FOR A HUMAN, not for a fallback
  * classifier. Until §10 step 8 a "handed back" message went to the
  * mega-prompt, which still answered it; with `analyzeBatch` deleted it
- * goes to `route.ts:1664`'s catch-all, which is SILENT to the group plus
+ * goes to `route.ts`'s "NOBODY OWNED IT" branch's catch-all, which is SILENT to the group plus
  * one deduped operator note. So every string below has to tell an admin
  * reading a DM what MatchTime did not do, and why.
  *

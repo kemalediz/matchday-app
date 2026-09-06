@@ -10,7 +10,7 @@
  * shape with two SOLVED deterministic rules would be lost with the
  * prompt that never solved it.
  *
- * `lib/attendance-engine-batch.ts` (~line 280) deliberately refuses to
+ * `lib/attendance-engine-batch.ts` deliberately refuses to
  * own a pasted roster, and says exactly why: "the engine has no
  * equivalent, and a fourteen-line roster routed `other_att` is fourteen
  * third-party IN claims it would happily apply." That refusal is only

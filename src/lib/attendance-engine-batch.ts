@@ -35,7 +35,7 @@
  * Every clause of that rested on the analyzer existing. It does not.
  *
  * A message this file declines is now claimed by NOBODY, and the analyze
- * route's "NOBODY OWNED IT" branch (`route.ts:1664`) gives it three
+ * route's "NOBODY OWNED IT" branch (`route.ts`'s "NOBODY OWNED IT" branch) gives it three
  * things: SILENCE in the group, an `AnalyzedMessage` row so the loss is
  * a query rather than an absence, and one line on a deduped operator DM
  * (`lib/operator-note.ts`). It is not a fail-open any more. It is a
@@ -260,7 +260,7 @@ export function describeEngineBatch(
  * "The engine owns nothing." That used to be followed by "; the analyzer
  * keeps the batch", and it was a complete sentence about where the batch
  * went. Since §10 step 8 nothing keeps it: every message in this result
- * reaches `route.ts:1664` unowned, says nothing to the group, and gets
+ * reaches `route.ts`'s "NOBODY OWNED IT" branch unowned, says nothing to the group, and gets
  * one line on the operator DM.
  *
  * A FUNCTION, not a shared const. The result carries a `Set` and a
@@ -349,7 +349,7 @@ export async function runAttendanceEngineBatch(args: {
     // call (a squad state we could not read is not one to write against)
     // but it is a real outage of the write path, not a shrug, so it is
     // logged as an error and every id in the batch reaches
-    // `route.ts:1664`.
+    // `route.ts`'s "NOBODY OWNED IT" branch.
     console.error(
       "[attendance-engine] state load failed; NOBODY handles this batch — every attendance " +
         "message in it goes silent and onto the operator note:",
@@ -375,7 +375,7 @@ export async function runAttendanceEngineBatch(args: {
     // consolation is not: there is no analyzer's silence to inherit, so
     // this IS the second kind. What survives of the old comfort is the
     // half that mattered — the `AnalyzedMessage` row is still written,
-    // by `route.ts:1664` rather than by `executeVerdict`, so a message
+    // by `route.ts`'s "NOBODY OWNED IT" branch rather than by `executeVerdict`, so a message
     // lost to "no match yet" is still a query.
     return empty();
   }
@@ -566,7 +566,7 @@ export async function runAttendanceEngineBatch(args: {
   // 19,850-token `SYSTEM_PROMPT` and `executeVerdict`, so an unowned
   // message is not handed on — it is DROPPED: silence in the group, an
   // `AnalyzedMessage` row, and one line on the operator DM
-  // (`route.ts:1664`, `lib/operator-note.ts`). A "529 Overloaded" on a
+  // (`route.ts`'s "NOBODY OWNED IT" branch, `lib/operator-note.ts`). A "529 Overloaded" on a
   // bare "in" now costs that player their slot until somebody reads the
   // note. That is the sharpest edge in the whole redesign and it is not
   // dressed up as anything else.
@@ -732,7 +732,7 @@ export async function runAttendanceEngineBatch(args: {
     // It used to continue "— it is in `batchInputs` and the analyzer
     // will decide it. Producing an outcome for it here would give it two
     // deciders and two replies." Nothing decides it now; it reaches
-    // `route.ts:1664` unowned and becomes silence plus a line on the
+    // `route.ts`'s "NOBODY OWNED IT" branch unowned and becomes silence plus a line on the
     // operator note. The `continue` is unchanged and still correct, for
     // a plainer reason: we have no facts for this message, so any
     // outcome built here would be built out of nothing.

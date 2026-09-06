@@ -234,3 +234,87 @@ describe("the dedupe key", () => {
     expect(note.dedupeKey).toBeNull();
   });
 });
+
+describe("a feature the club switched OFF is not an incident", () => {
+  // ── FOUND BY REVIEWING THIS FILE'S OWN HEADER, 2026-09-06 ─────────
+  //
+  // The header claimed: "A message the ORG's features exclude —
+  // attendance off, team balancing off, reminders off … The caller
+  // filters these out before composing." The caller did no such thing.
+  //
+  // `route.ts`'s unowned branch had no feature test at all, and
+  // `attendance-engine-batch.ts` returns `empty()` — i.e. UNOWNED —
+  // when `features.attendance` is false. So a MoM-and-ratings-only org
+  // with `statsQa` on (which keeps `needsAnalyzer` true, so the pipeline
+  // still runs) would page its admin about every "in" and every "can't
+  // make it" in the group. That is the precise nagging this module's
+  // route test exists to prevent, arriving through a different door.
+  //
+  // `teamBalancing` was already fine, and stays fine for a different
+  // reason: `team-ops-engine-batch.ts` OWNS the message and emits a
+  // `noise` outcome rather than disowning it, so it never reaches here.
+  // The rule below is therefore about the routes that genuinely disown.
+  //
+  // The filtering went INTO this module rather than into the caller, so
+  // the header is now true by construction instead of by promise.
+  const ATT = ["self_att", "other_att", "offer", "unsure"] as const;
+
+  it.each(ATT)("does not note a %s message when the org has attendance OFF", (route) => {
+    const note = composeOperatorNote({
+      orgName: "Sutton Lads",
+      messages: [m({ route })],
+      degradations: [],
+      features: { attendance: false },
+    });
+    expect(note.noteIds).toEqual([]);
+    expect(note.text).toBeNull();
+  });
+
+  it.each(ATT)("DOES note a %s message when attendance is ON", (route) => {
+    const note = composeOperatorNote({
+      orgName: "Sutton FC",
+      messages: [m({ route })],
+      degradations: [],
+      features: { attendance: true },
+    });
+    expect(note.noteIds).toEqual(["wa-1"]);
+  });
+
+  it("still notes a NON-attendance route when attendance is off", () => {
+    // The org turned attendance off. It did not turn questions off, and
+    // a tagged question nobody answered is still worth a human seeing.
+    const note = composeOperatorNote({
+      orgName: "Sutton Lads",
+      messages: [m({ waMessageId: "q", route: "question" })],
+      degradations: [],
+      features: { attendance: false },
+    });
+    expect(note.noteIds).toEqual(["q"]);
+  });
+
+  it("notes everything when the caller passes no features at all", () => {
+    // Absent features must mean "no suppression", never "suppress
+    // everything". A caller that forgets to pass them gets a noisier
+    // note, which is recoverable; the other direction is silence.
+    const note = composeOperatorNote({
+      orgName: "Sutton FC",
+      messages: [m({ route: "self_att" })],
+      degradations: [],
+    });
+    expect(note.noteIds).toEqual(["wa-1"]);
+  });
+
+  it("mixes correctly: suppresses the attendance one, keeps the question", () => {
+    const note = composeOperatorNote({
+      orgName: "Sutton Lads",
+      messages: [
+        m({ waMessageId: "a", route: "self_att" }),
+        m({ waMessageId: "b", route: "question" }),
+        m({ waMessageId: "c", route: "none" }),
+      ],
+      degradations: [],
+      features: { attendance: false },
+    });
+    expect(note.noteIds).toEqual(["b"]);
+  });
+});

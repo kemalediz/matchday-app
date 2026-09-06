@@ -8,10 +8,19 @@
  * decided by a path with less context than the analyzer had, or a
  * message decided twice.
  *
- * So the whole "fail open" table from the module header is asserted
- * here, one row at a time, and the assertion is always the same: OWNS
- * NOTHING, which means the analyzer keeps the batch, which is today's
- * behaviour and therefore cannot be a regression.
+ * So the whole decline table from the module header is asserted here,
+ * one row at a time, and the assertion is always the same: OWNS NOTHING.
+ *
+ * WHAT "OWNS NOTHING" MEANS CHANGED ON 2026-09-06. This used to add
+ * "which means the analyzer keeps the batch, which is today's behaviour
+ * and therefore cannot be a regression". §10 step 8 deleted
+ * `analyzeBatch`, the 19,850-token `SYSTEM_PROMPT` and `executeVerdict`,
+ * so nothing keeps the batch: a message this engine declines goes SILENT
+ * in the group and produces one line on a deduped operator DM
+ * (`route.ts`'s "NOBODY OWNED IT" branch, `lib/operator-note.ts`). The assertions below are
+ * unchanged and still right — the engine must not guess — but they now
+ * pin a behaviour change rather than a no-op, so read `ownedIds.size ===
+ * 0` as "MatchTime said nothing", not as "somebody else handled it".
  */
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -175,9 +184,9 @@ describe("the engine owns the three routes and writes through the shipped apply"
   });
 });
 
-// ── fail open: every row of the module header's table ───────────────
+// ── every row of the module header's decline table ──────────────────
 
-describe("it fails OPEN — every failure owns nothing and the analyzer keeps the batch", () => {
+describe("every failure owns nothing — which since §10 step 8 means silence + an operator note", () => {
   it("the flag is off", async () => {
     const d = deps();
     const r = await run([msg()], d, false);

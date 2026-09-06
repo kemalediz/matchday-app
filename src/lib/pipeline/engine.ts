@@ -14,7 +14,7 @@
  * longer "the deterministic third of a decider that still exists" — for
  * every route an owner claims, it is the ONLY decider, and a message no
  * owner claims is answered by nobody: silence in the group plus one
- * deduped operator DM (`route.ts:1664`, `lib/operator-note.ts`). Read
+ * deduped operator DM (`route.ts`'s "NOBODY OWNED IT" branch, `lib/operator-note.ts`). Read
  * every `degrade()` below with that in mind. A degradation used to mean
  * "the analyzer will take this"; it now means "MatchTime says nothing
  * and an admin is told".

@@ -765,9 +765,9 @@ async function handleAnalyzeRequest(request: Request) {
   //                                 deciders for one message is two
   //                                 replies for one message. The engine
   //                                 independently refuses a pasted roster
-  //                                 (`attendance-engine-batch.ts:280`)
+  //                                 (its `parsePastedRoster` carve-out)
   //                                 and a sender with an open bench
-  //                                 prompt (`:264`), so those two are
+  //                                 prompt (its `promptedUserIds` carve-out), so those two are
   //                                 belt AND braces; the swaps are peeled
   //                                 only because nothing else models a
   //                                 `TeamAssignment` move.
@@ -871,7 +871,7 @@ async function handleAnalyzeRequest(request: Request) {
   //   A bench player answering MatchTime's own "do you want the slot?"
   //   in the GROUP instead of reacting to the DM. `executeVerdict` used
   //   to reach `resolveBenchConfirmation` through
-  //   `verdict.benchConfirmation`, and `attendance-engine-batch.ts:264`
+  //   `verdict.benchConfirmation`, and `attendance-engine-batch.ts`
   //   refuses the message for exactly that reason: "a bare 'yes' from
   //   someone with a prompt open stays with the analyzer."
   //
@@ -943,7 +943,7 @@ async function handleAnalyzeRequest(request: Request) {
 
   // ── 4. THE PASTED ROSTER ───────────────────────────────────────────
   //
-  //   `attendance-engine-batch.ts:280` refuses any message
+  //   `attendance-engine-batch.ts` refuses any message
   //   `parsePastedRoster` recognises, because "a fourteen-line roster
   //   routed `other_att` is fourteen third-party IN claims it would
   //   happily apply". The shipped handling lived in the per-message loop
@@ -1800,6 +1800,19 @@ async function handleAnalyzeRequest(request: Request) {
         orgName: org.name,
         messages: unowned,
         degradations: ownerDegradations,
+        // A club that switched attendance off must not be paged about
+        // attendance. `attendance-engine-batch.ts` DISOWNS those
+        // messages when the feature is off (it returns `empty()`), so
+        // without this they would arrive here looking like a failure.
+        // This IS an extra `findUnique` — `getOrgFeatures` does no
+        // caching, and I checked rather than assumed, having just spent
+        // a whole pass deleting comments that asserted things nobody
+        // had verified. It is affordable precisely here: the block only
+        // runs when `unowned.length > 0`, and it already does a
+        // `membership.findMany` plus one `botJob.findFirst` per admin.
+        // See `operator-note.ts`'s header — the claim that the caller
+        // filtered these out was false until 2026-09-06.
+        features: { attendance: (await getOrgFeatures(org.id)).attendance },
       });
       if (note.text) {
         console.warn(

@@ -69,10 +69,25 @@
  *     alongside the extracted facts, so triage is one query". Paging an
  *     admin because the engine correctly concluded that a joke was a
  *     joke is the nagging above.
- *   • A message the ORG's features exclude — attendance off, team
- *     balancing off, reminders off. That is not a failure; it is the
- *     club saying do not do this. A note there pages a human because the
- *     system is working.
+ *   • A message the ORG's features exclude. That is not a failure; it
+ *     is the club saying do not do this, and a note there pages a human
+ *     because the system is working.
+ *
+ *     ⚠️ THIS PARAGRAPH USED TO END "The caller filters these out before
+ *     composing", AND THE CALLER DID NO SUCH THING. Found on 2026-09-06
+ *     by reading this header against `route.ts`, which had no feature
+ *     test in its unowned branch at all. `teamBalancing` was covered by
+ *     accident — `team-ops-engine-batch.ts` OWNS a message and emits a
+ *     `noise` outcome when the feature is off, so it never arrives here
+ *     — but `attendance` was not: `attendance-engine-batch.ts` returns
+ *     `empty()`, which means UNOWNED. A MoM-and-ratings-only org with
+ *     `statsQa` on (enough to keep the pipeline running) would have had
+ *     its admin paged for every "in" in the group.
+ *
+ *     The filter is now IN this module, below, so the claim is true by
+ *     construction rather than by promise. That is the whole lesson of
+ *     the four seatbelts found dead on 2026-08-31: a comment asserting
+ *     that something else handles it is not a mechanism.
  *
  * ─────────────────────────────────────────────────────────────────────
  * IT INHERITS THE PARTIAL-RESPONSE NET RATHER THAN ADDING A SECOND ONE
@@ -124,6 +139,14 @@ export interface OperatorNoteInput {
    *  the message id it is about, so they are matched by substring
    *  rather than by a parallel structure that could drift out of step. */
   degradations: string[];
+  /**
+   * The org's feature switches, for the suppression described in the
+   * header. OPTIONAL, and absent means SUPPRESS NOTHING — a caller that
+   * forgets to pass them gets a noisier note, which is recoverable in
+   * one glance; the other default would be silence, which is what this
+   * module exists to prevent.
+   */
+  features?: { attendance?: boolean };
 }
 
 export interface OperatorNote {
@@ -145,8 +168,23 @@ export interface OperatorNote {
  * SEEN. A new route silently joining the "not worth mentioning" bucket
  * is precisely the S1 coverage hole this whole file is about.
  */
-function worthNoting(route: Route | undefined): boolean {
-  return route !== "none";
+function worthNoting(
+  route: Route | undefined,
+  features: OperatorNoteInput["features"],
+): boolean {
+  if (route === "none") return false;
+  // A club that switched attendance off does not want to hear about
+  // attendance. These are exactly `gate.ts`'s `ENGINE_ROUTES`, and they
+  // are spelled out rather than imported for the reason `RETRYING_ROUTES`
+  // is: the two lists mean different things, and a future route could
+  // join one without joining the other.
+  if (
+    features?.attendance === false &&
+    (route === "self_att" || route === "other_att" || route === "offer" || route === "unsure")
+  ) {
+    return false;
+  }
+  return true;
 }
 
 /** How many messages the DM spells out before it summarises the rest.
@@ -178,7 +216,7 @@ function reasonFor(id: string, degradations: string[]): string | null {
 }
 
 export function composeOperatorNote(input: OperatorNoteInput): OperatorNote {
-  const noted = input.messages.filter((m) => worthNoting(m.route));
+  const noted = input.messages.filter((m) => worthNoting(m.route, input.features));
   if (noted.length === 0) return { noteIds: [], text: null, dedupeKey: null };
 
   const n = noted.length;

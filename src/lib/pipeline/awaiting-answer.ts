@@ -18,7 +18,7 @@
  * counted. §10 step 8 deleted `analyzeBatch`, the 19,850-token
  * `SYSTEM_PROMPT` and `executeVerdict`, so what a `none` route skips now
  * is EVERY OWNER: the message is answered by nobody, and only an
- * operator DM records it (`route.ts:1664`, `lib/operator-note.ts`). The
+ * operator DM records it (`route.ts`'s "NOBODY OWNED IT" branch, `lib/operator-note.ts`). The
  * numbers below are unchanged and still the reason this file exists —
  * what changed is the price of the two it rescues. Each was a player's
  * slot then and is a player's slot now, but nothing else is looking any
