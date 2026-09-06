@@ -43,6 +43,9 @@
  *                  not just when REPEAT=1
  *   CHASES=1       compose all five scheduled-chase kinds instead of
  *                  running the case table (also read-only)
+ *   QUESTIONS=1    run the TAGGED-QUESTION table (Q*) through §10 step
+ *                  7's owner instead, and score every phrasing as
+ *                  ANSWERED / HANDED BACK / SILENT. See `runQuestions`.
  *   ORG_GROUP=…    a different WhatsApp group id (defaults to Sutton FC)
  *
  * Examples:
@@ -61,9 +64,13 @@
  */
 import { loadSquadState } from "../src/lib/pipeline/load-state.ts";
 import { runPipeline } from "../src/lib/pipeline/run.ts";
+import { runAnswerBatch } from "../src/lib/pipeline/answer-batch.ts";
+import { routeBatch } from "../src/lib/pipeline/router.ts";
+import { anthropicModel } from "../src/lib/pipeline/llm.ts";
+import { getOrgFeatures } from "../src/lib/org-features.ts";
 import { composeChaseText, type ChaseKind } from "../src/lib/message-analyzer.ts";
 import { db } from "../src/lib/db.ts";
-import type { AttendanceRow, Member, SquadState } from "../src/lib/pipeline/types.ts";
+import type { AttendanceRow, Member, Route, SquadState } from "../src/lib/pipeline/types.ts";
 
 /** Sutton FC. Overridable so the harness is not welded to one customer. */
 const DEFAULT_GROUP = "447525334985-1607872139@g.us";
@@ -137,6 +144,75 @@ const CASES: Case[] = [
   { id: "P2", who: "Ilkay", body: "I'm around if you're short", expect: "NO write — availability + politeness" },
   { id: "P3", who: "Ilkay", body: "put me down if you're short", expect: "WRITE — 'put me down' asks for the place (standing offer, S15a)" },
   { id: "P4", who: "Ilkay", body: "count me as the 14th if you need one", expect: "WRITE — claims the place (standing offer, S15a)" },
+];
+
+/**
+ * ── THE TAGGED-QUESTION TABLE (`QUESTIONS=1`) ─────────────────────────
+ *
+ * Twenty-four phrasings a Sunday-league group actually sends, all
+ * @-tagged (step 7 requires a tag unconditionally, so an untagged
+ * question is out of scope by construction and is covered by the
+ * interaction-contract tests instead).
+ *
+ * They are run through `runAnswerBatch` — the thing PRODUCTION would run
+ * with the flags on — and not through `runPipeline`. That distinction is
+ * the whole reason this block exists. `runPipeline` has no ownership
+ * layer and no analyzer behind it, so a message step 7 deliberately
+ * declines shows up there as "(silent)" and looks identical to a defect.
+ * The 2026-09-06 measurement that started this change read seven
+ * silences off `runPipeline` for exactly that reason; four were a real
+ * defect (topic `fixture` did not exist) and three were the carve-outs
+ * working. Here they are scored apart:
+ *
+ *   ANSWERED     step 7 owns it and composed a reply
+ *   HANDED BACK  step 7 declined it AND SAID WHY — in production the
+ *                mega-prompt then answers it, so this is not a silence
+ *   SILENT       neither. This column must read 0. Anything in it is
+ *                §9's signature failure: "message understood, action
+ *                silently not taken".
+ *
+ * `expect` is what a human decided the right column is. The harness
+ * prints both and marks a mismatch; it does not fail the process, for
+ * the same reason the C/D/K/P table does not.
+ */
+type QuestionCase = {
+  id: string;
+  who: string;
+  body: string;
+  expect: "ANSWERED" | "HANDED BACK";
+  /** What the answer has to contain to be right, when it is answered. */
+  wants?: RegExp;
+  why: string;
+};
+
+const QUESTION_CASES: QuestionCase[] = [
+  // ── The twelve from the 2026-09-06 sweep, verbatim ────────────────
+  { id: "Q1", who: "Ali", body: "@Match Time how many do we need?", expect: "ANSWERED", wants: /\d+\/\d+/, why: "count" },
+  { id: "Q2", who: "Ali", body: "@Match Time who's in?", expect: "ANSWERED", wants: /Playing:/, why: "roster, not a count" },
+  { id: "Q3", who: "Ali", body: "@Match Time whats the score situation", expect: "ANSWERED", wants: /\d+\/\d+/, why: "count — 'score' here means the tally, not a result" },
+  { id: "Q4", who: "Ali", body: "@Match Time are we playing tuesday?", expect: "ANSWERED", wants: /\d{1,2}:\d{2}/, why: "fixture" },
+  { id: "Q5", who: "Ali", body: "@Match Time how many spots left", expect: "ANSWERED", wants: /\d+\/\d+/, why: "count" },
+  { id: "Q6", who: "Ali", body: "@Match Time list the players", expect: "ANSWERED", wants: /Playing:/, why: "roster" },
+  { id: "Q7", who: "Ali", body: "@Match Time what time is kickoff", expect: "ANSWERED", wants: /\d{1,2}:\d{2}/, why: "fixture" },
+  { id: "Q8", who: "Ali", body: "@Match Time where are we playing", expect: "ANSWERED", wants: /at \S/, why: "fixture — the venue" },
+  { id: "Q9", who: "Ali", body: "@Match Time do we have enough?", expect: "ANSWERED", wants: /\d+\/\d+/, why: "count" },
+  { id: "Q10", who: "Ali", body: "@Match Time show me the squad", expect: "ANSWERED", wants: /Playing:/, why: "roster — NOT the team line-ups" },
+  { id: "Q11", who: "Ali", body: "@Match Time is the game still on", expect: "ANSWERED", wants: /\d{1,2}:\d{2}/, why: "fixture" },
+  { id: "Q12", who: "Ali", body: "@Match Time who hasn't paid", expect: "HANDED BACK", why: "no payment data in SquadState; the analyzer keeps money questions" },
+
+  // ── More of the same shapes, phrased as the group phrases them ────
+  { id: "Q13", who: "Zair", body: "@Match Time whos playing tonight", expect: "ANSWERED", wants: /Playing:/, why: "roster" },
+  { id: "Q14", who: "Zair", body: "@Match Time how many are we", expect: "ANSWERED", wants: /\d+\/\d+/, why: "count" },
+  { id: "Q15", who: "Zair", body: "@Match Time we're 9/14 right?", expect: "ANSWERED", wants: /\d+\/\d+/, why: "count with a stated number — S24 fact-check" },
+  { id: "Q16", who: "Zair", body: "@Match Time who's on the bench?", expect: "ANSWERED", why: "bench" },
+  { id: "Q17", who: "Zair", body: "@Match Time same place as usual?", expect: "ANSWERED", wants: /at \S/, why: "fixture — the venue" },
+  { id: "Q18", who: "Zair", body: "@Match Time what time we kicking off", expect: "ANSWERED", wants: /\d{1,2}:\d{2}/, why: "fixture" },
+  { id: "Q19", who: "Amir", body: "@Match Time is Zair in?", expect: "ANSWERED", wants: /Zair/, why: "person_status, resolvable" },
+  { id: "Q20", who: "Amir", body: "@Match Time is my mate down for tuesday", expect: "HANDED BACK", why: "person_status that cannot resolve to one member" },
+  { id: "Q21", who: "Amir", body: "@Match Time anyone in the squad without a number?", expect: "ANSWERED", why: "phones" },
+  { id: "Q22", who: "Amir", body: "@Match Time who's been most consistent this season?", expect: "HANDED BACK", why: "stats — the composed leaderboard trips displaysSquadState (2026-05-14)" },
+  { id: "Q23", who: "Amir", body: "@Match Time we're short, what are our options?", expect: "HANDED BACK", why: "options — the lead carries a count and would be replaced by the roster" },
+  { id: "Q24", who: "Elvin", body: "@Match Time show me the teams", expect: "ANSWERED", why: "balancer/show — a real post if teams exist, the shipped 'no teams generated yet' if not" },
 ];
 
 /** The two lines above every case, so the model sees a group mid-chase. */
@@ -312,6 +388,114 @@ async function runChases(groupId: string): Promise<void> {
   );
 }
 
+/**
+ * Run the tagged-question table through §10 step 7's owner.
+ *
+ * READ-ONLY, twice over: `runAnswerBatch` proposes no writes at all
+ * (`__tests__/zero-writes.test.ts` scans its whole directory on every
+ * build, and the function refuses the batch if the engine ever hands it
+ * one), and the state it decides against is injected here from a single
+ * `loadSquadState` read that is then handed to every case unchanged.
+ *
+ * The router runs per case rather than once over all of them, because a
+ * real WhatsApp window carries one or two messages and a batch of
+ * twenty-four questions is a context the router will never see in
+ * production. It costs one extra call per case and buys a number that
+ * means something.
+ */
+async function runQuestions(orgId: string, state: SquadState, now: Date): Promise<void> {
+  const repeat = Math.max(1, Number(process.env.REPEAT ?? 1));
+  const only = process.env.ONLY?.split(",").map((s) => s.trim());
+  const selected = QUESTION_CASES.filter((c) => !only || only.includes(c.id));
+  if (only) {
+    const unknown = only.filter((id) => !QUESTION_CASES.some((c) => c.id === id));
+    if (unknown.length) throw new Error(`ONLY names no such question case: ${unknown.join(", ")}`);
+  }
+  const features = await getOrgFeatures(orgId);
+  const model = anthropicModel();
+  const senders = new Map(selected.map((c) => [c.id, memberByName(state.roster, c.who)]));
+
+  let answered = 0;
+  let handedBack = 0;
+  let silent = 0;
+  let wrongAnswer = 0;
+  let mismatched = 0;
+  let runs = 0;
+  let totalUsd = 0;
+
+  for (const c of selected) {
+    const sender = senders.get(c.id)!;
+    console.log(`\n${"─".repeat(72)}\n${c.id}  ${sender.name} [@tagged]: ${JSON.stringify(c.body)}\n  expect : ${c.expect} (${c.why})`);
+
+    for (let n = 0; n < repeat; n++) {
+      const id = `${c.id}-${n}`;
+      const routed = await routeBatch(model, [{ id, authorName: sender.name, body: c.body }]);
+      const route: Route = routed.routes[0]?.route ?? "unsure";
+      totalUsd += routed.usage?.costUsd ?? 0;
+
+      const res = await runAnswerBatch({
+        orgId,
+        now,
+        messages: [
+          {
+            waMessageId: id,
+            body: c.body,
+            authorName: sender.name,
+            senderUserId: sender.userId,
+            senderName: sender.name,
+            tagged: true,
+            route,
+            gated: false,
+          },
+        ],
+        history: HISTORY,
+        expectedMatchId: state.matchId,
+        enabled: new Set<Route>(["question", "balancer"]),
+        // Injected so the whole sweep decides against ONE state read.
+        deps: { model, loadState: async () => state, loadFeatures: async () => features },
+      });
+      totalUsd += res.cost.usd;
+      runs++;
+
+      const outcome = res.outcomes.get(id);
+      const reply = outcome?.reply ?? null;
+      // The three columns. A message the ROUTER sent somewhere step 7
+      // does not own is a hand-back too — the analyzer decides it — and
+      // saying so is why the route is printed beside every verdict.
+      const routeIsOurs = route === "question" || route === "balancer";
+      const gaveAReason = res.degradations.some((d) => d.includes(id)) || !routeIsOurs;
+      const verdict = reply ? "ANSWERED" : gaveAReason ? "HANDED BACK" : "SILENT";
+      if (verdict === "ANSWERED") answered++;
+      else if (verdict === "HANDED BACK") handedBack++;
+      else silent++;
+
+      const wrong = verdict === "ANSWERED" && c.wants !== undefined && !c.wants.test(reply!);
+      if (wrong) wrongAnswer++;
+      if (verdict !== c.expect) mismatched++;
+
+      console.log(
+        `  ${repeat > 1 ? `run ${n + 1}/${repeat}  ` : ""}route=${route.padEnd(9)} ` +
+          `${verdict}${verdict !== c.expect ? `  ⚠️ expected ${c.expect}` : ""}` +
+          `${wrong ? `  ⚠️ answer does not match ${c.wants}` : ""}`,
+      );
+      if (reply) console.log(`  says   : ${JSON.stringify(reply.slice(0, 160))}`);
+      else if (!routeIsOurs) console.log(`  reason : the router sent it to "${route}", which step 7 does not own`);
+      else if (res.degradations.length) console.log(`  reason : ${res.degradations.join(" | ")}`);
+    }
+  }
+
+  console.log(
+    `\n${"═".repeat(72)}\n` +
+      `${selected.length} question(s) × ${repeat} = ${runs} run(s).\n` +
+      `  ANSWERED    ${answered} of ${runs}\n` +
+      `  HANDED BACK ${handedBack} of ${runs}  (the analyzer answers these in production)\n` +
+      `  SILENT      ${silent} of ${runs}${silent === 0 ? "  ✅" : "  ❌ this must be 0"}\n` +
+      `  answers not matching their wants-pattern: ${wrongAnswer}\n` +
+      `  verdicts differing from expect:           ${mismatched}\n` +
+      `Total cost: $${totalUsd.toFixed(4)}. Writes performed: 0 (this harness cannot write).`,
+  );
+}
+
 async function main(): Promise<void> {
   const groupId = process.env.ORG_GROUP ?? DEFAULT_GROUP;
   const org = await db.organisation.findFirst({
@@ -333,6 +517,12 @@ async function main(): Promise<void> {
       `MATCH : ${base.matchId ?? "(none)"} — ${base.kickoffLabel} at ${base.venue}\n` +
       `STATE : ${describeSquad(base)}\n`,
   );
+
+  if (process.env.QUESTIONS === "1") {
+    await runQuestions(org.id, base, now);
+    await db.$disconnect();
+    return;
+  }
 
   const only = process.env.ONLY?.split(",").map((s) => s.trim());
   const repeat = Math.max(1, Number(process.env.REPEAT ?? 1));

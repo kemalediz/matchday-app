@@ -55,6 +55,10 @@ import { buildCorpusWorld, readMembers, readRows, readTeams } from "./world";
  *   S32   phone-presence         → owned (topic `phones`)
  *   S24   fact-check the count   → owned (topic `count`, statedCount 9)
  *   S19   show the teams again   → owned (`balancer`, action `show`)
+ *   S16e  list the players       → owned (topic `squad`, added 2026-09-06)
+ *   S16f  what time is kickoff   → owned (topic `fixture`, added 2026-09-06)
+ *   S19b  show teams, none exist → owned (`balancer`, action `show`, no
+ *                                  TeamAssignment rows — added 2026-09-06)
  *
  *   S16   history-vs-roster      → NOT owned here. Its first message is
  *                                  a third-party registration
@@ -85,6 +89,9 @@ const OWNED_CASE_IDS = new Set([
   "S32-phone-presence-answer-never-leaks-digits",
   "S24-factcheck-wrong-squad-count",
   "S19-show-teams-does-not-reshuffle",
+  "S16e-roster-question-names-the-players",
+  "S16f-fixture-question-states-time-and-venue",
+  "S19b-show-teams-with-none-generated-says-so",
 ]);
 
 /** Both routes, both flags on. The point of the sweep is to measure

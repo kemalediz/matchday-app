@@ -2326,3 +2326,122 @@ describe("an AVAILABILITY statement registers nobody (2026-06-20, Abid Kazmi)", 
     expect(statusOf(r.nextState, "abid")).toBe("CONFIRMED");
   });
 });
+
+// ── §3.2 S16 / S19 · the 2026-09-06 question sweep ─────────────────────
+//
+// Twelve tagged questions replayed against the live Sutton squad. Four
+// produced no speech at all, three answered a roster request with a
+// bare count, and one posted a team sheet with nobody on it. These are
+// the engine half of the fix.
+
+describe("S16 · a roster question is not a counting question", () => {
+  const ROSTER_Q = {
+    kind: "question" as const,
+    topic: "squad" as const,
+    personRef: null,
+    statedCount: null,
+  };
+
+  it("asks for `answer_squad`, never `answer_count`", () => {
+    const state = world({ confirmed: ["kemal", "elvin", "sait"] });
+    const r = decide({
+      now: NOW,
+      state,
+      messages: [
+        msg({
+          from: "adam",
+          body: "@Match Time list the players",
+          route: "question",
+          tagged: true,
+          facts: ROSTER_Q,
+        }),
+      ],
+    });
+    expect(r.speech.some((s) => s.kind === "answer_squad")).toBe(true);
+    expect(r.speech.some((s) => s.kind === "answer_count")).toBe(false);
+    expect(r.writes).toHaveLength(0);
+  });
+
+  it("is deferred into the batch squad post when the squad also changed (S36)", () => {
+    const state = world({ confirmed: ["kemal", "elvin"] });
+    const r = decide({
+      now: NOW,
+      state,
+      messages: [
+        msg({
+          from: "sait",
+          body: "in",
+          route: "self_att",
+          facts: attendanceFacts([claim({ polarity: "in" })]),
+        }),
+        msg({
+          from: "adam",
+          body: "@Match Time list the players",
+          route: "question",
+          tagged: true,
+          facts: ROSTER_Q,
+        }),
+      ],
+    });
+    expect(r.speech.filter((s) => s.kind === "squad_status")).toHaveLength(1);
+    expect(r.speech.some((s) => s.kind === "answer_squad")).toBe(false);
+  });
+
+  it("still requires the tag the interaction contract requires", () => {
+    const state = world({ confirmed: ["kemal"] });
+    const r = decide({
+      now: NOW,
+      state,
+      messages: [
+        msg({ from: "adam", body: "whos in", route: "question", facts: ROSTER_Q }),
+      ],
+    });
+    expect(r.speech).toHaveLength(0);
+  });
+});
+
+describe("S16 · a fixture question is answered, not shrugged at", () => {
+  it("emits `answer_fixture` rather than degrading to silence", () => {
+    const state = world({ confirmed: ["kemal"] });
+    const r = decide({
+      now: NOW,
+      state,
+      messages: [
+        msg({
+          from: "adam",
+          body: "@Match Time what time is kickoff",
+          route: "question",
+          tagged: true,
+          facts: { kind: "question", topic: "fixture", personRef: null, statedCount: null },
+        }),
+      ],
+    });
+    expect(r.speech.some((s) => s.kind === "answer_fixture")).toBe(true);
+    expect(r.outcomes[0].disposition).toBe("acted");
+    expect(r.degradations).toHaveLength(0);
+    expect(r.writes).toHaveLength(0);
+  });
+});
+
+describe("S19 · showing teams that were never generated", () => {
+  it("says so instead of composing a team post over two empty lists", () => {
+    const state = world({ confirmed: ["kemal", "elvin", "sait", "mustafa"], maxPlayers: 4 });
+    const r = decide({
+      now: NOW,
+      state,
+      messages: [
+        msg({
+          from: "elvin",
+          body: "@Match Time show the teams",
+          route: "balancer",
+          tagged: true,
+          facts: { kind: "teams", action: "show", includeRefs: [], teamNames: null, swaps: [] },
+        }),
+      ],
+    });
+    expect(r.speech.some((s) => s.kind === "teams_not_generated")).toBe(true);
+    expect(r.speech.some((s) => s.kind === "teams_post")).toBe(false);
+    expect(r.outcomes[0].disposition).toBe("acted");
+    expect(r.writes).toHaveLength(0);
+  });
+});

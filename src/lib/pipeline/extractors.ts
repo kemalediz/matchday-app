@@ -114,16 +114,19 @@ Report nothing (an empty claims array) only when the message genuinely makes no 
 
   question: `You read ONE question from a football club's WhatsApp group and classify what it asks for. You never answer it.
 
-  topic        "squad" who is playing / show the list
+  topic        "squad" who is playing — asks for the NAMES ("who's in?", "list the players", "show me the squad", "who's playing tonight?")
                "bench" who is on the bench
-               "count" how many are in, including a stated number to check ("we're 9/14 right?")
+               "count" HOW MANY are in, how many more are needed, is that enough — asks for a NUMBER, including a stated one to check ("we're 9/14 right?", "how many spots left?", "do we have enough?")
                "person_status" whether a specific named person is playing
                "phones" who has a phone number on record
+               "fixture" the match itself: whether it is on, what time it kicks off, where it is played ("what time is kickoff?", "where are we playing?", "are we playing tuesday?", "is the game still on?", "same place as usual?")
                "stats" form, appearances, most consistent, man of the match
                "options" what to do about being short (smaller format, alternatives)
                "other" anything else
   personRef    the person the question is about, verbatim, or "" when it names nobody
-  statedCount  a number the message ASSERTS about the squad, or -1 when it asserts none`,
+  statedCount  a number the message ASSERTS about the squad, or -1 when it asserts none
+
+"squad" and "count" are the same subject asked two ways, and the answers look nothing alike: "squad" gets a list of names, "count" gets a number. Choose on what the asker wants BACK, not on what the question is about. If it asks WHO, it is "squad"; if it asks HOW MANY, it is "count".`,
 
   teams: `You read ONE message about the two team line-ups and report what it asks for. You never pick the teams.
 
@@ -202,7 +205,17 @@ const QUESTION_SCHEMA = {
   properties: {
     topic: {
       type: "string",
-      enum: ["squad", "bench", "count", "person_status", "phones", "stats", "options", "other"],
+      enum: [
+        "squad",
+        "bench",
+        "count",
+        "person_status",
+        "phones",
+        "fixture",
+        "stats",
+        "options",
+        "other",
+      ],
     },
     personRef: { type: "string" },
     statedCount: { type: "number" },
@@ -280,6 +293,7 @@ const TOPICS: QuestionTopic[] = [
   "count",
   "person_status",
   "phones",
+  "fixture",
   "stats",
   "options",
   "other",

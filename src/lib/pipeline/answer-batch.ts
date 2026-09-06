@@ -157,31 +157,58 @@ export const ANSWER_ROUTES = STEP_SEVEN_ROUTES;
  */
 export const ANSWERABLE_TOPICS: readonly QuestionTopic[] = [
   "count",
+  "squad",
   "bench",
   "person_status",
   "phones",
+  "fixture",
 ];
 
 /**
- * `squad` — "who's playing / show me the list" — is NOT in that set, and
- * this is the one place §6's sentence is not honoured in full.
+ * `squad` AND `fixture` JOINED THAT LIST ON 2026-09-06, and both were
+ * measured rather than argued for.
  *
- * `engine.ts:701-716` sends `squad` and `count` to the same
- * `answer_count` speech intent, which renders "We're 11/14 for Tue
- * 21:30, need 3 more". That is the right answer to "how many are we?"
- * and a poor one to "who's playing?" — nobody is named. In the wired
- * system it READS correctly only because that string trips
- * `displaysSquadState` and `route.ts:2393` swaps it for the roster post;
- * lean on that and the answer degrades to a bare count on two real
- * paths, the composition pass being inside a `try/catch` and its
- * `if (nextMatchForReply)` guard using a different match selector from
- * this module's.
+ * Twelve tagged questions, replayed through the live pipeline against
+ * the real Sutton squad (6/14, Tue 21:30, Goals North Cheam). The router
+ * caught 12 of 12 — router recall was NOT the problem — and then:
  *
- * Relying on a regex in another module to turn a count into a roster is
- * the opposite of §6.4. The fix is an `answer_squad` intent rendering
- * `composeSquadStatusPost` directly — a composer change, and it belongs
- * with the `stats` and `options` format fixes above rather than being
- * smuggled into an ownership layer.
+ *   • FOUR asked about the fixture ("what time is kickoff", "where are
+ *     we playing", "are we playing tuesday?", "is the game still on")
+ *     and every one of them landed on topic `other`, which reaches
+ *     `engine.ts`'s `default:` branch and degrades. An operator note,
+ *     and not one word to the group. The mega-prompt answers all four
+ *     today (`message-analyzer.ts:455-457`), so leaving them here would
+ *     have made the flag a regression on the most ordinary question a
+ *     Sunday-league group asks. `fixture` is now a topic and
+ *     `answer_fixture` reads `kickoffLabel` and `venue`.
+ *   • THREE asked for the roster ("who's in?", "list the players",
+ *     "show me the squad") and got "We're 6/14 for Tue 21:30, need 8
+ *     more 🙏" — not one name in it. `engine.ts` sent `squad` and
+ *     `count` to the same `answer_count` intent. It read correctly in
+ *     production only because that string trips `displaysSquadState` and
+ *     `route.ts:2393` swaps it for the roster post; lean on that and the
+ *     answer degrades to a bare count on two real paths, the composition
+ *     pass being inside a `try/catch` and its `if (nextMatchForReply)`
+ *     guard using a different match selector from this module's. Relying
+ *     on a regex in another module to turn a count into a roster is the
+ *     opposite of §6.4, so `answer_squad` renders
+ *     `composeSquadStatusPost` directly.
+ *
+ * The other three silences in that sweep were not one shape, and none of
+ * them is fixed here:
+ *
+ *   • "who hasn't paid" routes `admin_ops`, not `question` — there is no
+ *     payment data in `SquadState` at all, and none in the mega-prompt's
+ *     Match Context either, so nothing is lost by leaving it.
+ *   • "how many do we need?" and "whats the score situation" were TOPIC
+ *     INSTABILITY rather than a missing topic: both extract as `count`
+ *     on a re-run and both are answered. `stats` and `options` are the
+ *     two that stay handed back on purpose, for the composed-format
+ *     reasons above.
+ *
+ * Every non-answer here is a hand-back carrying a reason, never silence:
+ * the analyzer is still standing beside this path and still answers all
+ * of them.
  */
 
 /**
@@ -582,15 +609,17 @@ export async function runAnswerBatch(args: {
         hand(`team action "${facts.action}" still belongs to the balancer`);
         continue;
       }
-      if (state.teams.length === 0) {
-        // The shipped path answers "No teams generated yet — say
-        // 'generate the teams' and I'll sort them." and its comment says
-        // "do NOT auto-generate" (`route.ts:3728-3731`). `formatTeamsPost`
-        // over two empty lists renders a teams post with no players in
-        // it, so the shape is handed back rather than answered wrongly.
-        hand("no teams have been generated for this match yet");
-        continue;
-      }
+      // NO CARVE-OUT FOR AN EMPTY `state.teams` ANY MORE, and that is a
+      // fix rather than a loosening. It used to hand the message back,
+      // because `formatTeamsPost` over two empty lists composes a team
+      // sheet with nobody on it — the 2026-09-06 sweep produced exactly
+      // that and sent it. `engine.ts` now emits `teams_not_generated`
+      // for that state instead, carrying the shipped path's own sentence
+      // (`route.ts:3711-3714`), so the wrong post cannot be composed on
+      // ANY path rather than being refused on this one. Refusing here as
+      // well would mean the analyzer answers a question this module can
+      // now answer correctly, which is the coverage the flag exists to
+      // buy.
       ownedIds.add(m.waMessageId);
       continue;
     }
@@ -724,11 +753,15 @@ export async function runAnswerBatch(args: {
     // join into one send; they never become two results.
     const reply = utterances.length > 0 ? utterances.join("\n\n") : null;
     // `handleQuestion` and `handleTeams` set no react, so the composer
-    // produces none. The shipped show-teams path reacts 👀
-    // (`route.ts:3746`), and losing it would be a visible change on a
-    // flag advertised as a like-for-like move — so it is carried here
-    // rather than added to the engine.
-    const react = reactByMessageId.get(m.waMessageId) ?? (m.route === "balancer" ? "👀" : null);
+    // produces none. The shipped show-teams path reacts 👀 on a real
+    // post (`route.ts:3746`) and 🤔 when there are no teams to show
+    // (`route.ts:3714`, `route.ts:3734`), and losing either would be a
+    // visible change on a flag advertised as a like-for-like move — so
+    // both are carried here rather than added to the engine. Read from
+    // `state`, not authored: the same condition the engine branched on.
+    const react =
+      reactByMessageId.get(m.waMessageId) ??
+      (m.route === "balancer" ? (state.teams.length === 0 ? "🤔" : "👀") : null);
     outcomes.set(m.waMessageId, {
       waMessageId: m.waMessageId,
       route: m.route as Route,
