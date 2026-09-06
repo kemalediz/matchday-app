@@ -119,6 +119,40 @@ export function compose(result: EngineResult): ComposedOutput {
         break;
       }
 
+      case "answer_squad":
+        // The SAME composer the batch squad post uses, called directly.
+        // "who's playing?" used to reach `answer_count` and come back as
+        // "We're 11/14, need 3 more" — a number, to somebody who asked
+        // for names — and it only read correctly in production because a
+        // regex in `route.ts` swapped the string for this post
+        // afterwards. §6.4's claim is that the composer writes the final
+        // words, so it writes them.
+        utterances.push({
+          messageId: s.messageId,
+          text: composeSquadStatusPost({ confirmed, bench, maxPlayers: state.maxPlayers }),
+        });
+        break;
+
+      case "answer_fixture": {
+        // Kickoff and venue, both pre-formatted by `load-state.ts`, and
+        // NOTHING ELSE — deliberately no count.
+        //
+        // A count here would carry an `N/M` beside squad vocabulary,
+        // which is rule (c) of `displaysSquadState`, so
+        // `composeSquadStateReply` would drop this whole answer and post
+        // the roster instead: the person who asked what time kickoff is
+        // would get a list of names and no time. The same trap the STATS
+        // and OPTIONS answers are still handed back for.
+        const where = state.venue.trim();
+        utterances.push({
+          messageId: s.messageId,
+          text: where
+            ? `⚽ ${state.kickoffLabel} at ${where}.`
+            : `⚽ ${state.kickoffLabel}.`,
+        });
+        break;
+      }
+
       case "answer_bench":
         utterances.push({
           messageId: s.messageId,
@@ -249,6 +283,17 @@ export function compose(result: EngineResult): ComposedOutput {
         });
         break;
       }
+
+      case "teams_not_generated":
+        // Byte-identical to the shipped path (`route.ts:3712-3713` and
+        // `3731-3732`). Keeping the words the same is the point: this is
+        // a like-for-like move, and the group should not be able to tell
+        // which code path answered it.
+        utterances.push({
+          messageId: s.messageId,
+          text: "No teams generated yet — say 'generate the teams' and I'll sort them.",
+        });
+        break;
 
       case "guest_name_ask":
         utterances.push({

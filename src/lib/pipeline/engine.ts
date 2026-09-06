@@ -734,6 +734,16 @@ export function decide(input: EngineInput): EngineResult {
       out.disposition = "acted";
       switch (facts.topic) {
         case "squad":
+          // "who's in / list the players" wants NAMES. Until 2026-09-06
+          // this shared `answer_count` with the topic below and got
+          // "We're 6/14 for Tue 21:30, need 8 more 🙏" — the right
+          // answer to a different question. Deferred for the same reason
+          // `count` is: when the batch also changed the squad, the
+          // batch's own squad post IS this answer, and two rosters one
+          // line apart is the 2026-06-12 Sutton Lads shape (S36).
+          deferredSquadQuestions.push({ kind: "answer_squad", messageId: msg.id });
+          out.reasons.push("roster question answered from the database");
+          break;
         case "count":
           // §3.2 S24: the engine compares the stated number to the DB.
           // Deferred so it collapses into the single squad post when the
@@ -748,6 +758,14 @@ export function decide(input: EngineInput): EngineResult {
               ? "squad-state question answered from the database"
               : `stated ${facts.statedCount}, database says ${confirmedCount(w)}`,
           );
+          break;
+        case "fixture":
+          // Kickoff and venue, straight off the state. NOT deferred:
+          // "what time is kickoff" is not a claim about the squad, so a
+          // squad post in the same batch neither answers it nor
+          // contradicts it.
+          speech.push({ kind: "answer_fixture", messageId: msg.id });
+          out.reasons.push("fixture question answered from the match");
           break;
         case "bench":
           speech.push({ kind: "answer_bench", messageId: msg.id });
@@ -798,6 +816,23 @@ export function decide(input: EngineInput): EngineResult {
         // 2026-06-18 (c408649): "show the teams again" re-ran the
         // balancer and destroyed an admin's manual swap. Showing is a
         // READ. There is no branch here that can write.
+        //
+        // ⚠️ TERMINAL BRANCH. Both arms below `return`, so nothing later
+        // in `handleTeams` runs for a `show`. The only thing after them
+        // is the `degrade()` for generate/rename/swap, which must NOT
+        // fire here — showing is the one team action this path owns.
+        if (w.teams.length === 0) {
+          // The 2026-09-06 sweep: `formatTeamsPost` over two empty lists
+          // composed "⚽ *Teams for tonight* … *Red*:\n\n\n*Yellow*:
+          // \n\n\n" and sent it. An empty team sheet is worse than no
+          // answer, and the shipped path already has the right one
+          // (`route.ts:3711-3714`) — including its refusal to
+          // auto-generate, which is why this stays a read.
+          speech.push({ kind: "teams_not_generated", messageId: msg.id });
+          out.disposition = "acted";
+          out.reasons.push("asked to show teams that have not been generated yet");
+          return;
+        }
         speech.push({ kind: "teams_post", messageId: msg.id });
         out.disposition = "acted";
         out.reasons.push("re-posting the existing teams; the balancer is not re-run");

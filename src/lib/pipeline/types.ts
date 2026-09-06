@@ -198,12 +198,38 @@ export interface AttendanceFacts {
   sideRequests: SideRequest[];
 }
 
+/**
+ * `fixture` was ADDED on 2026-09-06, and the reason is a measurement
+ * rather than a hunch.
+ *
+ * Twelve tagged questions were replayed through the live pipeline
+ * against the real Sutton squad. The router caught 12/12; seven produced
+ * no answer, and FOUR of those seven were the same shape:
+ *
+ *   "@Match Time what time is kickoff"      → topic `other`
+ *   "@Match Time where are we playing"      → topic `other`
+ *   "@Match Time are we playing tuesday?"   → topic `other`
+ *   "@Match Time is the game still on"      → topic `other`
+ *
+ * `other` reaches `engine.ts`'s `default:` branch, which degrades — an
+ * operator note and not one word to the group. So the most ordinary
+ * question a Sunday-league group asks was silence, while the mega-prompt
+ * it is replacing answers it today and says so in its own words:
+ * *"Asking about squad numbers, venue, kickoff time … 21:30 at
+ * <venue>"* (`message-analyzer.ts:455-457`).
+ *
+ * `state.kickoffLabel` and `state.venue` are already loaded and already
+ * pre-formatted for exactly this. Nothing new is read; a topic that had
+ * nowhere to go now has one.
+ */
 export type QuestionTopic =
   | "squad"
   | "bench"
   | "count"
   | "person_status"
   | "phones"
+  /** is the match on, when does it kick off, where is it played */
+  | "fixture"
   | "stats"
   | "options"
   | "other";
@@ -400,11 +426,35 @@ export type SpeechIntent =
   | { kind: "guest_name_ask"; messageId: string; askerName: string | null; body: string }
   | { kind: "answer_bench"; messageId: string }
   | { kind: "answer_count"; messageId: string; statedCount: number | null }
+  /**
+   * "who's playing / list the players / show me the squad" — the ROSTER,
+   * rendered by `composeSquadStatusPost`.
+   *
+   * Split from `answer_count` on 2026-09-06. Both topics shared one
+   * intent, so "list the players" was answered "We're 6/14 for Tue
+   * 21:30, need 8 more 🙏" — the right answer to a different question,
+   * with not one name in it. It read correctly in production only
+   * because `route.ts:2393` swapped the string for the roster post, and
+   * §6.4's whole claim is that the composer produces the final words.
+   */
+  | { kind: "answer_squad"; messageId: string }
+  /** kickoff time and venue, and nothing else — see `QuestionTopic`. */
+  | { kind: "answer_fixture"; messageId: string }
   | { kind: "answer_person_status"; messageId: string; personRef: string; userId: string | null }
   | { kind: "answer_phones"; messageId: string }
   | { kind: "answer_stats"; messageId: string }
   | { kind: "answer_options"; messageId: string }
   | { kind: "teams_post"; messageId: string }
+  /**
+   * Asked to show the teams when none have been generated.
+   *
+   * `formatTeamsPost` over two empty arrays renders a team sheet with
+   * nobody on it, which the 2026-09-06 sweep produced verbatim. The
+   * shipped path already has the right answer for this
+   * (`route.ts:3711-3714`, "do NOT auto-generate"); this is that answer,
+   * as an intent, so the empty post cannot be composed at all.
+   */
+  | { kind: "teams_not_generated"; messageId: string }
   | { kind: "score_ack"; messageId: string; red: number; yellow: number }
   | { kind: "payment_ack"; messageId: string; payerName: string; count: number }
   | { kind: "reminder_ack"; messageId: string; phrase: string }

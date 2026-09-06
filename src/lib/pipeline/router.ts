@@ -73,6 +73,7 @@ Rules:
 2. A completed join stated about someone else IS other_att ("Ayoub snatched that spot").
 3. A relayed commitment IS other_att ("Najib said in as well").
 4. Moving, benching or swapping a NAMED PLAYER is other_att, never balancer. ONE list of players, however long or numbered, is a reposted squad roster and is other_att; balancer is only about the TWO team line-ups.
+4a. Asking to SEE who is playing — "who's in?", "show me the squad", "list the players", "who's playing tonight?" — is question. It asks for the ONE squad list the bot already holds. balancer is only for the TWO team line-ups (red and yellow), so "show me the teams" is balancer and "show me the squad" is not.
 5. An @mention of a person with in or out is other_att.
 6. A question mark does not make a message a question. If it also states that someone is joining or leaving ("can anyone replace me tonight?"), route the attendance. question is only for a message that ASKS FOR information the bot holds and states no change.
 7. When in doubt between none and anything else, choose the other route.

@@ -311,8 +311,8 @@ describe("a shape the composer cannot answer well goes to the analyzer", () => {
     expect(res.degradations.join(" ")).toMatch(/analyzer/i);
   });
 
-  it("owns the four topics answered from the database", async () => {
-    for (const topic of ["count", "bench", "phones"]) {
+  it("owns the six topics answered from the database", async () => {
+    for (const topic of ["count", "bench", "phones", "squad", "fixture"]) {
       const body = `@Match Time ${topic}?`;
       const { model } = stubModel({ [body]: { topic, personRef: "", statedCount: -1 } });
       const res = await run({ messages: [msg({ body, route: "question" })], model });
@@ -326,20 +326,45 @@ describe("a shape the composer cannot answer well goes to the analyzer", () => {
     expect([...res.ownedIds]).toHaveLength(1);
   });
 
-  it("hands back `who's playing?` — the composer answers it with a bare count", async () => {
-    // `engine.ts` sends topic `squad` to the same `answer_count` speech
-    // intent as topic `count`, which renders "We're 11/14, need 3 more".
-    // That is right for "how many" and wrong for "who". It reads
-    // correctly in production only because `route.ts:2393` swaps the
-    // string for the roster post — and relying on a regex in another
-    // module to turn a count into a roster is the opposite of §6.4.
+  it("answers `who's playing?` with the ROSTER, not with a count", async () => {
+    // This was a hand-back until 2026-09-06, because `engine.ts` sent
+    // topic `squad` to the same `answer_count` speech intent as topic
+    // `count` — "We're 11/14, need 3 more" to somebody who asked for
+    // names. It read correctly in production only because
+    // `route.ts:2393` swapped the string for the roster post, and
+    // relying on a regex in another module to turn a count into a roster
+    // is the opposite of §6.4. `answer_squad` renders
+    // `composeSquadStatusPost` directly instead.
     const body = "@Match Time who's playing?";
     const { model } = stubModel({
       [body]: { topic: "squad", personRef: "", statedCount: -1 },
     });
     const res = await run({ messages: [msg({ body, route: "question" })], model });
-    expect([...res.ownedIds]).toEqual([]);
-    expect(res.degradations.join(" ")).toMatch(/topic "squad" is not answered/);
+    expect([...res.ownedIds]).toHaveLength(1);
+    const reply = [...res.outcomes.values()][0].reply!;
+    expect(reply).toBe(
+      composeSquadStatusPost({ confirmed: ELEVEN.map(fullName), bench: [], maxPlayers: 14 }),
+    );
+    expect(reply).toContain(fullName("kemal"));
+  });
+
+  it("answers a fixture question from the match, with no count in it", async () => {
+    // Four of the twelve tagged questions in the 2026-09-06 live sweep
+    // were fixture questions — "what time is kickoff", "where are we
+    // playing", "are we playing tuesday", "is the game still on". Every
+    // one of them landed on topic `other` and produced SILENCE, which is
+    // §9's signature failure. They are answered from `kickoffLabel` and
+    // `venue`, and from nothing else.
+    const body = "@Match Time what time is kickoff";
+    const { model } = stubModel({ [body]: { topic: "fixture", personRef: "", statedCount: -1 } });
+    const res = await run({ messages: [msg({ body, route: "question" })], model });
+    expect([...res.ownedIds]).toHaveLength(1);
+    const reply = [...res.outcomes.values()][0].reply!;
+    expect(reply).toContain("Tue 21:30");
+    expect(reply).toContain("Goals North Cheam");
+    // A count would make `composeSquadStateReply` swap the whole answer
+    // for the roster, and the asker would get no time at all.
+    expect(displaysSquadState(reply)).toBe(false);
   });
 
   it("hands back a person question whose name does not resolve", async () => {
@@ -464,20 +489,31 @@ describe("a shape the composer cannot answer well goes to the analyzer", () => {
     },
   );
 
-  it("hands back `show the teams` when no teams have been generated yet", async () => {
-    // The shipped path answers "No teams generated yet — say 'generate
-    // the teams' and I'll sort them." (`route.ts:3729-3731`, and its
-    // comment "do NOT auto-generate"). `formatTeamsPost` over two empty
-    // lists renders a teams post with no players in it, so the shape is
-    // not owned rather than answered wrongly.
+  it("answers `show the teams` with the shipped sentence when none exist yet", async () => {
+    // Until 2026-09-06 this was a hand-back, because `formatTeamsPost`
+    // over two empty lists renders a team sheet with nobody on it — the
+    // live sweep produced exactly that: "⚽ *Teams for tonight* … *Red*:
+    // \n\n\n*Yellow*:\n\n\n". The fix is in the ENGINE, which now emits
+    // `teams_not_generated`, so the wrong post cannot be composed on any
+    // path rather than being refused on this one.
+    //
+    // The words and the reaction are the shipped path's, verbatim
+    // (`route.ts:3711-3714` / `3730-3734`): 🤔 for "there is nothing to
+    // show", 👀 for a real post.
     const { model } = stubModel({ [SHOW_TEAMS]: SHOW_FACTS });
     const res = await run({
       messages: [msg({ body: SHOW_TEAMS, route: "balancer" })],
       model,
       worldOpts: { confirmed: ELEVEN },
     });
-    expect([...res.ownedIds]).toEqual([]);
-    expect(res.degradations.join(" ")).toMatch(/no teams/i);
+    expect([...res.ownedIds]).toHaveLength(1);
+    const out = [...res.outcomes.values()][0];
+    expect(out.reply).toBe(
+      "No teams generated yet — say 'generate the teams' and I'll sort them.",
+    );
+    expect(out.react).toBe("\u{1F914}");
+    expect(out.intent).toBe("show_teams_request");
+    expect(res.writes).toEqual([]);
   });
 
   it("hands a message back when its extraction FAILED, rather than going silent", async () => {
@@ -816,7 +852,7 @@ describe("zero writes, structurally", () => {
 
 // ── 6. Why `stats` and `options` are NOT owned — measured, not asserted ──
 
-describe("the measured reason two topics stay with the analyzer", () => {
+describe("the measured reason three topics stay with the analyzer", () => {
   /**
    * The strings under test are produced by the REAL composer, not typed
    * out here. A hand-written approximation would keep passing after
@@ -899,6 +935,42 @@ describe("the measured reason two topics stay with the analyzer", () => {
         ),
       ),
     ).toBe(false);
+  });
+
+  it("the composed FIXTURE answer survives untouched", () => {
+    // The whole reason the fixture answer carries no count. A "21:30 at
+    // Goals North Cheam" that tripped `displaysSquadState` would be
+    // replaced by the squad roster, and the person who asked what time
+    // kickoff is would get a list of names and no time.
+    const text = say({ kind: "answer_fixture", messageId: "m" }, world({ confirmed: ELEVEN }));
+    expect(text).toContain("Tue 21:30");
+    expect(displaysSquadState(text)).toBe(false);
+  });
+
+  it("the composed TEAMS-NOT-GENERATED answer survives untouched", () => {
+    const text = say({ kind: "teams_not_generated", messageId: "m" }, world({ confirmed: ELEVEN }));
+    expect(displaysSquadState(text)).toBe(false);
+  });
+
+  it("the composed SQUAD answer IS replaced — by a byte-identical post", () => {
+    // `answer_squad` renders `composeSquadStatusPost` and so trips
+    // `displaysSquadState` by construction. That is harmless in a way
+    // the STATS and OPTIONS answers are not: `composeSquadStateReply`
+    // replaces it with `composeSquadStatusPost` over the same truth, so
+    // the group reads the same characters either way. Asserted rather
+    // than reasoned about, because "it gets replaced by an identical
+    // string" is exactly the kind of claim that silently stops being
+    // true when one of the two composers is edited.
+    const state = world({ confirmed: ELEVEN, bench: ["zair"] });
+    const text = say({ kind: "answer_squad", messageId: "m" }, state);
+    expect(displaysSquadState(text)).toBe(true);
+    expect(text).toBe(
+      composeSquadStatusPost({
+        confirmed: ELEVEN.map(fullName),
+        bench: [fullName("zair")],
+        maxPlayers: 14,
+      }),
+    );
   });
 
   it("the composed COUNT answer IS replaced — which is today's behaviour, not a regression", () => {

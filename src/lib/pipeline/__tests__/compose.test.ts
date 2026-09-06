@@ -15,7 +15,8 @@
 import { describe, it, expect } from "vitest";
 import { compose } from "../compose";
 import { decide } from "../engine";
-import { NOW, attendanceFacts, claim, msg, world } from "./helpers";
+import { composeSquadStatusPost, displaysSquadState } from "../../group-copy";
+import { NOW, attendanceFacts, claim, fullName, msg, world } from "./helpers";
 import type { EngineResult, SquadState } from "../types";
 
 function composeFor(state: SquadState, messages: Parameters<typeof decide>[0]["messages"]) {
@@ -304,5 +305,143 @@ describe("reactions are derived from the write outcome, not authored", () => {
       }),
     ]);
     expect(c.out.reacts[0].emoji).toBe("👋");
+  });
+});
+
+// ── §3.2 S16 / S19 · the three answers the 2026-09-06 sweep asked for ──
+//
+// Each of these was a SILENCE or the wrong answer before this block.
+// Twelve tagged questions were replayed against the live Sutton squad on
+// 2026-09-06: four produced nothing at all, three answered a roster
+// request with a bare count, and one posted a team sheet with nobody on
+// it.
+
+describe("a roster question is answered with the roster (2026-09-06 sweep)", () => {
+  it("renders the squad post itself, not `We're 11/14`", () => {
+    const state = world({ confirmed: [...TEN, "usama"], bench: ["karahan"] });
+    const { out } = composeFor(state, [
+      msg({
+        from: "adam",
+        body: "@Match Time who's playing?",
+        route: "question",
+        tagged: true,
+        facts: { kind: "question", topic: "squad", personRef: null, statedCount: null },
+      }),
+    ]);
+    const text = out.utterances[0].text;
+    // The point of the change: NAMES, and every one of them.
+    for (const who of ["Kemal Ediz", "Usama Tariq", "Karahan Yildiz"]) {
+      expect(text).toContain(who);
+    }
+    // Not an approximation of the roster post — the roster post.
+    expect(text).toBe(
+      composeSquadStatusPost({
+        confirmed: [...TEN, "usama"].map(fullName),
+        bench: ["Karahan Yildiz"],
+        maxPlayers: 14,
+      }),
+    );
+  });
+
+  it("says it ONCE when the same batch also changed the squad (§3.2 S36)", () => {
+    // The roster question is answered BY the batch's own squad post.
+    // Two rosters one line apart is the 2026-06-12 Sutton Lads shape.
+    const state = world({ confirmed: TEN });
+    const { out } = composeFor(state, [
+      msg({
+        from: "usama",
+        body: "in",
+        route: "self_att",
+        facts: attendanceFacts([claim({ polarity: "in" })]),
+      }),
+      msg({
+        from: "adam",
+        body: "@Match Time who's playing?",
+        route: "question",
+        tagged: true,
+        facts: { kind: "question", topic: "squad", personRef: null, statedCount: null },
+      }),
+    ]);
+    expect(out.utterances.filter((u) => /Playing:/.test(u.text))).toHaveLength(1);
+  });
+});
+
+describe("a fixture question is answered from the match (2026-09-06 sweep)", () => {
+  const FIXTURE = {
+    kind: "question" as const,
+    topic: "fixture" as const,
+    personRef: null,
+    statedCount: null,
+  };
+
+  it("states the kickoff and the venue, and invents neither", () => {
+    const state = world({ confirmed: TEN });
+    const { out } = composeFor(state, [
+      msg({
+        from: "adam",
+        body: "@Match Time what time is kickoff",
+        route: "question",
+        tagged: true,
+        facts: FIXTURE,
+      }),
+    ]);
+    const text = out.utterances[0].text;
+    expect(text).toContain("Tue 21:30");
+    expect(text).toContain("Goals North Cheam");
+  });
+
+  it("must NOT carry a count, or the shipped composer replaces it with the roster", () => {
+    // `displaysSquadState` rule (c): an `N/M` beside squad vocabulary is
+    // squad state, and `composeSquadStateReply` then drops the whole
+    // answer and posts the roster instead. Someone who asked "what time
+    // is kickoff" would get a squad list and no time.
+    const state = world({ confirmed: TEN });
+    const { out } = composeFor(state, [
+      msg({
+        from: "adam",
+        body: "@Match Time where are we playing",
+        route: "question",
+        tagged: true,
+        facts: FIXTURE,
+      }),
+    ]);
+    expect(displaysSquadState(out.utterances[0].text)).toBe(false);
+  });
+
+  it("drops the venue rather than printing 'at' with nothing after it", () => {
+    const state = { ...world({ confirmed: TEN }), venue: "" };
+    const { out } = composeFor(state, [
+      msg({
+        from: "adam",
+        body: "@Match Time is the game still on",
+        route: "question",
+        tagged: true,
+        facts: FIXTURE,
+      }),
+    ]);
+    expect(out.utterances[0].text).toContain("Tue 21:30");
+    expect(out.utterances[0].text).not.toMatch(/\bat\s*$/);
+    expect(out.utterances[0].text).not.toMatch(/\bat\s*\./);
+  });
+});
+
+describe("showing teams that do not exist (2026-09-06 sweep)", () => {
+  it("says so, instead of posting two empty team lists", () => {
+    // The measured defect: `formatTeamsPost` over two empty arrays
+    // rendered "⚽ *Teams for tonight* … *Red*:\n\n\n*Yellow*:\n\n\n" —
+    // a team sheet with nobody on it.
+    const state = world({ confirmed: TEN });
+    const { out } = composeFor(state, [
+      msg({
+        from: "elvin",
+        body: "@Match Time show me the teams",
+        route: "balancer",
+        tagged: true,
+        facts: { kind: "teams", action: "show", includeRefs: [], teamNames: null, swaps: [] },
+      }),
+    ]);
+    const text = out.utterances[0].text;
+    expect(text).toMatch(/no teams generated yet/i);
+    expect(text).not.toContain("Teams for tonight");
   });
 });
