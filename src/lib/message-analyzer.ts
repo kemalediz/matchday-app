@@ -47,6 +47,7 @@ import {
   buildFormatSwitchFacts,
   renderFormatSwitchContext,
 } from "./format-switch";
+import { computeChaseRisk } from "./chase-risk";
 
 // Sonnet (2026-05-19, Kemal): the per-message analyzer makes nuanced
 // calls (team-swap vs drop, conditional vs standing, "is X
@@ -1389,22 +1390,89 @@ export async function composeChaseText(input: {
   }
   alternatives.sort((x, y) => y.totalPlayers - x.totalPlayers);
 
-  const matchContext = buildMatchContextBlock({
+  return composeChaseFromMatch({
+    kind: input.kind,
     orgName: org.name,
     match,
     teamLabels: resolveTeamLabels(match, org, match.activity.sport),
     alternatives,
+    logLabel: `group=${input.groupId}`,
   });
+}
+
+/** The squad state one chase is composed against. Structural on purpose:
+ *  `composeChaseText` passes a Prisma row, the live at-risk harness
+ *  (`scripts/chase-at-risk-live.ts`) passes an in-memory object, and
+ *  both take the identical path from here on. */
+export interface ChaseComposeMatch {
+  date: Date;
+  status: string;
+  maxPlayers: number;
+  activity: { name: string; venue: string };
+  attendances: Array<{
+    status: string;
+    user: { id: string; name: string | null; phoneNumber?: string | null };
+  }>;
+}
+
+/**
+ * Everything `composeChaseText` does EXCEPT read the database: build the
+ * prompt, call the model, clean and proximity-correct the result.
+ *
+ * Split out on 2026-09-06 so the at-risk cancellation warning could be
+ * validated against the real model in a state production is not
+ * currently in (6/14 at ~57h out is deliberately NOT at risk) without
+ * writing a single row to a customer's database.
+ */
+export async function composeChaseFromMatch(input: {
+  kind: ChaseKind;
+  orgName: string;
+  match: ChaseComposeMatch;
+  teamLabels?: [string, string];
+  alternatives?: Array<{ sportName: string; totalPlayers: number }>;
+  /** Identifies the caller in the two BROKEN log lines. */
+  logLabel?: string;
+}): Promise<string | null> {
+  const anthropic = getAnthropic();
+  if (!anthropic) return null;
+  const { match } = input;
+  const label = input.logLabel ?? input.orgName;
+
+  const matchContext = buildMatchContextBlock({
+    orgName: input.orgName,
+    match,
+    teamLabels: input.teamLabels,
+    alternatives: input.alternatives,
+  });
+
+  // AT RISK — decided HERE, in code, and only ever handed to the model
+  // as a finished verdict (src/lib/chase-risk.ts). "Close" and "many
+  // missing" are not things a prompt may be left to judge: the answer
+  // would flip run to run, and a cancellation warning that appears half
+  // the time is worse than one that never appears. Same discipline as
+  // the format-switch block above it.
+  const risk = computeChaseRisk({
+    kickoff: match.date,
+    confirmedCount: match.attendances.filter((a) => a.status === "CONFIRMED").length,
+    maxPlayers: match.maxPlayers,
+  });
+  // The 17:00 recap is the only kind that escalates. The pre-kickoff
+  // kinds already carry their own urgency in the prompt; stacking a
+  // second warning on top would read as panic.
+  const atRisk = input.kind === "daily-in-list" && risk.atRisk;
 
   // Same cache split as analyzeBatch: matchContext is the 1h-cached
   // prefix, the clock block rides with the uncached compose prompt.
   // This call site had the identical cache-buster (it caches the very
   // same matchContext string), so every scheduled chase was paying a
   // cache WRITE for the whole block.
+  //
+  // The at-risk block goes in the SAME uncached tail, for exactly that
+  // reason: it appears and disappears as the clock crosses 48h, so it is
+  // volatile content by definition and may never sit in a cached prefix.
   const matchClock = buildMatchClockBlock(match.date);
-  const composePrompt = matchClock
-    ? `${matchClock}\n\n${buildChaseComposePrompt(input.kind)}`
-    : buildChaseComposePrompt(input.kind);
+  const chasePrompt = buildChaseComposePrompt(input.kind, { atRisk });
+  const composePrompt = matchClock ? `${matchClock}\n\n${chasePrompt}` : chasePrompt;
 
   try {
     const response = await anthropic.messages.create({
@@ -1447,7 +1515,7 @@ export async function composeChaseText(input: {
     if (response.stop_reason === "max_tokens") {
       console.error(
         `[analyzer] BROKEN: composeChaseText hit the ${CHASE_COMPOSE_MAX_TOKENS}-token ` +
-          `cap for kind=${input.kind} group=${input.groupId} — the composed text was ` +
+          `cap for kind=${input.kind} ${label} — the composed text was ` +
           `TRUNCATED mid-sentence and has been discarded. The chase will fall back to ` +
           `STATIC text. If this recurs, the cap is too low for this group's roster.`,
       );
@@ -1477,7 +1545,7 @@ export async function composeChaseText(input: {
     // instead of the composed roster / tentative / dropped summary.
     console.error(
       `[analyzer] BROKEN: composeChaseText threw for kind=${input.kind} ` +
-        `group=${input.groupId} — the chase will fall back to STATIC text, ` +
+        `${label} — the chase will fall back to STATIC text, ` +
         `losing the roster/tentative/dropped summary.`,
       err,
     );
@@ -1673,7 +1741,55 @@ If an "Alternative formats available" block is in the context AND the squad is s
 
 Tone: the group's tone — casual, terse, no corporate fluff. No emoji soup.`;
 
-function buildChaseComposePrompt(kind: ChaseKind): string {
+/**
+ * The at-risk escalation for the 17:00 daily chase.
+ *
+ * Present ONLY when `computeChaseRisk` says so, and absent BYTE FOR BYTE
+ * otherwise — the healthy prompt is 51 weeks of the year and must not
+ * change at all. The model is handed the verdict; it never reaches it.
+ * See `src/lib/chase-risk.ts` for why that is not negotiable.
+ *
+ * Lives in the UNCACHED tail of the request (the per-kind compose
+ * instruction), never in the 1h-cached Match Context or system prompt —
+ * this string appears and disappears as the clock crosses 48h, and a
+ * conditional inside a cached prefix would turn every scheduled chase
+ * from a $0.30/MTok cache read into a $6/MTok cache write.
+ */
+const AT_RISK_BLOCK: string[] = [
+  "",
+  "⚠️ THIS MATCH IS AT RISK. The server decided that — you did not, and you",
+  "cannot. Never count the squad yourself, and never write any of what",
+  "follows when these lines are absent.",
+  "Two extra things belong in the lead, in this order:",
+  "1. Push harder than usual. Say how many are still needed (the figure is",
+  "   in the Match Context, do not derive your own) and make it easy to say",
+  "   yes. Warm and direct, the group's own voice: no corporate",
+  "   cheerleading, and no guilt-tripping anyone who has already said",
+  "   they're out.",
+  "2. Say plainly that the match will have to be called off if we can't find",
+  "   the numbers in time. Once, as a fact, not a threat, and never blame a",
+  "   person for it.",
+  "Whose call that is: the group's, never yours. Write it as",
+  "\"we'll have to call it off\", or \"the game's off\". NEVER \"I will cancel",
+  "the match\", never \"I'm cancelling this\", and never imply MatchTime is the",
+  "one calling it off — MatchTime reports the position, the organiser decides.",
+  "If the Match Context also gives you a format-switch line to copy",
+  "VERBATIM, put it straight after the call-off line: a switch is the",
+  "alternative to calling it off, so the two must read as one thought and",
+  "not as a contradiction. Being at risk changes NOTHING about the verbatim",
+  "rule — paste that line whole, opening words included. Do not replace its",
+  "opening clause with \"Alternatively\" or any other connective, do not fold",
+  "it into a sentence of your own, and do not reword it to flow better.",
+];
+
+function buildChaseComposePrompt(
+  kind: ChaseKind,
+  opts?: {
+    /** Server-computed verdict from `computeChaseRisk`. `daily-in-list`
+     *  only; every other kind ignores it. */
+    atRisk?: boolean;
+  },
+): string {
   const header = "## Chase type";
   switch (kind) {
     case "daily-in-list":
@@ -1683,6 +1799,7 @@ function buildChaseComposePrompt(kind: ChaseKind): string {
         "",
         "Purpose: quick squad-state recap so the group sees where the numbers are.",
         "Open with a one-liner that sets the scene (e.g. '🗓 Squad update') followed by the lead (who's out / count vs needed). End with the roster block.",
+        ...(opts?.atRisk ? AT_RISK_BLOCK : []),
       ].join("\n");
     case "match-day-morning":
       return [
