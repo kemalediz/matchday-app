@@ -24,7 +24,7 @@ MT_CORPUS_FILTER=S12 MT_SIM_RUNS=100 MT_SETTLE_LABEL=after-36 \
 
 Both write a machine-readable report to `.e2e/corpus/report-<mode>.json`.
 
-**49 cases; 36 run in CI.** The other 13 cannot be replayed deterministically and
+**53 cases; 36 run in CI.** The other 17 cannot be replayed deterministically and
 each must say why (see *Stubbed vs live*). The scoreboard states all three numbers
 on its first two lines — a case that never ran is never counted as a pass.
 

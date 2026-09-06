@@ -128,7 +128,13 @@ describe("uncached Match timing segment", () => {
     // (Regex, not a literal: ICU renders the month as "Sep" or "Sept"
     // depending on the Node build, and that is pre-existing behaviour
     // this change must not touch.)
-    expect(clockAt("2026-08-29T20:30:00.000Z")).toMatch(/\*Playing Tue 1 Sept? /);
+    //
+    // The trailing ` ` this pattern used to require was the bug, not the
+    // spec: it matched "*Playing Tue 1 Sept 21:30:*", the kickoff time
+    // having leaked into the DAY label via a `split(" at ")` that never
+    // split. See `chase-lead-reads-as-english.test.ts`. The header is a
+    // day, so the assertion is now that it ENDS there.
+    expect(clockAt("2026-08-29T20:30:00.000Z")).toMatch(/\*Playing Tue 1 Sept?:\*/);
   });
 
   it("is empty when there is no upcoming match", () => {
