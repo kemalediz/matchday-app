@@ -889,6 +889,22 @@ async function computeForMatch(
   //         picks up the future one. Effect: the announcement always
   //         reads "next match" from the group's perspective, never
   //         "next-but-one".
+  //     (c) Empty squad — this post is a cold open, so it must never land
+  //         on a fixture people have already signed up for. Incident
+  //         2026-09-06 (Sutton FC, live group): at 09:00 the bot
+  //         announced the Tue 8 Sept match — "Say IN to join. First 14
+  //         confirmed play", no roster, no count — when SIX players were
+  //         already confirmed. To the group it read as though the squad
+  //         had been wiped and everyone had to sign up again. No gate had
+  //         misfired: the match was created 27 Aug, gate (b) correctly
+  //         held the post while the 1 Sept match was still next, the bot
+  //         was muted 1-5 Sept, and this was the first 09:00-13:00 window
+  //         with the bot live. The post was simply the wrong message for
+  //         the state. Kemal's call: "it shouldn't fire if the squad is
+  //         non-empty as we already announce at 5pm" — the 17:00 evening
+  //         update (§2) covers a fixture the moment anyone is in, and
+  //         unlike this template it carries the roster and the real
+  //         count. Suppression, not rewording.
   {
     const key = `${matchId}:announce-match`;
     const lh = londonHour(now);
@@ -904,12 +920,29 @@ async function computeForMatch(
         ? isNextUpcomingForPosting(siblingMatches, m)
         : false;
 
+    // "Non-empty" means CONFIRMED, deliberately — not "confirmed or
+    // bench". The announcement's only ask is "Say IN to join. First N
+    // confirmed play", so the thing it invites people to become is a
+    // confirmed player; while nobody holds a playing spot the ask is
+    // still literally true and the group has been told nothing yet.
+    // The odd case that separates the two definitions is a populated
+    // bench with ZERO confirmed. That is degenerate — the bench only
+    // fills once the squad is past maxPlayers, so it needs every
+    // confirmed player to drop with no bench promotion behind them — and
+    // in it announcing is still correct: the squad really is empty, N
+    // players really are needed, and the bench players are not being
+    // told their spot vanished (they keep it, and the 17:00 roster shows
+    // it). Requiring an empty bench too would suppress the announcement
+    // permanently on a fixture nobody is actually playing in.
+    const squadEmpty = confirmed.length === 0;
+
     if (
       !sentKeys.has(key) &&
       m.status === "UPCOMING" &&
       hoursUntilMatch > 24 &&
       inAnnounceWindow &&
-      isNextUpcoming
+      isNextUpcoming &&
+      squadEmpty
     ) {
       const dateStr = format(m.date, "EEEE d MMMM 'at' HH:mm");
       out.push({
