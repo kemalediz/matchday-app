@@ -847,15 +847,51 @@ export function buildMatchContextBlock(args: {
 }
 
 /**
+ * The kickoff DAY in London — "Tue 8 Sept". No time, ever.
+ *
+ * This used to be `kickoffLocal.split(" at ")[0]` over a single
+ * date-AND-time formatter, and that split never fired: en-GB renders
+ * weekday+day+month+hour+minute as "Tue 8 Sept, 21:30", the caller
+ * stripped the comma, and the ` at ` the split looked for had never
+ * existed. `[0]` was therefore the whole string, so every "day label" in
+ * this file silently carried the kickoff time — into the roster header
+ * ("*Playing Tue 8 Sept 21:30:*") and into `enforceProximity`'s
+ * `friendlyDay`, which is how a chase came to read "see you all on Tue 8
+ * Sept 21:30 at 21:30". Formatting the two halves separately is the only
+ * way this cannot come back.
+ */
+function londonDayLabel(date: Date): string {
+  return new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Europe/London",
+    weekday: "short",
+    day: "numeric",
+    month: "short",
+  }).format(date);
+}
+
+/** The kickoff wall-clock in London — "21:30". */
+function londonTimeLabel(date: Date): string {
+  return new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Europe/London",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(date);
+}
+
+/**
  * The VOLATILE half of the Match Context — kickoff wall-clock time, the
  * countdown, the proximity bucket and the roster header derived from it.
  *
- * Split out of `buildMatchContextBlock` on 2026-08-31. The wording and
- * the values are byte-for-byte what that function used to emit; only the
- * side of the cache breakpoint they sit on has changed. Callers MUST put
+ * Split out of `buildMatchContextBlock` on 2026-08-31. Callers MUST put
  * this in an uncached content block, immediately after the cached Match
  * Context, so the system prompt's references to "proximity=" and
  * "Use roster header:" in the Match Context still resolve.
+ *
+ * That split promised the values were "byte-for-byte" what the old
+ * function emitted, and they were — including its bug. The roster header
+ * carried the kickoff time ("*Playing Tue 8 Sept 21:30:*") until
+ * 2026-09-06; see `londonDayLabel`. It is a DAY label now.
  *
  * Everything here is recomputed from `Date.now()` on every call, which
  * is precisely why it cannot live in the cached prefix.
@@ -870,17 +906,8 @@ export function buildMatchClockBlock(matchDate: Date | null | undefined): string
       : `${Math.abs(hoursToKickoff).toFixed(1)}h since kickoff`;
   // Pre-format the kickoff in London time so the LLM doesn't have to
   // do TZ math and guess at BST/GMT. Format: "Tue 28 Apr at 21:30".
-  const kickoffLocal = new Intl.DateTimeFormat("en-GB", {
-    timeZone: "Europe/London",
-    weekday: "short",
-    day: "numeric",
-    month: "short",
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-  })
-    .format(matchDate)
-    .replace(/,/g, "");
+  const dayLabel = londonDayLabel(matchDate);
+  const kickoffLocal = `${dayLabel} at ${londonTimeLabel(matchDate)}`;
   // Proximity token drives how the LLM should title the roster block.
   const proximity =
     hoursToKickoff < 0
@@ -896,8 +923,8 @@ export function buildMatchClockBlock(matchDate: Date | null | undefined): string
     past: "*Squad:*",
     tonight: "*Playing tonight:*",
     tomorrow: "*Playing tomorrow:*",
-    "this-week": `*Playing ${kickoffLocal.split(" at ")[0]}:*`,
-    future: `*Playing ${kickoffLocal.split(" at ")[0]}:*`,
+    "this-week": `*Playing ${dayLabel}:*`,
+    future: `*Playing ${dayLabel}:*`,
   }[proximity];
   return [
     `## Current Match — timing (live, part of the Match Context above)`,
@@ -1473,20 +1500,16 @@ function computeProximity(date: Date): {
   proximity: "past" | "tonight" | "tomorrow" | "this-week" | "future";
   rosterHeader: string;
   friendlyDay: string; // "tonight" | "tomorrow" | "on Tue 28 Apr"
+  /** The same day with no leading preposition — "Tue 28 Apr". What goes
+   *  in after a preposition the sentence already has, or before a
+   *  possessive. See `replaceRelativeDay`. */
+  dayLabel: string;
 } {
   const hoursToKickoff = (date.getTime() - Date.now()) / (1000 * 60 * 60);
-  const kickoffLocal = new Intl.DateTimeFormat("en-GB", {
-    timeZone: "Europe/London",
-    weekday: "short",
-    day: "numeric",
-    month: "short",
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-  })
-    .format(date)
-    .replace(/,/g, "");
-  const dayPart = kickoffLocal.split(" at ")[0];
+  // See `londonDayLabel`: the day and the time are formatted separately
+  // because the old single-formatter-plus-split produced a "day part"
+  // that still had the kickoff time glued to it.
+  const dayPart = londonDayLabel(date);
 
   // Proximity bucket is calendar-day based, not raw hours: "tonight"
   // means the match is later today (London), "tomorrow" means
@@ -1527,7 +1550,43 @@ function computeProximity(date: Date): {
     "this-week": `on ${dayPart}`,
     future: `on ${dayPart}`,
   }[proximity];
-  return { proximity, rosterHeader, friendlyDay };
+  return { proximity, rosterHeader, friendlyDay, dayLabel: dayPart };
+}
+
+/** Prepositions that already supply the "on" in "on Tue 8 Sept". */
+const DAY_PREPOSITION = "on|for|at|by|before|after|until|till|from";
+
+/**
+ * Swap a relative day word ("tonight", "tomorrow", "this evening") for
+ * the real day, WITHOUT breaking the sentence it sits in.
+ *
+ * The naive `text.replace(/\btonight\b/g, "on Tue 8 Sept")` this
+ * replaces produced, in production copy, "we still need 8 players for on
+ * Tue 8 Sept's 7-a-side". Two grammatical facts have to be respected:
+ *
+ *   • a preposition already in the sentence supplies the "on"
+ *     — "for tonight" → "for Tue 8 Sept", never "for on Tue 8 Sept";
+ *   • a possessive attaches to the day, not to a preposition
+ *     — "tonight's game" → "Tue 8 Sept's game".
+ *
+ * With neither, the day needs its own preposition: "kickoff is tonight"
+ * → "kickoff is on Tue 8 Sept".
+ */
+function replaceRelativeDay(
+  text: string,
+  word: string,
+  dayLabel: string,
+  friendlyDay: string,
+): string {
+  const re = new RegExp(
+    `(\\b(?:${DAY_PREPOSITION})\\s+)?\\b${word}\\b(['’]s)?`,
+    "gi",
+  );
+  return text.replace(re, (_m, prep?: string, possessive?: string) => {
+    if (possessive) return `${prep ?? ""}${dayLabel}${possessive}`;
+    if (prep) return `${prep}${dayLabel}`;
+    return friendlyDay;
+  });
 }
 
 /**
@@ -1540,7 +1599,7 @@ function computeProximity(date: Date): {
  *     alone unless proximity is further out.
  */
 export function enforceProximity(text: string, matchDate: Date): string {
-  const { proximity, rosterHeader, friendlyDay } = computeProximity(matchDate);
+  const { proximity, rosterHeader, friendlyDay, dayLabel } = computeProximity(matchDate);
 
   // Swap any "*Playing …:*" roster header to the correct one.
   let out = text.replace(/\*Playing [^*\n]+?:\*/gi, rosterHeader);
@@ -1553,24 +1612,21 @@ export function enforceProximity(text: string, matchDate: Date): string {
   if (proximity !== "tonight") {
     // Replace "tonight" / "this evening" with friendly-day phrasing
     // ONLY in the lead text (not inside the roster itself, which
-    // shouldn't contain either word at this point).
-    out = out.replace(/\btonight\b/gi, friendlyDay);
-    out = out.replace(/\bthis evening\b/gi, friendlyDay);
+    // shouldn't contain either word at this point). `replaceRelativeDay`
+    // rather than a bare `String.replace`: the bare version produced
+    // "for on Tue 8 Sept's 7-a-side" in production copy.
+    out = replaceRelativeDay(out, "tonight", dayLabel, friendlyDay);
+    out = replaceRelativeDay(out, "this evening", dayLabel, friendlyDay);
   }
   if (proximity !== "tomorrow" && proximity !== "tonight") {
-    out = out.replace(/\btomorrow\b/gi, friendlyDay);
+    out = replaceRelativeDay(out, "tomorrow", dayLabel, friendlyDay);
   }
 
   // Catch "off-by-1h" mistakes in HH:MM times. The LLM occasionally
   // outputs the UTC offset (20:30) when it should output the London
   // wall-clock (21:30) — usually because it "helpfully" applied the
   // timezone offset itself. Replace the UTC HH:MM with the London one.
-  const londonHm = new Intl.DateTimeFormat("en-GB", {
-    timeZone: "Europe/London",
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-  }).format(matchDate);
+  const londonHm = londonTimeLabel(matchDate);
   const utcHm = new Intl.DateTimeFormat("en-GB", {
     timeZone: "UTC",
     hour: "2-digit",

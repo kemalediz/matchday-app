@@ -85,7 +85,16 @@ For each attendance claim in the message, return:
   contingent   true if the commitment depends on something ("if you're short", "if my back holds up", "happy to drop if you find someone")
   conditionOn  "squad" if the condition is about the squad or the team's needs, "self" if it is about the person themselves, otherwise "none"
   tense        "present" now, "future" a commitment about an upcoming match INCLUDING a standing one ("count me in whenever you are short"), "past" reporting something that already happened ("I was in last week"), "hypothetical" a counterfactual about something that is not the case ("if I WAS in the team it would not be ruined"). A condition attached to a real future commitment is NOT hypothetical: use future and set contingent
-  basis        what the message DOES about the person's place. "decision" it says they are playing or not playing: "I'm in", "count me in", "I'm out", "can't make it", "I'll be there". "availability" it reports where they will be or what they can do, and leaves the question unanswered: "I will be back Tuesday week", "I land Monday", "I'm away that week", "I'm free after the 5th", "I'm around if you need me". The test is whether someone reading the message alone would know the person's answer, or only their circumstances. "I'm in for next Tuesday" names a day and is still a decision; "I will be back Tuesday week" names a day and is not
+  basis        what the message DOES about the person's place. Read the VERB the message uses about that person, and nothing else:
+                 the verb acts on the SQUAD — it asks for, claims, or gives up a place: "I'm in", "put me down", "stick me down", "count me in", "add me", "I'll take a spot", "I'll be the 14th", "count me as the 14th", "consider me as the 14th", "happy to fill in", "I'll be there", "I'm out", "can't make it" -> "decision"
+                 the verb acts on the PERSON — it describes their own state, whereabouts or ability, and leaves their place unanswered: "I'm free", "I'm around", "I'm available", "I'm about", "I will be back Tuesday week", "I land Monday", "I'm away that week", "I'm free after the 5th" -> "availability"
+               A courtesy on the END of a state description does not promote it into a decision. "if you need me", "if you're short", "if you're stuck", "let me know", "give me a shout" are offers of goodwill, not asks for a place: the person has told you where they will be, not asked to be put in. The verb in front decides; the courtesy behind never does. These four are settled, and they are settled this way:
+                 "I'm free Tuesday if you need me"          -> availability, the verb is "I'm free"
+                 "I'm around if you're short"               -> availability, the verb is "I'm around"
+                 "put me down if you're short"              -> decision, "put me down" asks for the place
+                 "count me as the 14th if you need one"     -> decision, "count me as the 14th" claims the place
+               When a message carries BOTH, the place verb wins: "I'm free Tuesday, put me down" is a decision.
+               Naming a day settles nothing either way: "I'm in for next Tuesday" names a day and is a decision; "I will be back Tuesday week" names a day and is not.
   reported     true when relaying what someone else said ("Najib said he's in")
   confidence   0 to 1
 
