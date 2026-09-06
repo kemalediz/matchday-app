@@ -11,10 +11,12 @@
  *      Four routes migrating one per week need the same property
  *      pairwise, and a shared `on()` helper would not give it — a
  *      loosened spelling would loosen all of them at once.
- *   3. A RESERVED NAME IS NOT AN ENABLED ONE. `SCORE_ENGINE_ENABLED`
- *      and `ADMIN_OPS_ENGINE_ENABLED` are written down so the next
- *      change cannot pick a different spelling; setting either must do
- *      nothing at all, because nothing owns those routes yet.
+ *   3. A FLAG ONLY EXISTS ONCE IT OWNS ITS ROUTE. Part 1 kept
+ *      `SCORE_ENGINE_ENABLED` and `ADMIN_OPS_ENGINE_ENABLED` as reserved
+ *      names nothing read; part 2 honours them because
+ *      `score-engine-batch.ts` and `admin-ops-engine-batch.ts` exist.
+ *      The tests below assert both halves: the reserved SPELLINGS were
+ *      the ones adopted, and each flag turns on exactly its own route.
  */
 import fs from "node:fs";
 import os from "node:os";
@@ -22,9 +24,13 @@ import path from "node:path";
 import { describe, it, expect, afterAll } from "vitest";
 import { isAttendanceEngineEnabled, isRouterGateEnabled, routerIsNeeded } from "../gate";
 import {
+  ADMIN_OPS_ENGINE_ROUTES,
+  ADMIN_OPS_FLAG,
+  ANSWER_ENGINE_ROUTES,
   BALANCER_FLAG,
   QUESTION_FLAG,
-  RESERVED_FLAGS,
+  SCORE_ENGINE_ROUTES,
+  SCORE_FLAG,
   STEP_SEVEN_HEADER,
   STEP_SEVEN_ROUTES,
   enabledStepSevenRoutes,
@@ -122,15 +128,87 @@ describe("step 7 per-route flags", () => {
     }
   });
 
-  it.each(Object.entries(RESERVED_FLAGS))(
-    "the reserved %s flag (%s) is not honoured — nothing owns that route yet",
-    (_route, flag) => {
-      expect([...enabledStepSevenRoutes({ [flag]: "1" })]).toEqual([]);
-    },
-  );
+  it.each(ON)("SCORE_ENGINE_ENABLED=%s turns on `score` and nothing else", (v) => {
+    const routes = enabledStepSevenRoutes({ [SCORE_FLAG]: v });
+    expect([...routes]).toEqual(["score"]);
+    expect(stepSevenOwnsRoute("score", routes, SCORE_ENGINE_ROUTES)).toBe(true);
+    expect(stepSevenOwnsRoute("admin_ops", routes)).toBe(false);
+  });
+
+  it.each(OFF)("SCORE_ENGINE_ENABLED=%s leaves it off", (v) => {
+    expect([...enabledStepSevenRoutes({ [SCORE_FLAG]: v })]).toEqual([]);
+  });
+
+  it.each(ON)("ADMIN_OPS_ENGINE_ENABLED=%s turns on `admin_ops` and nothing else", (v) => {
+    const routes = enabledStepSevenRoutes({ [ADMIN_OPS_FLAG]: v });
+    expect([...routes]).toEqual(["admin_ops"]);
+    expect(stepSevenOwnsRoute("admin_ops", routes, ADMIN_OPS_ENGINE_ROUTES)).toBe(true);
+    expect(stepSevenOwnsRoute("score", routes)).toBe(false);
+  });
+
+  it.each(OFF)("ADMIN_OPS_ENGINE_ENABLED=%s leaves it off", (v) => {
+    expect([...enabledStepSevenRoutes({ [ADMIN_OPS_FLAG]: v })]).toEqual([]);
+  });
+
+  it("all four flags are pairwise independent", () => {
+    // §10's revert column is "per-route flag" in those words. Reverting
+    // the money must not revert the reads, and vice versa.
+    const FLAGS = [QUESTION_FLAG, BALANCER_FLAG, SCORE_FLAG, ADMIN_OPS_FLAG];
+    const ROUTE_OF: Record<string, Route> = {
+      [QUESTION_FLAG]: "question",
+      [BALANCER_FLAG]: "balancer",
+      [SCORE_FLAG]: "score",
+      [ADMIN_OPS_FLAG]: "admin_ops",
+    };
+    for (const flag of FLAGS) {
+      const env = Object.fromEntries(FLAGS.map((f) => [f, f === flag ? "1" : "0"]));
+      expect([...enabledStepSevenRoutes(env)]).toEqual([ROUTE_OF[flag]]);
+    }
+    const all = Object.fromEntries(FLAGS.map((f) => [f, "1"]));
+    expect([...enabledStepSevenRoutes(all)].sort()).toEqual([
+      "admin_ops",
+      "balancer",
+      "question",
+      "score",
+    ]);
+  });
+
+  it("each owner is scoped to the routes it has a handler for", () => {
+    // The trap this replaces: with every flag on and no `within`
+    // narrowing, `answer-batch.ts` would treat a `score` message as a
+    // candidate, pay for a question-extractor call on it, find no branch
+    // that matches, and own nothing. Not a failure — a bill.
+    const all = enabledStepSevenRoutes({
+      [QUESTION_FLAG]: "1",
+      [BALANCER_FLAG]: "1",
+      [SCORE_FLAG]: "1",
+      [ADMIN_OPS_FLAG]: "1",
+    });
+    expect(stepSevenOwnsRoute("score", all, ANSWER_ENGINE_ROUTES)).toBe(false);
+    expect(stepSevenOwnsRoute("admin_ops", all, ANSWER_ENGINE_ROUTES)).toBe(false);
+    expect(stepSevenOwnsRoute("question", all, SCORE_ENGINE_ROUTES)).toBe(false);
+    expect(stepSevenOwnsRoute("score", all, ADMIN_OPS_ENGINE_ROUTES)).toBe(false);
+    // …and the three lists together are exactly step 7's routes, with no
+    // route owned twice.
+    const owners = [...ANSWER_ENGINE_ROUTES, ...SCORE_ENGINE_ROUTES, ...ADMIN_OPS_ENGINE_ROUTES];
+    expect([...owners].sort()).toEqual([...STEP_SEVEN_ROUTES].sort());
+    expect(new Set(owners).size).toBe(owners.length);
+  });
+
+  it("no flag name is left RESERVED — every one of them owns a route", () => {
+    // Part 1 kept `SCORE_ENGINE_ENABLED` and `ADMIN_OPS_ENGINE_ENABLED`
+    // as names nothing read, because `gate.ts:227` calls a flag that
+    // looks enabled and does nothing "the worst kind of flag". Part 2
+    // may honour them only because they now have owners. This asserts
+    // the promotion actually happened and used the reserved spellings.
+    expect(SCORE_FLAG).toBe("SCORE_ENGINE_ENABLED");
+    expect(ADMIN_OPS_FLAG).toBe("ADMIN_OPS_ENGINE_ENABLED");
+    expect([...enabledStepSevenRoutes({ [SCORE_FLAG]: "1" })]).toEqual(["score"]);
+    expect([...enabledStepSevenRoutes({ [ADMIN_OPS_FLAG]: "1" })]).toEqual(["admin_ops"]);
+  });
 
   it("only routes step 7 can actually own are listed", () => {
-    expect([...STEP_SEVEN_ROUTES]).toEqual(["question", "balancer"]);
+    expect([...STEP_SEVEN_ROUTES]).toEqual(["question", "balancer", "score", "admin_ops"]);
     // `unsure` is doubt and `none` is banter; neither is ever owned by
     // something that speaks (gate.ts:113-123 makes the same argument for
     // the attendance engine).

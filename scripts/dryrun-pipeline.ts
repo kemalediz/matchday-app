@@ -56,7 +56,10 @@
  * ── WHAT THE CASES ARE ───────────────────────────────────────────────
  * They are not synthetic. C1–C15 / D1–D3 / K1–K3 are real messages from
  * the group or real incidents; P1–P4 are the four probes that settle the
- * availability / standing-offer boundary. Each carries an `expect`
+ * availability / standing-offer boundary. S1–S3 / A1–A5 / R1–R5 are §10
+ * step 7 part 2's two writing routes — the score report, the payment
+ * credit, the reminder and the recruit blast Kemal asked about on
+ * 2026-09-06. Each carries an `expect`
  * string: what a human decided the right answer is. The harness does NOT
  * grade against it — it prints it next to what happened so you can. (The
  * graded, CI-runnable version of this idea is `e2e/corpus/`.)
@@ -144,6 +147,53 @@ const CASES: Case[] = [
   { id: "P2", who: "Ilkay", body: "I'm around if you're short", expect: "NO write — availability + politeness" },
   { id: "P3", who: "Ilkay", body: "put me down if you're short", expect: "WRITE — 'put me down' asks for the place (standing offer, S15a)" },
   { id: "P4", who: "Ilkay", body: "count me as the 14th if you need one", expect: "WRITE — claims the place (standing offer, S15a)" },
+
+  // ── S: the score route (§10 step 7 part 2) ────────────────────────
+  //
+  // Untagged on purpose: `score` is deliberately EXCLUDED from
+  // `ACTIONY_INTENTS` (interaction-contract.ts:125-129), so every real
+  // "we won 5-3" in a group is untagged and a tag gate here would refuse
+  // all of them.
+  { id: "S1", who: "Kemal", body: "Red won 5-3 last night", expect: "route=score, WRITE score 5-3 against the last match PLAYED (any of TEAMS_PUBLISHED | TEAMS_GENERATED | COMPLETED)" },
+  { id: "S2", who: "Zair", body: "we lost 2-6 lads, shocking", expect: "route=score. Zair must be a participant or an admin, or NO write — the §9 authorisation seatbelt" },
+  { id: "S3", who: "Kemal", body: "good game that", expect: "NOT a score. Must produce no score write" },
+
+  // ── A: the admin_ops route (§10 step 7 part 2) ────────────────────
+  //
+  // Payment and reminder both require the tag; the recruit blast does
+  // not, because PR #33's RECRUIT_COMMAND_IMPLIES_ADDRESSED makes an
+  // admin's recruit command a direct instruction to MatchTime.
+  { id: "A1", who: "Kemal", body: "@Match Time Amir paid for 4 players", tagged: true, expect: "route=admin_ops, action=bulk_payment, WRITE payment_credit (aggregate, namedCovered false)" },
+  { id: "A2", who: "Kemal", body: "@Match Time Amir paid for Faris and Adam", tagged: true, expect: "route=admin_ops, action=bulk_payment, namedCovered TRUE — a different write from A1" },
+  { id: "A3", who: "Zair", body: "@Match Time Amir paid for 4 players", tagged: true, expect: "NO write — only an admin may credit a payment (real money, live club)" },
+  { id: "A4", who: "Kemal", body: "@Match Time remind me tomorrow at 6 to bring the bibs", tagged: true, expect: "route=admin_ops, action=reminder, WRITE reminder with a RESOLVED sendAt — not the words" },
+  { id: "A5", who: "Kemal", body: "@Match Time remind me before the match", tagged: true, expect: "NO write — the resolver refuses a phrase it cannot read rather than guessing a day" },
+
+  // ── R: the recruit blast, the phrasing Kemal asked about ──────────
+  //
+  // Before this change every one of these routed `admin_ops` and came
+  // back as `admin action \"other\" has no deterministic handler`, so the
+  // ONLY thing that recognised them was the mega-prompt's
+  // `verdict.recruitRequest`.
+  { id: "R1", who: "Kemal", body: "@Match Time message all players who played in the last 5 matches to DM and invite them", tagged: true, expect: "route=admin_ops, action=recruit, lookbackMatches 5, WRITE recruit_blast. NO DM is sent from here — the route fires it after the batch" },
+  // MEASURED 2026-09-06: the model reads "the last few games" as 3, not
+  // as "unstated". That is a reading of the text and it is inside the
+  // clamp, so it is safe either way — but the expectation says what
+  // actually happens rather than what would have been tidier.
+  { id: "R2", who: "Kemal", body: "@Match Time can you DM the lads from the last few games and ask them to play", tagged: true, expect: "same. 'the last few' comes back as a small number (measured: 3), which the clamp accepts; an unstated lookback would be null -> the default of 5" },
+  // MEASURED 2026-09-06: the ROUTER needs the "invite them" half to call
+  // this `admin_ops`; "message everyone from the last 50 games" alone
+  // routes `question` 5/5. Phrased the way a real admin would, so the
+  // clamp is exercised on a live route rather than only in a unit test.
+  { id: "R3", who: "Kemal", body: "@Match Time DM everyone who played in the last 50 games and invite them", tagged: true, expect: "50 must be CLAMPED to 12 — a mass DM is how the WhatsApp account gets banned" },
+  // MEASURED 2026-09-06: untagged, the ROUTER calls this `question`, not
+  // `admin_ops`, so PR #33's tag-free path is not reached and the
+  // interaction contract refuses it. Recorded rather than asserted: it
+  // is a router property, not this step's, and the tagged R3 is what
+  // exercises the clamp.
+  { id: "R3b", who: "Kemal", body: "message everyone from the last 50 games", tagged: false, expect: "measured: routes `question`, so the contract's tag gate refuses it. The admin recruit path is reached only when the router says admin_ops" },
+  { id: "R4", who: "Zair", body: "@Match Time message all players who played in the last 5 matches and invite them", tagged: true, expect: "NO recruit_blast — only an admin may send one" },
+  { id: "R5", who: "Kemal", body: "@Match Time who played in the last 5 matches?", tagged: true, expect: "NOT recruit — asking to LIST the recent players is not asking to message them" },
 ];
 
 /**

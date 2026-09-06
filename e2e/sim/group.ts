@@ -119,7 +119,7 @@ export interface CompletedMatchSpec {
   /** null scores = unscored (waiting for a score). Default 3–2. */
   redScore?: number | null;
   yellowScore?: number | null;
-  status?: "COMPLETED" | "TEAMS_PUBLISHED";
+  status?: "COMPLETED" | "TEAMS_PUBLISHED" | "TEAMS_GENERATED";
   /** key → team, for Elo / rating flows. */
   teams?: Record<string, "RED" | "YELLOW">;
   postMatchEndFlow?: boolean;

@@ -263,7 +263,19 @@ export interface ScoreFacts {
 
 export interface AdminFacts {
   kind: "admin";
-  action: "bulk_payment" | "reminder" | "other";
+  /**
+   * `recruit` was added by §10 step 7 part 2, and it is the one admin
+   * action the mega-prompt could still do that nothing else could.
+   *
+   * "@Match Time message all players who played in the last 5 matches
+   * and invite them" routes `admin_ops` and used to come back as
+   * `other`, i.e. `admin action "other" has no deterministic handler` —
+   * so the ONLY thing in the system that recognised a recruit ask on
+   * this route was `verdict.recruitRequest` on the 19,850-token prompt
+   * (`route.ts:1548` → `inviteRecentPlayers`). A route cannot leave the
+   * mega-prompt while one of its real phrasings only works there.
+   */
+  action: "bulk_payment" | "reminder" | "recruit" | "other";
   /** bulk_payment */
   payerRef?: string;
   count?: number;
@@ -272,6 +284,16 @@ export interface AdminFacts {
    *  §3.2 S22: calendar arithmetic is `date-fns-tz`'s job, not the
    *  model's. The extractor hands back the words. */
   phrase?: string;
+  /** reminder — what the nudge should say, in the sender's own words
+   *  ("bring the bibs"). Absent when the message only names a time. */
+  note?: string;
+  /**
+   * recruit — how many recent matches the message asks to draw from
+   * ("the last 5 matches"). A FACT ABOUT THE TEXT: absent when the
+   * message names no number, and clamped to `[1, RECRUIT_LOOKBACK_MAX]`
+   * by the engine before it can reach a mass DM.
+   */
+  lookbackMatches?: number;
 }
 
 export interface NoFacts {
@@ -332,8 +354,47 @@ export interface SquadState {
   openOffers: BenchOffer[];
   teams: Array<{ userId: string; team: "RED" | "YELLOW" }>;
   teamLabels: [string, string];
+  /**
+   * THE LAST MATCH THAT HAS ACTUALLY BEEN PLAYED — the one a score
+   * report and a payment credit are about.
+   *
+   * WIDENED for §10 step 7 part 2, and the name is now slightly wrong on
+   * purpose rather than the selection being quietly wrong. Until this
+   * change the loaders asked for `status: "COMPLETED"` only, and
+   * `answer-batch.ts`'s header records why that blocked the `score`
+   * route: the shipped path selects from
+   * `TEAMS_PUBLISHED | TEAMS_GENERATED | COMPLETED` (`route.ts:3474-3479`),
+   * because a match only becomes `COMPLETED` when somebody records a
+   * score. A real Tuesday night therefore sits at `TEAMS_PUBLISHED` for
+   * ever if nobody ever reports one, and a `completedMatch` that only
+   * held `COMPLETED` rows would refuse the FIRST score of every match —
+   * which is every score that matters.
+   *
+   * The loaders now pick the most recent match whose KICKOFF PLUS
+   * DURATION has passed, in any of those three statuses. `status` and
+   * `isHistorical` travel with it so the two consumers can narrow it
+   * differently, which they do:
+   *
+   *   • `score` accepts all three statuses. That is the point.
+   *   • a payment credit is owned only when `status === "COMPLETED"` and
+   *     `!isHistorical`, which is exactly the shipped selector
+   *     (`route.ts:3801-3803`). See `admin-ops-engine-batch.ts`.
+   *
+   * ONE DELIBERATE NARROWING vs the shipped score path: it filters
+   * `redScore: null, yellowScore: null` in SQL and then takes the most
+   * recent ENDED row, so it walks BACK past a scored match to an older
+   * unscored one. This does not: it takes the most recent ended match
+   * whatever its score, and `handleScore` refuses to overwrite a result
+   * that is already recorded. Owning less on purpose — a score landing
+   * on a match two weeks older than the one the group is talking about
+   * is a worse outcome than the analyzer keeping the message.
+   */
   completedMatch: {
     id: string;
+    status: "TEAMS_GENERATED" | "TEAMS_PUBLISHED" | "COMPLETED";
+    /** A seeded backfill rather than a match this group played through
+     *  MatchTime. Never a payment-credit target. */
+    isHistorical: boolean;
     redScore: number | null;
     yellowScore: number | null;
     participantUserIds: string[];
@@ -348,6 +409,10 @@ export interface SquadState {
     attendance: boolean;
     paymentTracking: boolean;
     statsQa: boolean;
+    /** The per-org gate `route.ts:3113-3121` maps `reminder_request`
+     *  onto. A MoM-and-ratings-only org has it off, and MatchTime must
+     *  not queue a reminder DM for one. */
+    reminders: boolean;
   };
   /** Smaller formats the org has configured, for the options answer.
    *  Totals across both teams (`playersPerTeam * 2`). */
@@ -403,13 +468,64 @@ export type ProposedWrite =
       payerName: string;
       count: number;
       coveredUserIds: string[];
+      /**
+       * Did the message NAME the people covered, or just give a number?
+       *
+       * The shipped path branches on exactly this (`route.ts:3841-3886`)
+       * and the two branches are different writes: named → stamp
+       * `Attendance.paidAt` per row and create NO `PaymentCredit`
+       * (double-counting is the failure); a bare count → one
+       * `PaymentCredit` row. Inferring it from
+       * `coveredUserIds.length > 0` would be wrong in the one case that
+       * matters — a message that names two people, neither of whom
+       * resolves, would silently become an aggregate credit for a number
+       * nobody checked. The engine refuses that case outright, and this
+       * flag is what lets the apply layer tell the two apart without
+       * re-reading the facts.
+       */
+      namedCovered: boolean;
       sourceMessageId: string;
       reason: string;
     }
   | {
       kind: "reminder";
       userId: string;
+      /** The words as written ("on Monday"), kept for the audit trail.
+       *  Nothing downstream parses it — `sendAt` is what is queued. */
       phrase: string;
+      /**
+       * The resolved instant, in UTC. §3.2 S22 gives the calendar
+       * arithmetic to `date-fns-tz` and NOT to the model; `resolveReminderPhrase`
+       * is where that happens and it is a pure function of
+       * `(phrase, now)`. A phrase it cannot resolve produces no write at
+       * all, so this is never a guess.
+       */
+      sendAt: Date;
+      /** "Mon 8 Sep at 18:00" — London, rendered once, by the resolver
+       *  that knows whether a time of day was actually stated. */
+      whenLabel: string;
+      /** What the reminder is ABOUT, for the body of the DM. Falls back
+       *  to the message itself when the extractor named nothing, which
+       *  is always better than an empty nudge. */
+      note: string;
+      sourceMessageId: string;
+      reason: string;
+    }
+  | {
+      /**
+       * A DM blast to players from recent matches. NOT applied beside
+       * the other writes, and that is the whole point of modelling it —
+       * see `admin-ops-engine-batch.ts`'s `recruitRequest` outcome
+       * field. The 2026-09-01 incident was the blast running BEFORE the
+       * batch's attendance writes landed, so it counted a squad that the
+       * same message was about to change and told the owner it was full.
+       * The engine decides WHO may ask; the route decides WHEN it fires,
+       * which is after everything else in the batch.
+       */
+      kind: "recruit_blast";
+      /** Already clamped to `[1, RECRUIT_LOOKBACK_MAX]` by the engine.
+       *  `null` means "use `LOOKBACK_MATCHES`", the shipped default. */
+      lookbackMatches: number | null;
       sourceMessageId: string;
       reason: string;
     };
@@ -457,7 +573,12 @@ export type SpeechIntent =
   | { kind: "teams_not_generated"; messageId: string }
   | { kind: "score_ack"; messageId: string; red: number; yellow: number }
   | { kind: "payment_ack"; messageId: string; payerName: string; count: number }
-  | { kind: "reminder_ack"; messageId: string; phrase: string }
+  /** `whenLabel` is the RESOLVED time ("Mon 8 Sep at 18:00"). The
+   *  composer must never echo the raw phrase back at a player as if it
+   *  were a confirmation — "I'll nudge you on Monday" is not a promise
+   *  anybody can check, and `route.ts:3986-3992` already says the
+   *  resolved label out loud for exactly that reason. */
+  | { kind: "reminder_ack"; messageId: string; phrase: string; whenLabel: string | null }
   | { kind: "bench_offer_open"; messageId: string; replacingName: string }
   /** A resolved "Confirmed" whose writes were all idempotent. Saying
    *  nothing there is the silent-no-op failure in miniature. */

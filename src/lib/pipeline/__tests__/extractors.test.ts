@@ -330,6 +330,62 @@ describe("parseFacts (other routes)", () => {
     );
     expect(facts).toMatchObject({ kind: "admin", action: "bulk_payment", count: 4 });
   });
+
+  // ── §10 step 7 part 2's additions to the admin extractor ────────────
+  //
+  // `recruit` is the one admin action the mega-prompt could do that
+  // nothing else could: "@Match Time message all players who played in
+  // the last 5 matches and invite them" routes `admin_ops`, and before
+  // this it came back as `other`. A route cannot leave the mega-prompt
+  // while one of its real phrasings only works there.
+
+  it("admin · recruit, with a lookback the message stated", () => {
+    const { facts } = parseFacts(
+      "admin",
+      '{"action":"recruit","payerRef":"","count":0,"coveredRefs":[],"phrase":"","note":"","lookbackMatches":5}',
+      "wa-1",
+    );
+    expect(facts).toMatchObject({ kind: "admin", action: "recruit", lookbackMatches: 5 });
+  });
+
+  it("admin · a lookback of 0 is DROPPED, not carried as a number", () => {
+    // 0 is the schema's stand-in for "the message named no number", the
+    // same convention `statedCount` uses. Carrying it through would make
+    // the engine clamp 0 to 1 and blast a one-match window.
+    const { facts } = parseFacts(
+      "admin",
+      '{"action":"recruit","payerRef":"","count":0,"coveredRefs":[],"phrase":"","note":"","lookbackMatches":0}',
+      "wa-1",
+    );
+    expect(facts).toMatchObject({ kind: "admin", action: "recruit" });
+    expect("lookbackMatches" in facts).toBe(false);
+  });
+
+  it("admin · a reminder keeps the phrase AS WRITTEN and the note beside it", () => {
+    // §3.2 S22: the extractor hands back the words. `date-fns-tz`
+    // resolves them, in `reminder-time.ts`, from an injected `now`.
+    const { facts } = parseFacts(
+      "admin",
+      '{"action":"reminder","payerRef":"","count":0,"coveredRefs":[],"phrase":"tomorrow at 6","note":"bring the bibs","lookbackMatches":0}',
+      "wa-1",
+    );
+    expect(facts).toMatchObject({
+      kind: "admin",
+      action: "reminder",
+      phrase: "tomorrow at 6",
+      note: "bring the bibs",
+    });
+  });
+
+  it("admin · an unknown action still drops the whole shape rather than guessing", () => {
+    const { facts, degradations } = parseFacts(
+      "admin",
+      '{"action":"refund","payerRef":"","count":0,"coveredRefs":[],"phrase":"","note":"","lookbackMatches":0}',
+      "wa-1",
+    );
+    expect(facts.kind).toBe("none");
+    expect(degradations).toHaveLength(1);
+  });
 });
 
 // ── The call ───────────────────────────────────────────────────────────

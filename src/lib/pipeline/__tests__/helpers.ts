@@ -103,7 +103,10 @@ export interface WorldOpts {
   lastBotPost?: string | null;
   noMatch?: boolean;
   teams?: Record<string, "RED" | "YELLOW">;
-  completedMatch?: SquadState["completedMatch"];
+  /** The last match actually played. `status` and `isHistorical` default
+   *  to a real COMPLETED match; a test that cares (the score route
+   *  accepts three statuses, a payment credit accepts one) says so. */
+  completedMatch?: Partial<NonNullable<SquadState["completedMatch"]>> & { id: string };
   appearances?: SquadState["appearances"];
   features?: Partial<SquadState["features"]>;
   smallerFormats?: SquadState["smallerFormats"];
@@ -133,13 +136,23 @@ export function world(opts: WorldOpts = {}): SquadState {
     openOffers: opts.openOffers ?? [],
     teams: Object.entries(opts.teams ?? {}).map(([k, team]) => ({ userId: `u-${k}`, team })),
     teamLabels: ["Red", "Yellow"],
-    completedMatch: opts.completedMatch ?? null,
+    completedMatch: opts.completedMatch
+      ? {
+          status: "COMPLETED",
+          isHistorical: false,
+          redScore: null,
+          yellowScore: null,
+          participantUserIds: [],
+          ...opts.completedMatch,
+        }
+      : null,
     appearances: opts.appearances ?? [],
     lastBotPost: opts.lastBotPost ?? null,
     features: {
       attendance: true,
       paymentTracking: false,
       statsQa: true,
+      reminders: true,
       ...(opts.features ?? {}),
     },
     smallerFormats: opts.smallerFormats ?? [],
