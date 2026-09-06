@@ -1,11 +1,10 @@
 /**
  * Analyzer apply-path integration tests — /api/whatsapp/analyze.
  *
- * The LLM is STUBBED (MT_TEST_LLM_STUB_FILE): each test writes the
- * verdict it wants the "LLM" to return, POSTs a batch the way the Pi
- * bot does, and asserts the deterministic server-side apply path via
- * direct DB reads. No Anthropic call, no WhatsApp send (BotJobs are
- * just rows).
+ * Each test writes the verdict it wants the "LLM" to return, POSTs a
+ * batch the way the Pi bot does, and asserts the deterministic
+ * server-side apply path via direct DB reads. No Anthropic call, no
+ * WhatsApp send (BotJobs are just rows).
  *
  * Tests are serial and share cumulative state on the UPCOMING match:
  *   start    4/5 confirmed (admin, collector, player, third) + Ben on bench
@@ -13,8 +12,61 @@
  *   T2 IN    Zara "in" while full → BENCH
  *   T3 OUT   Pat drops            → DROPPED + open BenchSlotOffer
  *   T4 BENCH admin demotes Tom (registerFor BENCH) → BENCH, slot freed
- *   T5 net   reply says "Ian Innes has moved to the bench", NO
- *            registerFor → safety net still demotes Ian
+ *
+ * ════════════════════════════════════════════════════════════════════════
+ * ⚠️ §10 STEP 8 (2026-09-06): THIS FILE STUBS A DECIDER THAT NO LONGER
+ *    EXISTS. SIX OF ITS TESTS ARE EXPECTED TO FAIL; THREE WERE DELETED.
+ * ════════════════════════════════════════════════════════════════════════
+ *
+ * `setLlmStub` wrote the file `analyzeBatch` read. `analyzeBatch`,
+ * `SYSTEM_PROMPT`, `AnalysisVerdict` and `executeVerdict` are all
+ * deleted, so the stub now changes nothing: the server routes nothing,
+ * no owner claims anything, and every assertion below that something was
+ * WRITTEN will fail. See `e2e/helpers/stub.ts`'s header for the full
+ * account and the list of the ~20 specs in the same position.
+ *
+ * THE SIX SURVIVING VERDICT TESTS ARE LEFT FAILING, NOT DELETED. Each
+ * pins a shipped behaviour of the apply path — capacity, the bench-slot
+ * offer, a demote that must not open one, the batch-final squad post,
+ * the banter-drop guard — and all six are portable: the same case
+ * expressed as a route plus extractor facts, the way
+ * `e2e/sim/attendance-engine.spec.ts` now does it. Deleting them to make
+ * the suite green would delete the only end-to-end coverage of those
+ * paths at the exact moment the layer above them was replaced.
+ *
+ * ── THE THREE THAT WERE DELETED, AND WHERE EACH IS COVERED NOW ───────
+ *
+ * These three are NOT portable, because the thing they tested is gone
+ * rather than moved. Each asserted a SAFETY NET whose only input was a
+ * field on `AnalysisVerdict`, and §10 step 6/8 deleted all three nets
+ * from `analyze/route.ts`:
+ *
+ *   1. "bench-demote SAFETY NET: reply claims the move but registerFor
+ *      is empty → server still demotes" (Salman Shelly, 2026-06-11,
+ *      9afa357). Input: `verdict.reply`, a prose regex.
+ *   2. "OUT safety net must NOT fire on a group-level chase" (Kemal,
+ *      2026-05-28). Input: `verdict.reasoning`, a prose regex, in the
+ *      over-fire direction.
+ *   3. "OUT safety net: replacement_request with no registerAttendance
+ *      drops the sender" (Mojib/Habib, 2026-05-26, f35dfe6). Same input,
+ *      under-fire direction.
+ *
+ * COVERED NOW BY `src/lib/__tests__/seatbelt-deletion.test.ts`, which
+ * inverts rather than retires: it asserts the three markers are ABSENT
+ * from the route, that `executeVerdict` and the verdict types are gone,
+ * and — the load-bearing half — that each net's input (`intent`,
+ * `reasoning`, `reply`) appears in NO owned route's extractor schema, so
+ * the error class cannot be reintroduced silently. It also asserts each
+ * of the three incident DATES still has a replayable case in
+ * `e2e/corpus/incidents.jsonl`, which is what stops "the incident moved"
+ * from becoming "the incident was forgotten". The OUT net's own regex
+ * logic remains unit-tested against real production reasoning strings in
+ * `src/lib/__tests__/out-safety-net.test.ts`.
+ *
+ * Restating the tests here against a `setLlmStub` verdict would be
+ * asserting that a deleted guard still fires on input nothing can
+ * produce — a green tick over nothing, which is the shape this codebase
+ * hunts rather than writes.
  */
 import { test, expect, postAnalyze, resetDb } from "../fixtures";
 import { setLlmStub } from "../helpers/stub";
@@ -119,8 +171,11 @@ test("third-party BENCH demote: CONFIRMED → BENCH, slot freed, no duplicate", 
   ]);
   const r = res.results.find((x: { waMessageId: string }) => x.waMessageId === id);
   expect(r.react).toBe("🪑");
-  // Safety net must NOT double-announce when registerFor already carries
-  // the BENCH entry — the reply passes through exactly once, unmodified.
+  // The reply passes through exactly once, unmodified. This used to be
+  // "the safety net must NOT double-announce when registerFor already
+  // carries the BENCH entry"; the bench-demote net is deleted (§10 step
+  // 6/8), so there is nothing left that could double-announce and the
+  // assertion is now simply that a demote's reply is not rewritten.
   expect(r.reply).toContain("Tom Third has moved to the bench");
 
   const att = await attendance(db, U.third);
@@ -141,37 +196,17 @@ test("third-party BENCH demote: CONFIRMED → BENCH, slot freed, no duplicate", 
   expect(offer).toBeNull();
 });
 
-test("bench-demote SAFETY NET: reply claims the move but registerFor is empty → server still demotes", async ({ request, db }) => {
-  // Ian is CONFIRMED (from T1). The stubbed verdict ANNOUNCES his demote
-  // in the reply but — like the Salman Shelly incident — emits no
-  // registerFor. The route must synthesise the BENCH entry itself.
-  const pre = await attendance(db, U.fresh);
-  expect(pre?.status).toBe("CONFIRMED");
-
-  const id = msgId();
-  setLlmStub({
-    [id]: {
-      intent: "question",
-      registerFor: null,
-      reply: "Ian Innes has moved to the bench 👍 A confirmed slot is open.",
-      react: "✅",
-      confidence: 0.9,
-      reasoning: "stub: announce without write",
-    },
-  });
-  const res = await postAnalyze(request, [
-    { waMessageId: id, body: "@Match Time can you put Ian on the bench for now", authorPhone: "447700900001", authorName: "Alex Admin", botMentioned: true },
-  ]);
-  const r = res.results.find((x: { waMessageId: string }) => x.waMessageId === id);
-  expect(r.react).toBe("🪑");
-
-  const att = await attendance(db, U.fresh);
-  expect(att?.status).toBe("BENCH");
-});
-
 test("multiple squad-state replies collapse into ONE batch-final status post", async ({ request, db }) => {
-  // State here: 2/5 confirmed (Alex, Colin), bench = Ben + Zara + Tom +
-  // Ian, Pat dropped. Two stubbed verdicts both emit contradictory
+  // ⚠️ THE CUMULATIVE STATE IN THIS COMMENT IS STALE. The bench-demote
+  // net's test (deleted §10 step 8 — see the tombstone below) was what
+  // put Ian on the bench, so the numbers below no longer describe the
+  // world this test runs in. Left as written rather than re-derived,
+  // because the whole file needs porting off the dead verdict seam and a
+  // corrected count against a decider that does nothing would be a
+  // fiction dressed as a fix. Fix the counts as part of the port.
+  //
+  // State here (as of the version that last ran): 2/5 confirmed (Alex,
+  // Colin), bench = Ben + Zara + Tom + Ian, Pat dropped. Two stubbed verdicts both emit contradictory
   // squad-state replies (the Sutton Lads 2026-06-12 failure shape) —
   // the route must silence all but the last and replace it with the
   // deterministic status post computed from the post-batch DB snapshot.
@@ -231,70 +266,31 @@ test("banter-drop guard: third-party OUT for a player active in the batch is ref
   expect(att?.status).toBe("CONFIRMED"); // Colin untouched
 });
 
-test("OUT safety net must NOT fire on a group-level chase (Kemal 2026-05-28)", async ({ request, db }) => {
-  // The over-fire direction, and the reason `notDropping` exists. Alex
-  // asks the group for more players; the model correctly leaves
-  // registerAttendance null and SAYS SO in its reasoning. Dropping the
-  // admin who was chasing is the worse failure — it happened once.
-  // Reasoning verbatim from production AnalyzedMessage 2026-05-28.
-  const pre = await attendance(db, U.admin);
-  expect(pre?.status).toBe("CONFIRMED");
-
-  const id = msgId();
-  setLlmStub({
-    [id]: {
-      intent: "replacement_request",
-      registerAttendance: null,
-      react: "📣",
-      confidence: 0.9,
-      reasoning:
-        "Kemal (admin) is asking the group for more players — squad is 5/14, very short. " +
-        "This is a replacement_request type (b) — tentative/group-level rather than a personal drop, " +
-        "so registerAttendance stays null.",
-    },
-  });
-  await postAnalyze(request, [
-    { waMessageId: id, body: "@all we need more players pls", authorPhone: "447700900001", authorName: "Alex Admin" },
-  ]);
-
-  const att = await attendance(db, U.admin);
-  expect(att?.status).toBe("CONFIRMED"); // never dropped for chasing
-});
-
-test("OUT safety net: replacement_request with no registerAttendance drops the sender (Mojib 2026-05-26)", async ({ request, db }) => {
-  // The incident f35dfe6 was written for, replayed with the REAL
-  // reasoning string production emitted. Colin asks for cover for
-  // himself AND Ben; the "LLM" emits a registerFor OUT for Ben only and
-  // leaves its own sender un-dropped. Before this fix the net could not
-  // fire on this text at all — "definite drops" missed `drop\b`, and
-  // "chase nudge" tripped the notDropping veto — so Colin stayed in the
-  // squad and the group post asked for one replacement instead of two.
-  const pre = await attendance(db, U.collector);
-  expect(pre?.status).toBe("CONFIRMED");
-
-  const id = msgId();
-  setLlmStub({
-    [id]: {
-      intent: "replacement_request",
-      registerAttendance: null, // ← the bug: sender never dropped
-      registerFor: [{ name: "Ben Bench", action: "OUT" }],
-      react: "👋",
-      confidence: 0.9,
-      reasoning:
-        "Colin is asking the group to find replacements for himself and Ben (third-party). " +
-        "Both are definite drops. Squad goes from 14/14 to 12/14 — short by 2. " +
-        "Reply includes the chase nudge with roster showing open slots 8 and 9.",
-    },
-  });
-  await postAnalyze(request, [
-    { waMessageId: id, body: "is anyone able to replace me and Ben tonight?", authorPhone: "447700900002", authorName: "Colin Collector", botMentioned: true },
-  ]);
-
-  const att = await attendance(db, U.collector);
-  expect(att?.status).toBe("DROPPED"); // the sender, not just the named player
-  const ben = await attendance(db, U.bench);
-  expect(ben?.status).toBe("DROPPED");
-});
+// ─── THREE SAFETY-NET TESTS WERE DELETED HERE (§10 step 8, 2026-09-06) ──
+//
+//   • "bench-demote SAFETY NET: reply claims the move but registerFor is
+//      empty → server still demotes"      (Salman Shelly 2026-06-11, 9afa357)
+//   • "OUT safety net must NOT fire on a group-level chase"
+//                                          (Kemal 2026-05-28, the over-fire
+//                                           direction and why `notDropping`
+//                                           existed)
+//   • "OUT safety net: replacement_request with no registerAttendance drops
+//      the sender"                         (Mojib/Habib 2026-05-26, f35dfe6)
+//
+//   All three drove a prose regex over a field on `AnalysisVerdict`
+//   (`reply`, `reasoning`) and all three nets are deleted from
+//   `analyze/route.ts`. The file header carries the full argument and
+//   names where each is covered now:
+//   `src/lib/__tests__/seatbelt-deletion.test.ts` (the nets are gone AND
+//   their inputs are unrepresentable in every owned route's extractor
+//   schema, AND each incident date still has a case in
+//   `e2e/corpus/incidents.jsonl`), plus
+//   `src/lib/__tests__/out-safety-net.test.ts` for the OUT regex itself.
+//
+//   THE DELETION IS NOT "the incident stopped mattering". It is "the
+//   input the guard read cannot be produced any more": one `polarity`
+//   per claim cannot contradict itself, and no schema has a `reasoning`
+//   or a `reply` field for a regex to parse.
 
 test("duplicate waMessageId is deduped (bot retry safety)", async ({ request }) => {
   const id = msgId();

@@ -452,15 +452,22 @@ export interface SimBatchOpts {
   /** Recent chat history to send with the batch (oldest first). */
   history?: SimHistoryEntry[];
   /**
-   * §10 step 6, LIVE runs only: force the attendance engine on or off
-   * for THIS request, via the test-only `x-mt-attendance-engine` header
-   * (`src/lib/pipeline/gate.ts`, inert unless MT_TEST_MODE is "1").
+   * ⚠️ INERT since §10 step 8 (2026-09-06). Still sends the
+   * `x-mt-attendance-engine` header; nothing reads it.
    *
-   * The stub-file seam cannot do this on a live run — the suite pins
-   * `MT_TEST_ROUTER_STUB_FILE` empty there on purpose — and the dev
-   * server's environment is fixed at boot, so a live A/B has no other
-   * way to run one arm with the flag on and the next with it off in the
-   * same process. Omitted → the server's own flag decides.
+   * It existed for a live A/B: one arm with the attendance engine on and
+   * the next with it off, in one process, because the dev server's
+   * environment is fixed at boot. `ENGINE_HEADER` / `engineHeaderOverride`
+   * were deleted from `src/lib/pipeline/gate.ts` with
+   * `ATTENDANCE_ENGINE_ENABLED` itself — "there is no second arm to A/B
+   * against any more", in that file's words, because the flag's off
+   * position reverted to `analyzeBatch` and `analyzeBatch` is gone.
+   *
+   * Kept only so `e2e/corpus/current-analyzer-pipeline.ts` and its
+   * `AttendanceEnginePipeline` subclass still compile. Passing it
+   * changes nothing; a spec that relies on it is asserting an arm that
+   * cannot exist. `src/lib/pipeline/__tests__/gate.test.ts` holds the
+   * tombstone for the deleted header.
    */
   attendanceEngine?: boolean;
 }

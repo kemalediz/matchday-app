@@ -1,10 +1,12 @@
 /**
  * Pipeline #2 — router → extractors → engine → composer, IN DRY RUN.
  *
- * §10 step 2. The same 46 cases that judge the shipped analyzer judge
+ * §10 step 2. The same 46 cases that judged the shipped analyzer judge
  * this one, through the same adapter, against a world built by the same
  * builder. That is the whole point of `pipeline.ts` deliberately
- * containing no `AnalysisVerdict`, no intents and no `reasoning`.
+ * carrying only rows, speech, DMs and reacts — no verdicts, no intents,
+ * no `reasoning`. §10 step 8 deleted the analyzer and the adapter did
+ * not have to change.
  *
  * ZERO WRITES. This pipeline never calls `/api/whatsapp/analyze`, never
  * touches `registerAttendance`, and issues no INSERT or UPDATE of its

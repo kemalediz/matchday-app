@@ -1,10 +1,25 @@
 /**
  * INTERACTION CONTRACT — LIVE-LLM validation.
  *
- * Drives the REAL Anthropic model (no stubbed verdict) to confirm the
- * deterministic gate + strengthened SYSTEM_PROMPT hold together on the
- * classification-sensitive cases. Each case is run several times because
- * the model is non-deterministic; the gate must hold EVERY run.
+ * Drives the REAL Anthropic model (no stub anywhere) to confirm the
+ * deterministic contract gate holds on the classification-sensitive
+ * cases. Each case is run several times because the model is
+ * non-deterministic; the gate must hold EVERY run.
+ *
+ * ── WHAT IS UNDER TEST CHANGED WITH §10 STEP 8 (2026-09-06) ──────────
+ * This used to read "the deterministic gate + strengthened SYSTEM_PROMPT
+ * hold together". There is no SYSTEM_PROMPT. The five cases below are
+ * now a joint test of the ROUTER (does "If I was in the team it won't be
+ * ruined" route `self_att`?), the EXTRACTOR (does it come back
+ * `tense: past` / `contingent: true`, so no claim survives?), the ENGINE
+ * and `interaction-contract.ts` — which is unchanged in meaning and is
+ * still the thing the two silence assertions are about.
+ *
+ * EVERY ASSERTION HERE STILL DESCRIBES SHIPPED BEHAVIOUR, which is why
+ * the file is ported rather than deleted: a hypothetical must not
+ * register, an untagged question must be silent, a tagged one must be
+ * answered, a bare In must register and a bare Out must drop. The layer
+ * that decides each of those moved; none of them stopped mattering.
  *
  * Opt-in: this whole describe block only runs when MT_SIM_LIVE_LLM=1.
  * Default suites SKIP it entirely.
@@ -13,7 +28,17 @@
  *   set -a; source .env; set +a
  *   MT_SIM_LIVE_LLM=1 npx tsx e2e/run.ts sim/interaction-contract-live.spec.ts
  *
- * NEVER weaken these assertions — tune the SYSTEM_PROMPT until reliable.
+ * NO FLAGS NEEDED, and that is itself new: §10 step 8 deleted
+ * `ROUTER_GATE_ENABLED` and `ATTENDANCE_ENGINE_ENABLED`, and inverted
+ * step 7's four to default ON. DO NOT run this with a `*_ENGINE_ENABLED=0`
+ * in the environment — with an owner switched off, the two SILENCE cases
+ * pass for the wrong reason while the three ACTION cases fail, and a
+ * green pair of silence assertions reads as the contract working.
+ * `e2e/helpers/env.ts` forwards the surviving flags to the server under
+ * test when they are exported.
+ *
+ * NEVER weaken these assertions — fix the router, the extractor or the
+ * contract until they hold.
  */
 import type { APIRequestContext } from "@playwright/test";
 import { test, expect, resetDb } from "../fixtures";

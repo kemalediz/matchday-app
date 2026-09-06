@@ -3,15 +3,19 @@
  *
  * A "pipeline" is anything that can take a corpus case — the world, the
  * chat history, the messages — and report what happened to the database
- * and what MatchTime said. Today there is exactly one implementation,
- * wrapping the current mega-prompt analyzer. Step 2 of the redesign adds
- * a second (router → extractors → engine in dry-run) and the SAME cases
- * judge both.
+ * and what MatchTime said. When this was written there was exactly one
+ * implementation, wrapping the mega-prompt analyzer; there are now five,
+ * and the SAME cases judge all of them.
  *
  * That is the whole point, so keep this interface free of anything
- * specific to how today's analyzer works: no `AnalysisVerdict`, no
- * intents, no `reasoning`. A pipeline that never produces a verdict must
- * still be able to implement it.
+ * specific to how any one decider works: no verdicts, no intents, no
+ * `reasoning`. A pipeline that never produces a verdict must still be
+ * able to implement it.
+ *
+ * §10 step 8 deleted `AnalysisVerdict` altogether, which is this rule
+ * paying off rather than a reason to relax it. The boundary carries
+ * rows, member names, speech, DMs and reacts, and it did not have to
+ * change when the decider it was written around ceased to exist.
  */
 import type { APIRequestContext } from "@playwright/test";
 import type { TestDb } from "../helpers/test-db";

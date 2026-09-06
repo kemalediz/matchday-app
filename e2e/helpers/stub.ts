@@ -33,14 +33,21 @@
  * anywhere: what used to be "the model said register this person IN" is
  * now a `claim` with a `polarity`, which the ENGINE then decides about.
  *
- * ── WHAT THIS COSTS TODAY, STATED RATHER THAN DISCOVERED ─────────────
+ * ── WHAT THIS COSTS TODAY, MEASURED RATHER THAN ESTIMATED ────────────
  *
- * Twenty-one spec files still address the server through `verdict:` /
- * `setLlmStub` and are therefore driving a decider that no longer exists.
- * They do not fail to COMPILE — a `StubVerdict` is still a valid object —
- * they fail to MEAN anything: the server sees an untagged message, no
- * route, no facts, and (per `route.ts`'s "NOBODY OWNED IT" branch) stays
- * silent. Every assertion that something was written will fail.
+ * `npx tsx e2e/run.ts` on 2026-09-06, after §10 step 8:
+ *
+ *     40 failed · 150 passed · 80 skipped · 82 did not run   (1.5m)
+ *
+ * Every one of the 40 is a spec addressing the server through `verdict:`
+ * or `setLlmStub`. They do not fail to COMPILE — a `StubVerdict` is
+ * still a valid object — they fail to MEAN anything: the server gets no
+ * route it was told about, no facts, and (per `route.ts`'s "NOBODY OWNED
+ * IT" branch) stays silent, so every assertion that something was
+ * written fails. The 82 that "did not run" are the rest of the serial
+ * files those failures aborted, so the real number is larger.
+ *
+ * The files still on the dead seam:
  *
  *   e2e/api/analyze-honest-ack.spec.ts      e2e/sim/recruit.spec.ts
  *   e2e/api/analyzer.spec.ts                e2e/sim/router-gate.spec.ts
@@ -60,15 +67,35 @@
  * offers, the interaction contract, the batch-final squad post — and the
  * port is mechanical but not small: every `verdict:` becomes a
  * `setRouterStub({ bodies })` entry plus a `setExtractorStub({ bodies })`
- * entry, and the step-5/6/7 flags have to be turned on per request
- * (`enabled`, `engine`, `engineRoutes` below). Deleting them to make the
+ * entry. There is no longer a flag to turn on for the attendance path
+ * (`ROUTER_GATE_ENABLED` and `ATTENDANCE_ENGINE_ENABLED` were deleted in
+ * the same change) and step 7's four routes default ON, so a port is
+ * usually just the two `bodies` maps; `engineRoutes` below is for the
+ * cases that need a step-7 route explicitly on or off. Deleting them to make the
  * suite green would delete the only end-to-end coverage of the apply
  * path; a half-done port that passes would be worse still. The list is
  * here so the size of the remaining job is a fact rather than a
  * discovery.
  *
  * `e2e/sim/attendance-engine.spec.ts` is the worked example of what a
- * ported spec looks like.
+ * ported spec looks like — 25/25 green against the pipeline's seams,
+ * including four cases whose MEANING changed rather than their
+ * mechanism, each documented at its own site.
+ *
+ * TWO OF THE FORTY NEED AN INVERSION, NOT A PORT, and they are the ones
+ * to read first because the behaviour they assert is genuinely gone:
+ *
+ *   • `e2e/sim/attendance-engine-overload.spec.ts` — "TOTAL overload:
+ *     every extraction fails and the analyzer takes the whole batch".
+ *     There is no analyzer. Every message is now LOST, loudly. The same
+ *     inversion is already written out in
+ *     `attendance-engine.spec.ts`'s "an extractor failure now LOSES the
+ *     write, and says so".
+ *   • `e2e/sim/router-gate.spec.ts` — "with the gate OFF, the batch
+ *     reaches the analyzer exactly as it does today". `ROUTER_GATE_ENABLED`
+ *     was deleted along with the analyzer it reverted to; there is no
+ *     gate-off state to test. `src/lib/pipeline/__tests__/gate.test.ts`
+ *     holds the tombstone.
  */
 import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
@@ -128,12 +155,27 @@ export function clearLlmStub(): void {
  * file's existence.
  */
 export interface RouterStub {
+  /**
+   * ⚠️ INERT since §10 step 8 (2026-09-06). `enabled` overrode
+   * `ROUTER_GATE_ENABLED` and `engine` overrode
+   * `ATTENDANCE_ENGINE_ENABLED`; BOTH FLAGS ARE DELETED from
+   * `pipeline/gate.ts`, and `RouterStubConfig` there no longer declares
+   * either field. A stub file carrying them parses and selects nothing.
+   *
+   * KEPT so the ~20 specs that pass them still compile, and because the
+   * fields are harmless: the reader ignores unknown keys by
+   * construction. `gate.ts`'s essay is the place to read WHY the flags
+   * went — in short, their "off" position reverted to `analyzeBatch`,
+   * and `ATTENDANCE_ENGINE_ENABLED=0` would now mean NOBODY handles
+   * `self_att` / `other_att` / `offer` / `unsure`. Do not write a new
+   * spec that sets either: it will read as configuration and be none.
+   */
   enabled?: boolean;
-  floor?: boolean;
-  /** Overrides ATTENDANCE_ENGINE_ENABLED (§10 step 6). Carried on the
-   *  ROUTER stub because the engine needs the router's answer anyway,
-   *  and one file per request is easier to reason about than two. */
+  /** See `enabled` — INERT since §10 step 8. */
   engine?: boolean;
+  /** Overrides ROUTER_GATE_FLOOR_ENABLED. The only boolean on this stub
+   *  that still selects anything. */
+  floor?: boolean;
   /**
    * Which of §10 step 7's routes this request owns — `question`,
    * `balancer`, `score`, `admin_ops`. Read by
@@ -147,9 +189,11 @@ export interface RouterStub {
    * Before step 8 that only meant the mega-prompt answered instead; now
    * it means silence, so the seam has to be expressible here.
    *
-   * Omitted → the env flags, which are off. `[]` → own nothing, stated
-   * rather than defaulted (the baseline arm of an A/B needs to be able
-   * to say that).
+   * Omitted → the env flags, WHICH NOW DEFAULT ON (step 8 inverted the
+   * four: `enabledStepSevenRoutes` starts from every step-7 route and
+   * removes the ones a flag switches OFF). `[]` → own nothing, stated
+   * rather than defaulted, which is the only way a spec can now assert
+   * "and this route was not owned".
    */
   engineRoutes?: string[];
   /**

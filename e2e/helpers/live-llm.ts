@@ -706,10 +706,12 @@ export function liveReachFailure(
     return (
       `LIVE SWEEP DECIDED ALMOST NOTHING — ${s.unowned} message(s) were routed and then ` +
       `owned by nobody, against ${s.model} that reached a model. Since §10 step 8 there is ` +
-      `no analyzer behind the owners, so this is a silent bot being scored as a result. ` +
-      `Check the route flags (ROUTER_GATE_ENABLED, ATTENDANCE_ENGINE_ENABLED, ` +
-      `QUESTION_ENGINE_ENABLED, BALANCER_ENGINE_ENABLED, SCORE_ENGINE_ENABLED, ` +
-      `ADMIN_OPS_ENGINE_ENABLED) reached the server under test.${tail}`
+      `no analyzer behind the owners, so this is a silent bot being scored as a result.\n` +
+      `  The attendance path has no flag any more (ROUTER_GATE_ENABLED and ` +
+      `ATTENDANCE_ENGINE_ENABLED were deleted with it), and step 7's four default ON, so ` +
+      `this is NOT the usual "somebody forgot to export a flag" — check for a ` +
+      `*_ENGINE_ENABLED=0 in the environment, a router that answered nothing, and the ` +
+      `degradation lines below.${tail}`
     );
   }
   if (s.stub > 0) {

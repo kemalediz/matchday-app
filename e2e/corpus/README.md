@@ -24,6 +24,26 @@ MT_CORPUS_FILTER=S12 MT_SIM_RUNS=100 MT_SETTLE_LABEL=after-36 \
 
 Both write a machine-readable report to `.e2e/corpus/report-<mode>.json`.
 
+> ### ⚠️ `npm run test:corpus` (the STUBBED sweep) measures nothing right now
+>
+> The stubbed sweep replays each case's `stub` block through `analyzeBatch`'s
+> verdict seam. §10 step 8 (2026-09-06) deleted `analyzeBatch`, `SYSTEM_PROMPT`
+> and `AnalysisVerdict`, so **nothing reads those verdicts any more**:
+> `CurrentAnalyzerPipeline` posts the messages, the server routes nothing, no
+> owner claims anything, and every case scores whatever a silent bot scores.
+> Expect `baseline.stub.json`'s passes to read as regressions across the board.
+>
+> This is **left failing on purpose**, not re-baselined. Re-recording it with
+> `MT_CORPUS_RECORD=1` would enshrine "the bot says nothing" as the expected
+> outcome of 36 real incidents, which is the single worst thing that could be
+> done to this corpus. The fix is to port the `stub` blocks from verdicts to
+> ROUTES + FACTS — one `route` and one extractor body per message, the seams
+> `e2e/sim/attendance-engine.spec.ts` already drives — and it is a real piece of
+> work, not a rename.
+>
+> The LIVE sweeps (`test:corpus:live`, `:answers`, `:writes`, `:dryrun`) are
+> unaffected: they never used the verdict seam.
+
 **53 cases; 36 run in CI.** The other 17 cannot be replayed deterministically and
 each must say why (see *Stubbed vs live*). The scoreboard states all three numbers
 on its first two lines — a case that never ran is never counted as a pass.
@@ -52,25 +72,34 @@ same slot (a 1-in-200 chance) lands here; escape it for one run with
 
 A live sweep that cannot reach the model does not degrade, it **fails**.
 `e2e/helpers/live-llm.ts` refuses the run before any work when the key is
-missing, blank, or rejected (401/403/404/429), when a "live" run would still
-see `MT_TEST_LLM_STUB_FILE`, or when a "stubbed" run carries a real key and
-could quietly spend money. It spends one token proving the exact model
-`analyzeBatch` uses is reachable, and says so:
+missing, blank, or rejected (401/403/404/429), when a "live" run would still see
+`MT_TEST_ROUTER_STUB_FILE`, `MT_TEST_EXTRACTOR_STUB_FILE` or
+`MT_TEST_LLM_STUB_FILE`, or when a "stubbed" run carries a real key and could
+quietly spend money. It spends one token on **each of the three models the
+pipeline calls** — `claude-haiku-4-5` (the router), `claude-sonnet-5` (every
+extractor) and `claude-sonnet-4-5` (the scheduled-chase composer) — and says so:
 
 ```
-[e2e] LLM: LIVE — probe OK. claude-sonnet-4-5-20250929 answered in 4273ms and
-      billed 8 in / 1 out tokens to key ...uQAA.
+[e2e] LLM: LIVE — probe OK on 3 model(s): claude-haiku-4-5 (612ms, 8 in / 1 out),
+      claude-sonnet-5 (901ms, 8 in / 1 out), claude-sonnet-4-5 (4273ms, 8 in / 1 out);
+      billed to key ...uQAA.
 [e2e] LLM: metering every model call through http://127.0.0.1:56590
 ...
 [live] 141 of 141 analyzed messages reached the real model.
-[e2e] LLM: LIVE confirmed - 141 model call(s) billed: ... $2.05 across claude-sonnet-4-5.
+[e2e] LLM: LIVE confirmed - 141 model call(s) billed: ... $2.05 across claude-sonnet-5.
 ```
+
+**Three models, not one, since §10 step 8.** A key entitled to `sonnet-4-5` and
+not to `sonnet-5` used to pass the old single-model probe and then fail every
+extractor call — which lands as `attendance-engine: degraded —` per message and,
+after step 8, as silence.
 
 Every live run goes through the metering proxy, so "how many calls did this
 actually make and what did they cost" is a fact the run states rather than a
 question nobody asked; **zero calls fails the run** whatever Playwright said.
 The sweep itself then reads `AnalyzedMessage.reasoning` back and fails if
-messages fell through to an offline verdict. **Quote the `LIVE confirmed` line
+messages degraded, fell back offline, or — the shape §10 step 8 introduced —
+were **routed somewhere and owned by nobody**. **Quote the `LIVE confirmed` line
 alongside any live number, the way you quote the ports.**
 
 What this replaced: on `034f694`, in a checkout with no `.env`,
@@ -80,6 +109,15 @@ orchestrator has no key, so all 141 "runs" fell through to
 `offlineVerdict("ANTHROPIC_API_KEY not set")` and were graded as an analyzer
 that stayed silent. **Any live scoreboard that does not state how many messages
 reached the model is unverifiable.**
+
+`offlineVerdict` was deleted with the mega-prompt in §10 step 8, and the failure
+class did not go with it — it changed shape. The same keyless run now produces no
+error verdict at all: every router and extractor call throws, no owner claims
+anything, and `route.ts` records `reasoning: "no owner: route=…"` while the bot
+says nothing. `classifyReasoning` counts those as `unowned` and the run fails when
+more messages were owned by nobody than reached a model. A sweep whose scoreboard
+is mostly silence and whose reach line says nothing about unowned messages is from
+before that change and is unverifiable for the same reason.
 
 What this replaced, because a sweep from before PR #34 may still be quoted
 somewhere: ports 3105/54311 were hard-coded and `playwright.config.ts` set
@@ -214,9 +252,12 @@ of six runs. A recorded stub there would enshrine the bug as the expected input.
 ## Adding a pipeline
 
 Implement `CorpusPipeline` (`pipeline.ts`) and hand it to `runCorpus`. The
-interface deliberately contains no `AnalysisVerdict`, no intents and no
-`reasoning`: a router + extractor + engine that never produces a verdict
-must be able to implement it, and be judged by exactly these cases.
+interface deliberately contained no `AnalysisVerdict`, no intents and no
+`reasoning` — so that a router + extractor + engine which never produces a verdict
+could implement it and be judged by exactly these cases. §10 step 8 deleted
+`AnalysisVerdict` outright, which is the design being right on schedule rather
+than a reason to relax the rule: the boundary must still carry only rows, member
+names, speech, DMs and reacts.
 
 ```ts
 const sb = await runCorpus({ request, db }, new MyPipeline(), loadCorpus(), {

@@ -122,9 +122,10 @@ function assertMeterSawTraffic(meter: AnthropicMeter, playwrightExitCode: number
         `named), or the server under test never reached the router or an extractor — which ` +
         `since §10 step 8 is exactly what "every route flag is off" looks like: no error, no ` +
         `verdict, just a bot that said nothing.\n` +
-        `  Check the spec selection, that no MT_TEST_ROUTER_STUB_FILE / ` +
-        `MT_TEST_EXTRACTOR_STUB_FILE / MT_TEST_LLM_STUB_FILE is set in your shell, and that ` +
-        `the route flags you meant to measure are exported.`,
+        `  Check the spec selection, and that no MT_TEST_ROUTER_STUB_FILE / ` +
+        `MT_TEST_EXTRACTOR_STUB_FILE / MT_TEST_LLM_STUB_FILE is set in your shell. Step 7's ` +
+        `four route flags default ON, so a *_ENGINE_ENABLED=0 left in the environment is the ` +
+        `other thing that produces this.`,
     );
   }
   const sum = (f: (c: (typeof calls)[number]) => number) => calls.reduce((a, c) => a + f(c), 0);

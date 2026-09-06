@@ -1,7 +1,7 @@
 /**
  * AUTO-REGISTER UNTAGGED THIRD-PARTY ADDS — LIVE-LLM validation.
  *
- * Drives the REAL Anthropic model (no stubbed verdict) over the real
+ * Drives the REAL Anthropic model (no stub anywhere) over the real
  * "Sutton Football Club" transcript to prove the behaviour change:
  *
  *   • A CONCRETE, present/affirmative, NAMED third-party ADD in natural,
@@ -18,12 +18,35 @@
  * Opt-in: this whole describe block only runs when MT_SIM_LIVE_LLM=1.
  * Default suites SKIP it entirely.
  *
+ * ── WHO DECIDES THESE CASES CHANGED WITH §10 STEP 8 (2026-09-06) ─────
+ * `SYSTEM_PROMPT` is deleted, so "tune the prompt until reliable" no
+ * longer names anything. Every case below is now decided by the ROUTER
+ * (`other_att` vs `none`), the ATTENDANCE EXTRACTOR (`personNamed`,
+ * `tense`, `contingent`, `reported`, `confidence`) and `engine.ts`'s
+ * corroboration and authorisation rules — which are exactly the fields
+ * the negative cases are about: future, unnamed, conditional,
+ * hypothetical, question, informational.
+ *
+ * THE SPEC IS KEPT UNCHANGED IN SUBSTANCE because every assertion is
+ * about a WRITE, not about a verdict: a concrete named add registers
+ * that player, everything else registers nobody, and the relaying sender
+ * is never auto-joined. Those are the three shipped guarantees and none
+ * of them moved.
+ *
  * Run:
  *   ANTHROPIC_API_KEY=<key> MT_SIM_LIVE_LLM=1 \
  *     npx tsx e2e/run.ts sim/auto-register-adds-live.spec.ts
- *   (or: npm run test:sim:live:adds  with ANTHROPIC_API_KEY exported)
+ *   (or: npm run test:sim:live:adds  with the key exported)
  *
- * NEVER weaken these assertions — tune the SYSTEM_PROMPT until reliable.
+ * NO FLAGS NEEDED — §10 step 8 deleted `ROUTER_GATE_ENABLED` and
+ * `ATTENDANCE_ENGINE_ENABLED`. But DO NOT run this with anything that
+ * switches an owner off: with nothing owning these messages every
+ * NEGATIVE case passes because the bot is mute and every POSITIVE case
+ * fails, and a file whose negatives are green because nothing ran is the
+ * exact false green this suite exists to refuse.
+ *
+ * NEVER weaken these assertions — fix the router, the extractor or the
+ * engine until they hold.
  */
 import type { APIRequestContext } from "@playwright/test";
 import { test, expect, resetDb } from "../fixtures";

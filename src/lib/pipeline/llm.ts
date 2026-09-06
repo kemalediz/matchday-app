@@ -83,6 +83,33 @@ export interface ModelRequest {
   maxTokens: number;
   /** Structured output. `output_config.format`, not a tool. */
   schema?: Record<string, unknown>;
+  /**
+   * `"off"` sends `thinking: {type: "disabled"}`. Omitted sends nothing.
+   *
+   * ── WHY THIS FIELD EXISTS (measured 2026-09-06, §10 step 8) ────────
+   *
+   * `claude-sonnet-5` runs ADAPTIVE THINKING when `thinking` is omitted.
+   * On a self-contradictory message it can spend the ENTIRE `max_tokens`
+   * budget deliberating and return `stop_reason: max_tokens` with
+   * `thinking` blocks and NO text block at all — probed directly at
+   * 1,024, 2,048 and 4,096 tokens, zero text every time, 5 runs of 5.
+   * The truncation guard below then throws, correctly, and the message
+   * gets no answer.
+   *
+   * Raising the cap does not fix it; it just buys a bigger bill for the
+   * same silence. Turning thinking off does, because the extractors were
+   * never meant to reason: §6.2's whole contract is "FACTS about the
+   * text only… No intent… No `reasoning` prose", and
+   * `output_config.format` gives the answer nowhere to put a
+   * deliberation anyway.
+   *
+   * OPT-IN rather than default-off, and per model rather than global:
+   * `{type: "disabled"}` is accepted on `claude-sonnet-5` but the router
+   * runs `claude-haiku-4-5`, an older model with a different thinking
+   * contract, and nothing here needs to send it a parameter it may not
+   * take. The extractors ask; the router does not.
+   */
+  thinking?: "off";
   /** Appears in logs and in the cost breakdown. */
   label: string;
 }
@@ -186,6 +213,11 @@ export function anthropicModel(opts?: { apiKey?: string }): PipelineModel {
         ...(req.schema
           ? { output_config: { format: { type: "json_schema" as const, schema: req.schema } } }
           : {}),
+        // See `ModelRequest.thinking`. Sent ONLY when the caller asked;
+        // an omitted parameter and `{type: "adaptive"}` mean the same
+        // thing on sonnet-5, and sending nothing keeps this layer honest
+        // about which callers made a decision and which did not.
+        ...(req.thinking === "off" ? { thinking: { type: "disabled" as const } } : {}),
       });
       const ms = Date.now() - t0;
 

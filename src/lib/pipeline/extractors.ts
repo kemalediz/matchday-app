@@ -574,6 +574,14 @@ export async function extractForRoute(
     maxTokens: EXTRACTOR_MAX_TOKENS,
     schema: SCHEMAS[kind],
     label: `extractor:${kind}`,
+    // THINKING OFF. Measured, not assumed — see `llm.ts`'s
+    // `ModelRequest.thinking` and `__tests__/thinking-off.test.ts`. On a
+    // self-contradictory message, adaptive thinking spent the whole
+    // token budget and returned no JSON at all, 5 runs of 5, against the
+    // live club. An extractor that deliberates is the mega-prompt's
+    // failure mode reappearing one layer down: §6.2's contract is
+    // "FACTS about the text only".
+    thinking: "off",
   };
 
   // ── ONE RETRY, AND ONLY WHERE SILENCE COSTS A SLOT (§10 step 8) ────

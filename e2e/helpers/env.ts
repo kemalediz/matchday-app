@@ -190,7 +190,9 @@ export function buildTestEnv(): Record<string, string> {
     env.MT_TEST_LLM_STUB_FILE = "";
     // Same reasoning, for the router: a "live" sweep must not be able to
     // read a canned route out of a file, and must not be able to have
-    // the step-5 flags flipped by one either. Pinned empty, not deleted.
+    // the floor or step 7's route ownership flipped by one either
+    // (`RouterStubConfig.floor`, `engineRoutes`). Pinned empty, not
+    // deleted.
     env.MT_TEST_ROUTER_STUB_FILE = "";
     // And for the extractor (§10 step 6). A "live" sweep that could read
     // canned FACTS out of a file would be grading its own answer key —
@@ -200,35 +202,39 @@ export function buildTestEnv(): Record<string, string> {
     env.MT_TEST_EXTRACTOR_STUB_FILE = "";
     env.ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY ?? "";
     env.MT_SIM_LIVE_LLM = "1";
-    // §10 step 5's flags, forwarded ONLY on a live run.
+    // The pipeline's remaining flags, forwarded ONLY on a live run.
     //
-    // This is how "the corpus, with the gate on" becomes runnable, and
-    // it is the strongest evidence step 5 exists to produce: the same 47
-    // incident cases, the same real model, the REAL router in front,
-    // scored against the same baseline. A stubbed run could not answer
-    // it — stubbing the router means choosing the routes, which is
-    // assuming the conclusion.
+    // This is how "the corpus, with the pipeline configured THIS way"
+    // becomes runnable: the same 47 incident cases, the same real model,
+    // the real router in front, scored against the same baseline. A
+    // stubbed run could not answer it — stubbing the router means
+    // choosing the routes, which is assuming the conclusion.
     //
     // Live only, deliberately. A stubbed run has no key, so the router
-    // would fail on every batch and fall back to analysing everything;
-    // the flags would read as on and mean nothing.
-    // ATTENDANCE_ENGINE_ENABLED joins them for §10 step 6: "the corpus,
-    // with the engine deciding and WRITING" is the evidence that step
-    // is judged by, and it needs the real router, the real extractor
-    // and the real apply path all at once.
+    // fails on every batch; the flags would read as on and mean nothing.
     //
-    // STEP 7'S FOUR JOINED THE LIST WITH §10 STEP 8. They were reachable
-    // only through the per-request `x-mt-engine-routes` header before,
-    // which no live spec sends, so "the corpus with `question` and
-    // `score` owned by their engines" was not a runnable sweep — and
-    // with the mega-prompt deleted, leaving them off is no longer
-    // "measure the incumbent instead", it is "measure silence". Still
-    // forwarded ONLY when the operator set them, so an unmodified
+    // ── THE LIST CHANGED TWICE ON 2026-09-06 (§10 step 8) ────────────
+    //
+    // `ROUTER_GATE_ENABLED` and `ATTENDANCE_ENGINE_ENABLED` LEFT it,
+    // because they were deleted from `pipeline/gate.ts`. Both were
+    // reverts and the thing they reverted to was `analyzeBatch`; with it
+    // gone, `ATTENDANCE_ENGINE_ENABLED=0` would have meant nobody at all
+    // handles `self_att` / `other_att` / `offer` / `unsure`, which is a
+    // kill switch for the core write path wearing the name of a tuning
+    // lever. Forwarding a name nothing reads would look like an arm of a
+    // sweep that cannot exist.
+    //
+    // STEP 7'S FOUR JOINED it, and their sense INVERTED with the same
+    // change: they now default ON, so forwarding them is how a sweep
+    // turns a route OFF — the "MatchTime goes quiet on questions and an
+    // operator is told" arm, which is a survivable degradation and the
+    // reason those four were kept when the other two were deleted.
+    //
+    // Still forwarded ONLY when the operator set them, so an unmodified
     // `npm run test:corpus:live` is unchanged.
     for (const flag of [
-      "ROUTER_GATE_ENABLED",
       "ROUTER_GATE_FLOOR_ENABLED",
-      "ATTENDANCE_ENGINE_ENABLED",
+      "NONE_BUCKET_SHADOW_ENABLED",
       "QUESTION_ENGINE_ENABLED",
       "BALANCER_ENGINE_ENABLED",
       "SCORE_ENGINE_ENABLED",
