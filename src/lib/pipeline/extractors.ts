@@ -140,12 +140,17 @@ Report nothing (an empty claims array) only when the message genuinely makes no 
   admin: `You read ONE instruction to the bot and report what it says.
 
   action       "bulk_payment" someone paid for several players
-               "reminder" the sender wants to be reminded
+               "reminder" the sender wants to be reminded, at a time
+               "recruit" the sender is asking the bot to CONTACT or INVITE players who are not registered yet — "message the lads from the last few games", "DM everyone who played recently and invite them", "ask the regulars if they can play", "we need more players, can you round some up"
                "other"
   payerRef     for bulk_payment: who paid, verbatim. "" when not applicable
   count        for bulk_payment: how many players they paid for. 0 when not applicable
   coveredRefs  for bulk_payment: the specific people covered, verbatim, if named
-  phrase       for reminder: the time phrase EXACTLY as written ("on Monday", "tomorrow at 6"). Do not convert it to a date. "" when not applicable`,
+  phrase       for reminder: the time phrase EXACTLY as written ("on Monday", "tomorrow at 6"). Do not convert it to a date. "" when not applicable
+  note         for reminder: WHAT to remind them about, in their own words ("bring the bibs"). "" when the message names nothing to remember
+  lookbackMatches  for recruit: how many recent matches the message says to draw players from ("the last 5 matches" -> 5, "the last couple of games" -> 2). 0 when the message names no number.
+
+"recruit" is about reaching people OUTSIDE the current squad. A message asking to SHOW, LIST or COUNT the players already registered is not recruit — that is "other".`,
 };
 
 // ── Schemas ────────────────────────────────────────────────────────────
@@ -244,13 +249,17 @@ const SCORE_SCHEMA = {
 const ADMIN_SCHEMA = {
   type: "object",
   properties: {
-    action: { type: "string", enum: ["bulk_payment", "reminder", "other"] },
+    action: { type: "string", enum: ["bulk_payment", "reminder", "recruit", "other"] },
     payerRef: { type: "string" },
     count: { type: "number" },
     coveredRefs: { type: "array", items: { type: "string" } },
     phrase: { type: "string" },
+    note: { type: "string" },
+    // 0 is the schema's stand-in for null, the same convention
+    // `statedCount` uses. A nullable number is rejected by the API.
+    lookbackMatches: { type: "number" },
   },
-  required: ["action", "payerRef", "count", "coveredRefs", "phrase"],
+  required: ["action", "payerRef", "count", "coveredRefs", "phrase", "note", "lookbackMatches"],
   additionalProperties: false,
 } as const;
 
@@ -442,7 +451,7 @@ export function parseFacts(
 
     case "admin": {
       const action = str(raw.action).toLowerCase();
-      if (!["bulk_payment", "reminder", "other"].includes(action)) {
+      if (!["bulk_payment", "reminder", "recruit", "other"].includes(action)) {
         bad(`unknown admin action "${str(raw.action)}"`);
         return { facts: { kind: "none" }, degradations };
       }
@@ -455,6 +464,16 @@ export function parseFacts(
           ? { coveredRefs: raw.coveredRefs.map(str).filter(Boolean) }
           : {}),
         ...(typeof raw.phrase === "string" && raw.phrase ? { phrase: raw.phrase } : {}),
+        ...(typeof raw.note === "string" && raw.note ? { note: raw.note } : {}),
+        // 0 (the schema's stand-in for "not stated") and anything
+        // non-finite are DROPPED rather than carried through as a
+        // number, so the engine's `lookbackMatches === undefined` means
+        // exactly one thing: use the shipped default of 5.
+        ...(typeof raw.lookbackMatches === "number" &&
+        Number.isFinite(raw.lookbackMatches) &&
+        raw.lookbackMatches > 0
+          ? { lookbackMatches: raw.lookbackMatches }
+          : {}),
       };
       return { facts, degradations };
     }

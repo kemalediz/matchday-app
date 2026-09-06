@@ -16,16 +16,22 @@
  * what §10's revert column asks for, in those words.
  *
  * ─────────────────────────────────────────────────────────────────────
- * WHY ONLY TWO FLAGS ARE DEFINED HERE
+ * ALL FOUR FLAGS NOW EXIST — AND THAT IS A CLAIM, NOT A TIDY-UP
  * ─────────────────────────────────────────────────────────────────────
- * `gate.ts:227` states the rule this file obeys: a flag that looks
- * enabled and does nothing is "the worst kind of flag". `score` and
- * `admin_ops` have no owner in this change — see
- * `answer-batch.ts`'s header for the measured reasons — so defining
- * `SCORE_ENGINE_ENABLED` and `ADMIN_OPS_ENGINE_ENABLED` now would ship
- * exactly that. The names are RESERVED below as constants nothing reads,
- * so the next step cannot pick a different spelling by accident, and a
- * test asserts they are not honoured.
+ * Part 1 shipped two and RESERVED the other two as constants nothing
+ * read, because `gate.ts:227` states the rule this file obeys: a flag
+ * that looks enabled and does nothing is "the worst kind of flag".
+ *
+ * Part 2 promotes them, and the rule is the reason it may: `score` and
+ * `admin_ops` now have owners — `score-engine-batch.ts` and
+ * `admin-ops-engine-batch.ts`, each with its own apply layer — so
+ * `SCORE_ENGINE_ENABLED=1` genuinely takes the route off the
+ * mega-prompt. If either owner is ever deleted, its flag must go with
+ * it in the same change.
+ *
+ * `route-flags.test.ts` asserts that each flag turns on EXACTLY its own
+ * route, that all four are pairwise independent, and that step 5's and
+ * step 6's flags cannot turn any of them on.
  *
  * ─────────────────────────────────────────────────────────────────────
  * DEFAULT OFF, AND IT CANNOT BE OTHERWISE
@@ -52,24 +58,39 @@ export const QUESTION_FLAG = "QUESTION_ENGINE_ENABLED";
  *  `answer-batch.ts` on why generating stays with the analyzer. */
 export const BALANCER_FLAG = "BALANCER_ENGINE_ENABLED";
 
-// ── The flags that do NOT exist yet, named so they cannot drift ───────
+// ── The two flags part 2 promoted from RESERVED to real ──────────────
 
 /**
- * RESERVED. Nothing reads these. They are here so the follow-up change
- * uses these exact spellings rather than inventing
- * `SCORE_ROUTE_ENABLED` beside a documented `SCORE_ENGINE_ENABLED`.
+ * §3.2 S17. The `score` route, and the FIRST step-7 flag that owns a
+ * WRITE: `Match.redScore` / `yellowScore` plus the Elo deltas
+ * (`route.ts:3505-3531`, `elo.ts:34`).
  *
- * `enabledStepSevenRoutes` deliberately ignores them, and
- * `__tests__/route-flags.test.ts` asserts that setting either one to
- * "1" changes nothing at all.
+ * Until part 2 this name was RESERVED — written down, read by nothing —
+ * because `gate.ts:227` calls a flag that looks enabled and does nothing
+ * "the worst kind of flag" and there was no owner. `score-engine-batch.ts`
+ * is the owner, so the name is now honoured. The spelling is the one that
+ * was reserved, which is the entire point of having reserved it.
  */
-export const RESERVED_FLAGS = {
-  score: "SCORE_ENGINE_ENABLED",
-  admin_ops: "ADMIN_OPS_ENGINE_ENABLED",
-} as const;
+export const SCORE_FLAG = "SCORE_ENGINE_ENABLED";
 
 /**
- * The routes step 7 can own TODAY, in flag order.
+ * §3.2 S21 + S22. The `admin_ops` route: a payment credit (real money,
+ * live on Sutton FC since 2026-06-09), a personal reminder, and the
+ * recruit blast.
+ *
+ * ONE flag for all three, unlike the rest of step 7's one-per-route
+ * scheme, because they are one ROUTE. Splitting them further would mean
+ * a router verdict of `admin_ops` whose ownership depended on a fact the
+ * extractor had not returned yet — the flag would have to be consulted
+ * after the model call rather than before it, and the "own nothing
+ * cheaply" property that makes every carve-out free would be gone.
+ * `admin-ops-engine-batch.ts` decides per action instead, and each
+ * action's carve-outs are enumerated there.
+ */
+export const ADMIN_OPS_FLAG = "ADMIN_OPS_ENGINE_ENABLED";
+
+/**
+ * The routes step 7 can own, in flag order.
  *
  * `unsure` is absent for the same reason `gate.ts:124` leaves it out of
  * the attendance engine: a route the router itself could not settle is
@@ -77,7 +98,36 @@ export const RESERVED_FLAGS = {
  * call. `none` is step 5's business and is never owned by anything that
  * speaks.
  */
-export const STEP_SEVEN_ROUTES: readonly Route[] = ["question", "balancer"];
+export const STEP_SEVEN_ROUTES: readonly Route[] = [
+  "question",
+  "balancer",
+  "score",
+  "admin_ops",
+];
+
+// ── WHICH OWNER OWNS WHICH ROUTE ─────────────────────────────────────
+//
+// Step 7 is no longer one module. `answer-batch.ts` owns the two READS
+// and has no apply layer at all — a property `__tests__/zero-writes.test.ts`
+// enforces by scanning the directory. The two routes below WRITE, so
+// they live outside `pipeline/` with an apply layer each, exactly as
+// step 6's `attendance-engine.ts` does.
+//
+// These lists exist so a runner cannot accidentally own a route it has
+// no handler for. Without them, `enabledStepSevenRoutes` returning
+// `{score}` and `answer-batch.ts` filtering only on `enabled.has(route)`
+// would make the answer engine pay for an extractor call on every score
+// message and then own none of them — which is not a bug that shows up
+// as a failure, only as a bill.
+
+/** Owned by `answer-batch.ts`. Reads; no apply layer; no writes. */
+export const ANSWER_ENGINE_ROUTES: readonly Route[] = ["question", "balancer"];
+
+/** Owned by `score-engine-batch.ts`. Writes, via `score-engine.ts`. */
+export const SCORE_ENGINE_ROUTES: readonly Route[] = ["score"];
+
+/** Owned by `admin-ops-engine-batch.ts`. Writes, via `admin-ops-engine.ts`. */
+export const ADMIN_OPS_ENGINE_ROUTES: readonly Route[] = ["admin_ops"];
 
 type Env = Record<string, string | undefined>;
 
@@ -213,17 +263,31 @@ export function enabledStepSevenRoutes(
   const routes = new Set<Route>();
   if (on(env, QUESTION_FLAG)) routes.add("question");
   if (on(env, BALANCER_FLAG)) routes.add("balancer");
+  if (on(env, SCORE_FLAG)) routes.add("score");
+  if (on(env, ADMIN_OPS_FLAG)) routes.add("admin_ops");
   return routes;
 }
 
-/** Does step 7 decide this route for this request? A route it has never
- *  heard of — including `undefined`, which is what a message the router
- *  never mentioned looks like — is never owned. */
+/**
+ * Does step 7 decide this route for this request?
+ *
+ * A route it has never heard of — including `undefined`, which is what a
+ * message the router never mentioned looks like — is never owned.
+ *
+ * `within` narrows the answer to the routes ONE OWNER can actually
+ * handle, and every caller passes it. It is optional only so the
+ * unqualified question ("is this route live at all?") stays askable; a
+ * runner that omitted it would happily claim a route whose facts it has
+ * no branch for, spend an extractor call on it and then own nothing.
+ */
 export function stepSevenOwnsRoute(
   route: Route | undefined,
   enabled: Set<Route>,
+  within?: readonly Route[],
 ): boolean {
-  return route !== undefined && enabled.has(route);
+  if (route === undefined) return false;
+  if (within && !within.includes(route)) return false;
+  return enabled.has(route);
 }
 
 /**

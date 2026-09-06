@@ -99,6 +99,17 @@ export interface CorpusWorld {
     confirmedKeys: string[];
     redScore?: number | null;
     yellowScore?: number | null;
+    /**
+     * Default COMPLETED. A match only reaches that status when SOMEBODY
+     * RECORDS A SCORE, so the real state of a Tuesday night that nobody
+     * has reported yet is `TEAMS_PUBLISHED` — and that is the shape the
+     * first score of every match lands on. Declarable here so a case can
+     * pin it (see `SquadState.completedMatch`).
+     */
+    status?: "TEAMS_GENERATED" | "TEAMS_PUBLISHED" | "COMPLETED";
+    /** Pre-existing team assignments on the played match, so the Elo
+     *  deltas have something to move. */
+    teams?: Record<string, "RED" | "YELLOW">;
   };
   /** Open a real BenchSlotOffer by dropping this confirmed player first
    *  (the only way to get the "OPEN BENCH SLOT" context block). */

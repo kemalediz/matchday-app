@@ -13,34 +13,42 @@
  * engine ever hands it a write (see THE WRITE ASSERTION below).
  *
  * ─────────────────────────────────────────────────────────────────────
- * WHY THESE TWO ROUTES, AND NOT ALL FOUR
+ * WHY THESE TWO ROUTES, AND WHERE THE OTHER TWO WENT
  * ─────────────────────────────────────────────────────────────────────
  * §10 step 7 names four: `question`, `team_ops`, `score`, `admin_ops`,
- * "one per week". Two of them arrive here and two do not, for reasons
- * that were measured rather than assumed:
+ * "one per week". Two of them arrive here. The other two arrived one
+ * change later, in PART 2, and they are NOT here because they WRITE:
+ *
+ *   • `score`     → `score-engine-batch.ts` + `score-engine.ts`
+ *   • `admin_ops` → `admin-ops-engine-batch.ts` + `admin-ops-engine.ts`
+ *
+ * Part 1's reasons for holding them back were measured rather than
+ * assumed, and each one names the change part 2 had to make:
  *
  *   • `score` writes `Match.redScore/yellowScore` AND runs the Elo
- *     deltas (`route.ts:3505-3523`, `elo.ts:34`). Two behaviours would
- *     also have to move with it: the shipped path deliberately accepts
- *     a score from an UNRESOLVED sender ("losing the score entirely is
- *     a worse failure mode", `route.ts:3450-3457`) where the engine
- *     refuses one, and it selects its target from `TEAMS_PUBLISHED |
- *     TEAMS_GENERATED | COMPLETED` where `SquadState.completedMatch`
- *     only ever holds a `COMPLETED` one. Neither is hard; both are
- *     write-path changes and belong beside their own apply layer.
+ *     deltas (`route.ts:3505-3523`, `elo.ts:34`) — now `score-engine.ts`,
+ *     an apply layer outside this directory. Two behaviours moved with
+ *     it: the shipped path deliberately accepts a score from an
+ *     UNRESOLVED sender ("losing the score entirely is a worse failure
+ *     mode", `route.ts:3450-3457`) where the engine refused one, and it
+ *     selects its target from `TEAMS_PUBLISHED | TEAMS_GENERATED |
+ *     COMPLETED` where `SquadState.completedMatch` only held a
+ *     `COMPLETED` one. Both are done; see that field's own comment.
  *   • `admin_ops` is real money on a live club (S21 — `PaymentCredit`,
- *     `Attendance.paidAt`) plus a reminder whose time phrase still has
- *     to become a datetime. The engine models the phrase exactly as
- *     §3.2 S22 asks and hands it on; nothing resolves it yet, and
- *     `date-fns-tz` doing that resolution is new code on a path that
- *     queues a DM. It also has four guards the engine does not carry —
- *     the `reminders` feature gate, the `subReminderDm` opt-out, the
- *     missing-phone branch and the 60-day window (`route.ts:3925-3995`).
+ *     `Attendance.paidAt`) plus a reminder whose time phrase had to
+ *     become a datetime. `reminder-time.ts` is that resolver, pure and
+ *     fed an injected `now`. Of the four guards the engine did not
+ *     carry, two are now IN the engine (the `reminders` feature gate and
+ *     the 60-day window) and two are carve-outs that hand the message
+ *     back so the analyzer says the shipped sentence (the
+ *     `subReminderDm` opt-out and the missing-phone branch). That
+ *     module's header has the table.
  *
- * Shipping those two here would mean an apply layer, an authorisation
- * pass and a calendar resolver landing in the same change as the read
- * paths, and §10's own ordering rationale is "free wins, then evidence,
- * then TEXT, then reads, then the write". These are the reads.
+ * What has NOT changed is the rule that kept them apart: THIS module
+ * still has no apply layer and still must not acquire one. Its whole
+ * safety argument is structural — `__tests__/zero-writes.test.ts` scans
+ * every file in this directory on every build, and `runAnswerBatch`
+ * refuses to own anything at all if the engine ever hands it a write.
  *
  * ─────────────────────────────────────────────────────────────────────
  * FAIL OPEN, ALWAYS — the same rule as step 6
@@ -106,7 +114,7 @@ import { extractForRoute } from "./extractors";
 import { extractorStubFromEnv } from "./extractor-stub";
 import { resolvePerson } from "./identity";
 import { anthropicModel, type PipelineModel } from "./llm";
-import { STEP_SEVEN_ROUTES, stepSevenOwnsRoute } from "./route-flags";
+import { ANSWER_ENGINE_ROUTES, stepSevenOwnsRoute } from "./route-flags";
 import type {
   EngineInput,
   EngineMessage,
@@ -118,9 +126,17 @@ import type {
   SquadState,
 } from "./types";
 
-/** The routes this module can own. Re-exported from `route-flags.ts` so
- *  the flags and the owner cannot disagree about the list. */
-export const ANSWER_ROUTES = STEP_SEVEN_ROUTES;
+/**
+ * The routes this module can own. Re-exported from `route-flags.ts` so
+ * the flags and the owner cannot disagree about the list.
+ *
+ * It was `STEP_SEVEN_ROUTES` until part 2 gave `score` and `admin_ops`
+ * owners of their own. Step 7 is now three modules, not one, and this
+ * one owns only the READS — so it names the read list explicitly rather
+ * than "everything step 7 can own", which would silently start pulling
+ * score messages through this extractor the moment another flag went on.
+ */
+export const ANSWER_ROUTES = ANSWER_ENGINE_ROUTES;
 
 /**
  * The question topics answered from the database, and nothing else.
@@ -341,7 +357,7 @@ export async function runAnswerBatch(args: {
 
   // ── Ownership, part 1: everything knowable without a model ─────────
   const candidates = messages.filter(
-    (m) => !m.gated && stepSevenOwnsRoute(m.route, enabled) && m.tagged,
+    (m) => !m.gated && stepSevenOwnsRoute(m.route, enabled, ANSWER_ROUTES) && m.tagged,
   );
   if (candidates.length === 0) return empty();
 

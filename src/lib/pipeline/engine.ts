@@ -42,6 +42,8 @@ import {
 } from "../promote-authorization";
 import { shouldAskForGuestName } from "../guest-name-ask";
 import { RECRUIT_COMMAND_IMPLIES_ADDRESSED } from "../recruit-request";
+import { RECRUIT_LOOKBACK_MAX, resolveLookbackMatches } from "../recruit-lookback";
+import { resolveReminderPhrase } from "../reminder-time";
 import { resolvePerson } from "./identity";
 import type {
   AttendanceFacts,
@@ -63,6 +65,25 @@ const CONFIDENCE_FLOOR = 0.7;
 
 /** Scores are clamped, never trusted (§9 "value clamps" — survives). */
 const MAX_SCORE = 99;
+
+/**
+ * The shipped reminder window, reproduced from `route.ts:3938-3947`.
+ *
+ * A 60-second grace so "remind me in a minute" is not lost to the round
+ * trip, and a 60-day ceiling because anything further out "is almost
+ * certainly a parse error, not a real request".
+ */
+const REMINDER_PAST_GRACE_MS = 60_000;
+const REMINDER_MAX_AHEAD_MS = 60 * 24 * 60 * 60 * 1000;
+
+/**
+ * First-person references in a payment credit's covered list.
+ *
+ * A CLOSED list, matched exactly, and never handed to `identity.ts` —
+ * which is right to refuse to match "me" against a roster of names. The
+ * shipped path does the same substitution at `route.ts:3846-3850`.
+ */
+const SELF_REFS = new Set(["me", "myself", "i", "my self"]);
 
 interface Working {
   rows: Map<string, AttendanceRow>;
@@ -820,7 +841,37 @@ export function decide(input: EngineInput): EngineResult {
       const senderIsAdmin =
         !!msg.senderUserId && !!w.roster.find((m2) => m2.userId === msg.senderUserId)?.isAdmin;
       const played = !!msg.senderUserId && completed.participantUserIds.includes(msg.senderUserId);
-      if (!senderIsAdmin && !played) {
+      // ── AN UNRESOLVED SENDER IS PERMITTED, AND THAT IS DELIBERATE ───
+      //
+      // Restored from the shipped path (`route.ts:3457-3462`, in its own
+      // words): *"If we CAN'T resolve them (e.g. WhatsApp hid the phone
+      // via @lid and the pushname didn't match any player) → still write
+      // the score, because the message came from the monitored org's
+      // group chat and losing the score entirely is a worse failure mode
+      // than occasionally trusting a wrong number. Admin can correct via
+      // the dashboard."*
+      //
+      // This is NOT a hole in the §9 authorisation seatbelt, which
+      // survives untouched one line below: a RESOLVED member who neither
+      // played nor is an admin is still refused. The distinction is
+      // between "we know who this is and they may not" and "WhatsApp did
+      // not tell us who this is" — and since the @lid change, the second
+      // is a routine condition in a real group rather than an exotic
+      // one, which is why the shipped path is written this way.
+      //
+      // The blast radius is bounded on all sides: the message must be in
+      // the org's own monitored group, the target must be a match that
+      // has already been played, and `handleScore` refuses to overwrite
+      // a result that is already recorded — so the worst case is one
+      // wrong number on one match, correctable in the dashboard, against
+      // the certainty of losing every score reported from an @lid.
+      const senderUnresolved = !msg.senderUserId;
+      if (senderUnresolved) {
+        out.reasons.push(
+          "score from an unresolved sender: accepted, because losing the score entirely " +
+            "is a worse failure mode (route.ts:3457-3462)",
+        );
+      } else if (!senderIsAdmin && !played) {
         // §9 authorisation — survives untouched. Nothing about the
         // model's competence changes who may report a result.
         out.reasons.push("score reported by someone who neither played nor is an admin");
@@ -851,8 +902,15 @@ export function decide(input: EngineInput): EngineResult {
         red,
         yellow,
         sourceMessageId: msg.id,
-        reason: "final result reported by a participant or admin",
+        reason: senderUnresolved
+          ? "final result reported from the org's own group by an unresolved sender"
+          : "final result reported by a participant or admin",
       });
+      // The match moves to COMPLETED as part of applying this write
+      // (`route.ts:3510-3517`), so the projection has to move too or a
+      // second `score` message in the same batch would see an
+      // unfinished match and try again.
+      completed.status = "COMPLETED";
       speech.push({ kind: "score_ack", messageId: msg.id, red, yellow });
       out.react = "👍";
     }
@@ -898,11 +956,44 @@ export function decide(input: EngineInput): EngineResult {
           );
           return;
         }
+        const refs = facts.coveredRefs ?? [];
         const covered: string[] = [];
-        for (const ref of facts.coveredRefs ?? []) {
+        for (const ref of refs) {
+          // "Amir paid for me and Adam". The shipped path maps the
+          // first-person refs onto the SENDER (`route.ts:3846-3850`);
+          // `identity.ts` correctly refuses to match "me" against a
+          // roster, so the mapping is done here, from a closed list, and
+          // never by asking a model who "me" is.
+          if (SELF_REFS.has(ref.trim().toLowerCase())) {
+            if (msg.senderUserId) {
+              covered.push(msg.senderUserId);
+              continue;
+            }
+            out.reasons.push(`covered name "${ref}" is the sender, who is unresolved`);
+            continue;
+          }
           const r = resolvePerson(ref, w.roster);
           if (r.kind === "resolved") covered.push(r.member.userId);
           else out.reasons.push(`covered name "${ref}" did not resolve`);
+        }
+        // ── NAMED, BUT NOBODY RESOLVED ─────────────────────────────────
+        //
+        // A shipped defect, not reproduced. `route.ts:3841-3886` takes
+        // the named branch on `coveredNames.length > 0`, stamps nothing
+        // when none of them match, creates no `PaymentCredit` — and then
+        // replies "credited *Amir* with 4 payments" anyway. The group is
+        // told a payment landed and the chase math never saw it.
+        //
+        // The alternative — falling through to the aggregate branch — is
+        // worse: it would credit a NUMBER for people the message named
+        // and nobody could identify. So the message goes back to the
+        // analyzer, which is the one direction that cannot invent money.
+        if (refs.length > 0 && covered.length === 0) {
+          degrade(
+            `payment credit names ${refs.length} player(s) (${refs.join(", ")}) and none of them ` +
+              `resolve to a member; refusing rather than crediting a count nobody checked`,
+          );
+          return;
         }
         emit({
           kind: "payment_credit",
@@ -910,6 +1001,10 @@ export function decide(input: EngineInput): EngineResult {
           payerName: payer.member.name,
           count,
           coveredUserIds: covered,
+          // From the FACTS, never from `covered.length`: the two differ
+          // exactly when some names resolved and some did not, and that
+          // is the case the apply layer must still treat as named.
+          namedCovered: refs.length > 0,
           sourceMessageId: msg.id,
           reason: "admin-credited bulk payment",
         });
@@ -927,8 +1022,26 @@ export function decide(input: EngineInput): EngineResult {
           out.reasons.push("reminder request requires an @Match Time tag");
           return;
         }
+        if (!state.features.reminders) {
+          // The per-org gate `route.ts:3113-3121` maps `reminder_request`
+          // onto, reproduced rather than left to the caller: a
+          // MoM-and-ratings-only org gets total silence, not a queued DM.
+          out.reasons.push("reminders are off for this org");
+          return;
+        }
         if (!msg.senderUserId) {
           degrade("reminder requested by an unresolved sender; nowhere to send it");
+          return;
+        }
+        const sender = w.roster.find((m2) => m2.userId === msg.senderUserId);
+        if (!sender?.hasPhone) {
+          // `route.ts:3968-3974` answers this in the group rather than
+          // swallowing it ("I don't have your number on file yet"). The
+          // engine has no copy for that, and inventing a second wording
+          // for a shipped sentence is how two bots start disagreeing —
+          // so the message degrades and `admin-ops-engine-batch.ts`
+          // hands it back to the analyzer, which still says it.
+          degrade("reminder requested by a member with no phone number on file");
           return;
         }
         const phrase = (facts.phrase ?? "").trim();
@@ -936,17 +1049,86 @@ export function decide(input: EngineInput): EngineResult {
           degrade("reminder request with no time phrase");
           return;
         }
-        // §3.2 S22: the extractor returns the PHRASE; `date-fns-tz`
-        // resolves it at the apply site. The engine does no calendar
-        // arithmetic and neither does the model.
+        // §3.2 S22: the extractor returns the PHRASE and `date-fns-tz`
+        // resolves it. Neither the model nor this file does calendar
+        // arithmetic — `resolveReminderPhrase` is a pure function of
+        // (phrase, now) and refuses anything it is not sure about.
+        const when = resolveReminderPhrase(phrase, input.now);
+        if (!when.ok) {
+          degrade(`reminder time could not be resolved: ${when.reason}`);
+          return;
+        }
+        // The shipped window, reproduced exactly (`route.ts:3941-3947`):
+        // in the future with a 60-second grace, and inside 60 days.
+        // Anything outside it "is almost certainly a parse error, not a
+        // real request. Stay silent rather than fire a wrong-day DM."
+        const deltaMs = when.at.getTime() - input.now.getTime();
+        if (deltaMs <= -REMINDER_PAST_GRACE_MS || deltaMs > REMINDER_MAX_AHEAD_MS) {
+          degrade(
+            `reminder resolves to ${when.at.toISOString()}, outside the 60-day window; refusing`,
+          );
+          return;
+        }
         emit({
           kind: "reminder",
           userId: msg.senderUserId,
           phrase,
+          sendAt: when.at,
+          whenLabel: when.whenLabel,
+          // The message itself when the extractor named nothing. A nudge
+          // whose body is empty is worse than a nudge that quotes the
+          // request back, and neither is a decision.
+          note: (facts.note ?? "").trim() || msg.body.trim(),
           sourceMessageId: msg.id,
           reason: "reminder requested",
         });
-        speech.push({ kind: "reminder_ack", messageId: msg.id, phrase });
+        speech.push({
+          kind: "reminder_ack",
+          messageId: msg.id,
+          phrase,
+          whenLabel: when.whenLabel,
+        });
+        return;
+      }
+
+      if (facts.action === "recruit") {
+        // ── WHO MAY ASK. Not when it runs — see `recruit_blast`. ───────
+        //
+        // Admin-only, exactly as `route.ts:1548-1557` gates it, and NO
+        // tag required: PR #33's `RECRUIT_COMMAND_IMPLIES_ADDRESSED`
+        // says an admin's recruit command is itself a direct instruction
+        // to MatchTime. Both pipelines read that same constant so
+        // flipping it reverts both together.
+        if (!senderIsAdmin) {
+          out.reasons.push("only an admin may send a recruit blast");
+          return;
+        }
+        if (!msg.tagged && !RECRUIT_COMMAND_IMPLIES_ADDRESSED) {
+          out.reasons.push("recruit blast requires an @Match Time tag");
+          return;
+        }
+        // "the last 5 matches" is a fact about the TEXT. The number the
+        // model reports is untrusted and clamped to [1, 12] here, by
+        // `recruit.ts`'s own clamp, because the ceiling exists for a
+        // reason that has nothing to do with language: the bot runs on
+        // an unofficial WhatsApp client and a mass DM risks the account
+        // ban that takes the whole product down.
+        const asked = facts.lookbackMatches;
+        const lookback =
+          typeof asked === "number" && Number.isFinite(asked) && asked > 0
+            ? resolveLookbackMatches(asked)
+            : null;
+        if (lookback !== null && lookback !== Math.floor(asked as number)) {
+          out.reasons.push(
+            `recruit lookback ${asked} clamped to ${lookback} (max ${RECRUIT_LOOKBACK_MAX})`,
+          );
+        }
+        emit({
+          kind: "recruit_blast",
+          lookbackMatches: lookback,
+          sourceMessageId: msg.id,
+          reason: "admin asked for a recruit blast",
+        });
         return;
       }
 

@@ -102,12 +102,14 @@ scoreboard from before PR #34 that does not name its ports is unverifiable.**
 | `current-analyzer-pipeline.ts` | pipeline #1 — today's analyzer, via the sim harness. |
 | `dryrun-pipeline.ts` | pipeline #2 — router → extractor → engine, deciding but never writing (§10 step 2). |
 | `engine-pipeline.ts` | pipeline #3 — the shipped route with the engine WRITING (§10 step 6). |
-| `answer-engine-pipeline.ts` | pipeline #4 — `question` + `balancer`, answered from the database and writing nothing (§10 step 7). |
+| `answer-engine-pipeline.ts` | pipeline #4 — `question` + `balancer`, answered from the database and writing nothing (§10 step 7 part 1). |
+| `write-routes-pipeline.ts` | pipeline #5 — `score` + `admin_ops`, deciding AND writing: scores, Elo, `paidAt`, `PaymentCredit`, reminder DMs (§10 step 7 part 2). |
 | `runner.ts` | feeds cases to a pipeline, scores them, writes the report. |
 | `baseline.stub.json` | what passes today. A record, not an endorsement. |
 | `../sim/corpus.spec.ts` | stubbed runner (CI). |
 | `../sim/corpus-live.spec.ts` | live runner (opt-in). |
 | `../sim/corpus-answers-live.spec.ts` | live runner for pipeline #4 (opt-in). |
+| `../sim/corpus-writes-live.spec.ts` | live runner for pipeline #5 (opt-in). |
 
 ## Four rules
 
@@ -323,3 +325,41 @@ Two more differences:
   read. Measured spend is the direct evidence that the router and the
   extractor were really called — PR #38's rule applied to a harness its
   own mechanism does not reach.
+
+## Pipeline #5 — the two routes that WRITE (§10 step 7 part 2)
+
+```bash
+set -a; source .env; set +a
+npm run test:corpus:writes                       # 3 runs per case
+MT_SIM_RUNS=1 npm run test:corpus:writes         # one pass, cheap
+MT_CORPUS_FILTER=S21 npm run test:corpus:writes  # one case, verbose
+```
+
+`WriteRoutesPipeline` (`write-routes-pipeline.ts`) is router →
+score/admin extractor → engine → **apply** → composer, for `score` and
+`admin_ops`. Unlike pipeline #4 the fifth box is real: it records
+scores, moves `matchRating`, stamps `Attendance.paidAt`, creates
+`PaymentCredit` rows and queues reminder `BotJob`s against the corpus
+database. So `scoreAfter` and `dms` are reads, not proposals.
+
+It declares the cases it owns for the same reason pipeline #4 does, and
+for the same reason should be replaced by a `CurrentAnalyzerPipeline`
+subclass sending `x-mt-engine-routes` once the analyze route knows about
+the flags.
+
+Two things specific to it:
+
+- **The apply layers' dependencies are injected, and this file supplies
+  SQL ones.** The Playwright worker never loads Prisma, so
+  `score-engine.ts` and `admin-ops-engine.ts` take their writes as
+  arguments — the same seam that makes them unit-testable without a
+  database. That does mean these SQL implementations are a second
+  implementation of what the analyze route will inject, and a divergence
+  between them would not show up here. They are one statement each, with
+  no branching, precisely so there is nothing to diverge on.
+- **The recruit blast is measured, not graded.** The engine decides WHO
+  may ask; the blast itself is deferred to the route's batch-final pass
+  (2026-09-01: a blast that ran before the batch's writes told the owner
+  his squad was full one line after he said Najib was out). The grader
+  has no text to judge, so the spec counts recognitions explicitly and
+  prints "recruit ask recognised in N/M runs" instead.

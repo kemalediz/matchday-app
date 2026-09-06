@@ -45,7 +45,7 @@ function state(over: Partial<SquadState> = {}): SquadState {
     completedMatch: null,
     appearances: [],
     lastBotPost: null,
-    features: { attendance: true, paymentTracking: false, statsQa: false },
+    features: { attendance: true, paymentTracking: false, statsQa: false, reminders: false },
     smallerFormats: [],
     guestAskedUserIds: [],
     ...over,
@@ -216,7 +216,7 @@ describe("it fails OPEN — every failure owns nothing and the analyzer keeps th
   it("attendance is off for the org", async () => {
     const d = deps({
       loadState: async () =>
-        state({ features: { attendance: false, paymentTracking: false, statsQa: false } }),
+        state({ features: { attendance: false, paymentTracking: false, statsQa: false, reminders: false } }),
     });
     const r = await run([msg()], d);
     expect(r.ownedIds.size).toBe(0);

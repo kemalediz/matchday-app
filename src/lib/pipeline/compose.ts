@@ -272,9 +272,18 @@ export function compose(result: EngineResult): ComposedOutput {
         break;
 
       case "reminder_ack":
+        // THE RESOLVED TIME, not the words the player used. "I'll give
+        // you a nudge on Monday" is not a confirmation anybody can
+        // check — it repeats the request back — and the whole point of
+        // §3.2 S22 leaving the model is that the time is now a value the
+        // server computed. `route.ts:3986-3992` says the resolved label
+        // for the same reason. The phrase is only the fallback for a
+        // caller that has not resolved one.
         utterances.push({
           messageId: s.messageId,
-          text: `Will do 👍 I'll give you a nudge ${s.phrase}.`,
+          text: s.whenLabel
+            ? `👍 Got it — I'll DM you ${s.whenLabel}.`
+            : `Will do 👍 I'll give you a nudge ${s.phrase}.`,
         });
         break;
 
