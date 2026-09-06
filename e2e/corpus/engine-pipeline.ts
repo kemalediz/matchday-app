@@ -18,19 +18,35 @@
  * pass it, and `e2e/corpus/README.md`'s rule 5 applies: check the code
  * path before calling a failure a defect.
  *
- * ─────────────────────────────────────────────────────────────────────
- * HOW THE FLAG IS FLIPPED, AND WHY IT IS NOT AN ENV VAR
- * ─────────────────────────────────────────────────────────────────────
- * A LIVE sweep runs one dev server whose environment is fixed at boot,
- * and the stub-file seam is pinned empty on live runs on purpose. So an
- * A/B — the same real model, the same real world, the engine on for one
- * arm and off for the other, in ONE process — needs a per-REQUEST
- * signal. That is the `x-mt-attendance-engine` header, which
- * `src/lib/pipeline/gate.ts` reads only when `MT_TEST_MODE` is exactly
- * "1" and which can only ever choose between two shipped code paths.
+ * ═══════════════════════════════════════════════════════════════════════
+ * ⚠️ THIS PIPELINE IS NOW IDENTICAL TO #1 (§10 step 8, 2026-09-06)
+ * ═══════════════════════════════════════════════════════════════════════
  *
- * The baseline arm is the plain `CurrentAnalyzerPipeline`, which sends
- * no header at all and therefore gets the server's own flag — off.
+ * What stood here, and it was the whole design of this class:
+ *
+ *   "A LIVE sweep runs one dev server whose environment is fixed at
+ *    boot… So an A/B — the same real model, the same real world, the
+ *    engine on for one arm and off for the other, in ONE process —
+ *    needs a per-REQUEST signal. That is the `x-mt-attendance-engine`
+ *    header… The baseline arm is the plain `CurrentAnalyzerPipeline`,
+ *    which sends no header at all and therefore gets the server's own
+ *    flag — off."
+ *
+ * `ATTENDANCE_ENGINE_ENABLED` and its header (`ENGINE_HEADER` /
+ * `engineHeaderOverride`) were DELETED from `src/lib/pipeline/gate.ts`
+ * in step 8, in that file's words because "there is no second arm to A/B
+ * against any more": the flag's off position reverted to `analyzeBatch`,
+ * and `analyzeBatch` is gone. So both arms of this A/B are now the same
+ * arm. `attendanceEngine = true` still sends the header; nothing reads
+ * it, and pipeline #1 already runs the engine because that is simply how
+ * the route works.
+ *
+ * KEPT RATHER THAN DELETED, for one reason: `pipeline` is a NAME in
+ * `baseline.stub.json` and in every report under `.e2e/corpus/`, and a
+ * sweep quoted as "attendance-engine: 34/36" must stay re-runnable and
+ * must keep meaning what it meant. It no longer measures a DIFFERENCE
+ * from #1 — do not quote the two side by side as an A/B, because since
+ * 2026-09-06 that comparison has no independent variable.
  */
 import { CurrentAnalyzerPipeline } from "./current-analyzer-pipeline";
 import type { CorpusCase } from "./grade";
@@ -45,12 +61,17 @@ export class AttendanceEnginePipeline extends CurrentAnalyzerPipeline {
   /**
    * LIVE ONLY, deliberately.
    *
-   * A stubbed run drives `analyzeBatch`'s seam, and the engine does not
-   * call `analyzeBatch` — it calls the router and the extractor, which
-   * have their own seams. Grading a "stubbed" run of this pipeline
-   * would therefore be grading the analyzer's canned verdicts against
-   * an engine that never saw them. The engine's deterministic coverage
-   * lives in `src/lib/pipeline/__tests__` (unit) and
+   * A stubbed corpus run drives each case's `stub` block, which is a
+   * VERDICT — and the engine never wanted one: it calls the router and
+   * the extractor, which have their own seams. Grading a "stubbed" run
+   * of this pipeline would therefore be grading canned verdicts against
+   * an engine that never saw them.
+   *
+   * Since §10 step 8 that argument is stronger, not weaker: `analyzeBatch`
+   * is deleted, so a stubbed run of ANY pipeline in this directory now
+   * grades a decider that does not exist (see this directory's README).
+   * The engine's deterministic coverage lives in
+   * `src/lib/pipeline/__tests__` (unit) and
    * `e2e/sim/attendance-engine.spec.ts` (end-to-end, stubbed at the
    * router and extractor seams instead).
    */

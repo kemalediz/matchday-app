@@ -8,21 +8,40 @@
  * believed they had the slot, and the team turned up short.
  *
  * The copy constants are gated by BENCH_PROMPT_MENTION_REACTIONS and
- * unit-tested. This file covers the half a unit test CANNOT: the LLM
- * writes the group reply to the drop itself, so if SYSTEM_PROMPT still
- * suggests "👍/👎 above" the model keeps saying it however the constants
- * are set. A stubbed sim has passed here before while the real model
- * still misbehaved, so this runs the REAL model, several times, because
- * it is non-deterministic. The assertion must hold EVERY run.
+ * unit-tested. This file covers the half a unit test CANNOT: what the
+ * group actually receives, end to end, on a real drop.
+ *
+ * ── WHAT THIS SPEC IS FOR CHANGED WITH §10 STEP 8 (2026-09-06) ───────
+ * It used to read: "the LLM writes the group reply to the drop itself,
+ * so if SYSTEM_PROMPT still suggests '👍/👎 above' the model keeps saying
+ * it however the constants are set." `SYSTEM_PROMPT` is deleted. The
+ * reply to a drop is now COMPOSED — `pipeline/compose.ts` from
+ * `group-copy.ts`'s constants — and a composer cannot improvise a "react
+ * 👍" line at all.
+ *
+ * The spec is KEPT, and the reason it is kept is the reason it existed:
+ * the incident was not "the prompt said the wrong thing", it was "a
+ * player tapped 👍, believed they had the slot, and the team turned up
+ * short". The path from a real drop to the words in the group still runs
+ * through a router, an extractor, an engine, an apply layer and a
+ * composer, and only an end-to-end run proves none of them puts a 👍
+ * back. The RUNS loop stays too: the router and the extractor are
+ * non-deterministic even though the copy is not.
  *
  * Opt-in: only runs when MT_SIM_LIVE_LLM=1.
  *
  * Run:
  *   set -a; source .env; set +a
  *   npm run test:sim:live:bench
- *   # or: MT_SIM_LIVE_LLM=1 npx tsx e2e/run.ts sim/bench-offer-live.spec.ts
  *
- * NEVER weaken these assertions — tune the analyzer prompt until reliable.
+ * NO FLAGS NEEDED. §10 step 8 deleted `ROUTER_GATE_ENABLED` and
+ * `ATTENDANCE_ENGINE_ENABLED` outright — with no analyzer to revert to,
+ * an off position for the attendance path is a kill switch rather than a
+ * lever — so the router and the engine are simply how the route works
+ * now. The "a slot must open" assertion above the copy checks is what
+ * stops this passing vacuously if that ever stops being true.
+ *
+ * NEVER weaken these assertions — fix the composer or the copy constants.
  */
 import type { APIRequestContext } from "@playwright/test";
 import { test, expect, resetDb } from "../fixtures";
@@ -92,7 +111,9 @@ const ROSTER = [
         );
 
         // Pre-existing hard rule, re-pinned: the bench is tagged IN THE
-        // GROUP by the analyzer path. The reply must never claim a DM.
+        // GROUP on this path (the analyzer used to own the wording; the
+        // composer does now, and the rule did not move). The reply must
+        // never claim a DM.
         expect(text, `run ${i + 1}: must not claim a DM was sent`).not.toMatch(
           /\bdm'?d\b|\bin dms\b|\bvia dm\b|privately/i,
         );

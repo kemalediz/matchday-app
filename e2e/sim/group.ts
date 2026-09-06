@@ -10,15 +10,47 @@
  *   r.react / r.reply / r.groupPosts / r.dms        // what the bot did
  *   await g.confirmed() / g.bench() / g.dropped()   // DB end-state
  *
- * Determinism: the LLM is stubbed (MT_TEST_LLM_STUB_FILE — same seam the
- * api/ specs use). `post()` either takes an explicit verdict (what the
- * model WOULD have emitted) or infers one for trivial "in"/"out" bodies;
- * everything after the verdict is the REAL deterministic server logic —
- * apply paths, capacity, bench offers, guards, count/prose
- * reconciliation, outbound BotJobs — which is exactly what the suite is
- * meant to regression-net.
- *
  * No WhatsApp, no Anthropic, no network beyond the local Next server.
+ *
+ * ═══════════════════════════════════════════════════════════════════════
+ * ⚠️ DETERMINISM: `verdict:` IS INERT SINCE §10 STEP 8 (2026-09-06)
+ * ═══════════════════════════════════════════════════════════════════════
+ *
+ * What this said until today, and it was true for eighteen months:
+ *
+ *   "the LLM is stubbed (MT_TEST_LLM_STUB_FILE — same seam the api/
+ *    specs use). `post()` either takes an explicit verdict (what the
+ *    model WOULD have emitted) or infers one for trivial in/out bodies;
+ *    everything after the verdict is the REAL deterministic server
+ *    logic."
+ *
+ * §10 step 8 deleted `analyzeBatch`, `SYSTEM_PROMPT` and `AnalysisVerdict`,
+ * so there is nothing left that reads a verdict. `postBatch` still
+ * collects `verdict:` into a stub file and still writes it; the server
+ * never opens it. A spec that passes one is asserting against a decider
+ * that does not exist, and what it will actually get is `route.ts`'s
+ * "NOBODY OWNED IT" branch — no write, no reply, one operator note.
+ *
+ * THE DETERMINISM SEAM IS NOW TWO FILES, one layer either side of where
+ * the verdict used to sit:
+ *
+ *   `setRouterStub({ enabled, engine, engineRoutes, bodies })`
+ *        what the ROUTER answered, and which route flags are on for
+ *        this request (`src/lib/pipeline/gate.ts`,
+ *        `src/lib/pipeline/route-flags.ts`)
+ *   `setExtractorStub({ bodies, fail, failAll })`
+ *        what the EXTRACTOR found — raw JSON, so `parseFacts` still
+ *        runs for real (`src/lib/pipeline/extractor-stub.ts`)
+ *
+ * Everything after those two is still the REAL deterministic server
+ * logic — the engine's rules, the apply paths, capacity, bench offers,
+ * the interaction contract, the batch-final squad post, outbound BotJobs
+ * — which is still exactly what the suite is meant to regression-net.
+ *
+ * `e2e/sim/attendance-engine.spec.ts` is the worked example. The specs
+ * still on the dead seam are enumerated in `e2e/helpers/stub.ts`'s
+ * header; `verdict:` and `inferVerdict` are kept only so they compile
+ * until they are ported.
  */
 import type { APIRequestContext } from "@playwright/test";
 import { expect } from "@playwright/test";
@@ -119,7 +151,7 @@ export interface CompletedMatchSpec {
   /** null scores = unscored (waiting for a score). Default 3–2. */
   redScore?: number | null;
   yellowScore?: number | null;
-  status?: "COMPLETED" | "TEAMS_PUBLISHED";
+  status?: "COMPLETED" | "TEAMS_PUBLISHED" | "TEAMS_GENERATED";
   /** key → team, for Elo / rating flows. */
   teams?: Record<string, "RED" | "YELLOW">;
   postMatchEndFlow?: boolean;
@@ -345,6 +377,13 @@ export async function createGroup(
 }
 
 // ── Default-verdict inference for trivial bodies ───────────────────────
+//
+// ⚠️ INERT since §10 step 8 — see the header. What it returns is written
+// to a file nothing reads. Kept, rather than deleted with the seam, for
+// two reasons: `postBatch`'s signature is shared by ~20 specs that have
+// not been ported yet, and the two `sim default:` reasoning strings are
+// still in `live-llm.ts`'s `STUB_PREFIXES`, so if anything ever wires a
+// verdict path back up, a "live" sweep reading these is still caught.
 
 export function inferVerdict(body: string): StubVerdict | undefined {
   const t = body.trim().toLowerCase().replace(/[!.\s]+$/g, "");
@@ -387,6 +426,8 @@ export interface BatchItem {
   /** Player key, or omit and pass `author` for an unknown sender. */
   player?: string;
   body: string;
+  /** ⚠️ INERT since §10 step 8. Setting it changes nothing the server
+   *  does — see the file header. Use `setRouterStub` + `setExtractorStub`. */
   verdict?: StubVerdict;
   author?: { name: string | null; phone: string };
   /** Simulate the message @-mentioning the bot ("@Match Time …"). Sets
@@ -411,15 +452,22 @@ export interface SimBatchOpts {
   /** Recent chat history to send with the batch (oldest first). */
   history?: SimHistoryEntry[];
   /**
-   * §10 step 6, LIVE runs only: force the attendance engine on or off
-   * for THIS request, via the test-only `x-mt-attendance-engine` header
-   * (`src/lib/pipeline/gate.ts`, inert unless MT_TEST_MODE is "1").
+   * ⚠️ INERT since §10 step 8 (2026-09-06). Still sends the
+   * `x-mt-attendance-engine` header; nothing reads it.
    *
-   * The stub-file seam cannot do this on a live run — the suite pins
-   * `MT_TEST_ROUTER_STUB_FILE` empty there on purpose — and the dev
-   * server's environment is fixed at boot, so a live A/B has no other
-   * way to run one arm with the flag on and the next with it off in the
-   * same process. Omitted → the server's own flag decides.
+   * It existed for a live A/B: one arm with the attendance engine on and
+   * the next with it off, in one process, because the dev server's
+   * environment is fixed at boot. `ENGINE_HEADER` / `engineHeaderOverride`
+   * were deleted from `src/lib/pipeline/gate.ts` with
+   * `ATTENDANCE_ENGINE_ENABLED` itself — "there is no second arm to A/B
+   * against any more", in that file's words, because the flag's off
+   * position reverted to `analyzeBatch` and `analyzeBatch` is gone.
+   *
+   * Kept only so `e2e/corpus/current-analyzer-pipeline.ts` and its
+   * `AttendanceEnginePipeline` subclass still compile. Passing it
+   * changes nothing; a spec that relies on it is asserting an arm that
+   * cannot exist. `src/lib/pipeline/__tests__/gate.test.ts` holds the
+   * tombstone for the deleted header.
    */
   attendanceEngine?: boolean;
 }

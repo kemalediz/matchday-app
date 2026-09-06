@@ -4,10 +4,25 @@
  *
  * The unit tests prove the engine decides correctly and the apply layer
  * translates faithfully. This proves the thing that actually matters:
- * that a message routed `self_att` / `other_att` / `offer` produces the
- * right ROW, that turning the flag off restores today exactly, and that
- * the three incidents the step's deleted seatbelts were written for now
- * come out right with no seatbelt anywhere in the path.
+ * that a message routed `self_att` / `other_att` / `offer` / `unsure`
+ * produces the right ROW, that turning the flag off is a complete
+ * revert, and that the three incidents the step's deleted seatbelts were
+ * written for now come out right with no seatbelt anywhere in the path.
+ *
+ * ── THIS FILE IS ALSO THE WORKED EXAMPLE OF A PORTED SPEC ────────────
+ * §10 step 8 deleted `analyzeBatch`, so `e2e/sim/group.ts`'s `verdict:`
+ * seam decides nothing any more. Every case below drives the server
+ * through the two seams that DO decide — `setRouterStub` (route + which
+ * flags are on for this request) and `setExtractorStub` (the raw facts
+ * JSON, so `parseFacts` still runs for real) — which is the shape the
+ * ~20 specs listed in `e2e/helpers/stub.ts`'s header still need.
+ *
+ * Four cases changed MEANING rather than mechanism when the incumbent
+ * disappeared, and each says so at its own site rather than here: the
+ * flag-off case (the revert is now to silence), the not-owned case
+ * (`unsure` became an owned route), the extractor-failure case (the
+ * write is now LOST — read that one), and the one-squad-post case (a
+ * mixed batch now has one speaker by construction).
  *
  * OVER-WRITING IS THE DANGEROUS DIRECTION. Registering someone who did
  * not ask, or dropping someone who did not ask to be dropped, is worse
@@ -45,8 +60,22 @@ const LIVE = process.env.MT_SIM_LIVE_LLM === "1";
     clearExtractorStub();
   });
 
-  /** Turn the engine on for this request and say, per body, what the
-   *  router answered and what the extractor found. */
+  /**
+   * Say, per body, what the router answered and what the extractor
+   * found.
+   *
+   * ── IT NO LONGER "TURNS THE ENGINE ON" (§10 step 8, 2026-09-06) ────
+   * It used to send `{ enabled: false, engine: true }` — the router gate
+   * off, the attendance engine on — so that each step could be shown to
+   * work on its own flag. `ROUTER_GATE_ENABLED` and
+   * `ATTENDANCE_ENGINE_ENABLED` are DELETED (`pipeline/gate.ts`), and
+   * `RouterStubConfig` no longer declares either field, because with no
+   * analyzer their off positions were kill switches rather than reverts.
+   * The engine is now simply how `self_att` / `other_att` / `offer` /
+   * `unsure` are handled, so this function only answers for the router
+   * and the extractor. The name is kept because every call site reads
+   * `engineOn({...})` and the intent is unchanged.
+   */
   function engineOn(
     map: Record<string, { route: string; facts?: Record<string, unknown> }>,
   ): void {
@@ -56,9 +85,7 @@ const LIVE = process.env.MT_SIM_LIVE_LLM === "1";
       bodies[body] = v.route;
       if (v.facts) factBodies[body] = v.facts;
     }
-    // `enabled: false` — the ROUTER GATE stays off. Step 6 must work on
-    // its own flag, and the two must be independent in both directions.
-    setRouterStub({ enabled: false, floor: false, engine: true, bodies });
+    setRouterStub({ floor: false, bodies });
     setExtractorStub({ bodies: factBodies });
   }
 
@@ -66,42 +93,101 @@ const LIVE = process.env.MT_SIM_LIVE_LLM === "1";
 
   // ── The default: nothing changes ──────────────────────────────────
 
-  test("with the flag OFF, the analyzer decides exactly as it does today", async ({
+  test("there is no OFF any more: an unrouted message is OWNED, and writes nothing", async ({
     request,
     db,
   }) => {
+    // ═══════════════════════════════════════════════════════════════════
+    // ⚠️ PORTED TWICE ON 2026-09-06. WHAT THIS TEST MEANT CHANGED TWICE.
+    // ═══════════════════════════════════════════════════════════════════
+    //
+    // ORIGINALLY: "with the flag OFF, the analyzer decides exactly as it
+    // does today" — it cleared both stubs and asserted pete ended up
+    // CONFIRMED, because with `ATTENDANCE_ENGINE_ENABLED` off the
+    // mega-prompt still registered him.
+    //
+    // THEN `analyzeBatch` was deleted, which made the flag's off position
+    // mean SILENCE rather than "the incumbent decides".
+    //
+    // THEN THE FLAG ITSELF WAS DELETED, in the same change and for that
+    // reason: `gate.ts`'s essay calls an off position with no
+    // implementation "a kill switch for the product's core write path
+    // wearing the name of a tuning lever", and says plainly that the
+    // revert for step 8 is `git revert`. `ROUTER_GATE_ENABLED`,
+    // `ATTENDANCE_ENGINE_ENABLED`, `ENGINE_HEADER` and the `enabled` /
+    // `engine` stub fields all went with it.
+    //
+    // So there is no "flag off" state left to test, and this case now
+    // pins what replaced it — which is a real, load-bearing behaviour and
+    // the other half of the same decision. `unsure` joined
+    // `ENGINE_ROUTES`, and an unmapped id routes `unsure`
+    // (`gate.ts:711`), so a message nobody wrote a route for is now
+    // OWNED by the attendance engine rather than dropped. §11.1's
+    // asymmetry, made real: "a false positive costs one extractor call
+    // (~$0.002) that returns no claims. A false negative costs a player
+    // their slot."
+    //
+    // The direction that matters is that owning it costs nothing: the
+    // extractor found no claims, so nothing is written and nothing is
+    // said. An `attendance-engine` row appears, and that is the point —
+    // the decision is auditable instead of invisible.
+    //
+    // THE TOMBSTONE for the deleted flags lives in
+    // `src/lib/pipeline/__tests__/gate.test.ts` ("names no predicate for
+    // a flag that was deleted"), which is why this file does not try to
+    // assert their absence as well.
     const g = await createGroup(request, db, { attendance: [] });
     clearRouterStub();
     clearExtractorStub();
 
-    await g.postBatch([
-      {
-        player: "pete",
-        body: "in",
-        verdict: { intent: "in", registerAttendance: "IN", react: "✅" },
-      },
-    ]);
+    const res = await g.postBatch([{ player: "pete", body: "in" }]);
 
-    expect(await g.attendanceOf("pete")).toMatchObject({ status: "CONFIRMED" });
-    const rows = await db.all<{ n: string }>(
-      `SELECT count(*)::text AS n FROM "AnalyzedMessage" WHERE "handledBy" = 'attendance-engine'`,
+    expect(
+      await g.attendanceOf("pete"),
+      "no facts means no write, however the message was routed",
+    ).toBeNull();
+    expect(res.results[0].reply, "and nothing is said to the group").toBeNull();
+
+    // OWNED, not dropped. This is the assertion that inverted: it used
+    // to require this count to be "0".
+    const row = await db.one<{ handledBy: string }>(
+      `SELECT "handledBy" FROM "AnalyzedMessage" WHERE "orgId" = $1 AND body = 'in'`,
+      [g.orgId],
     );
-    expect(rows[0].n).toBe("0");
+    expect(
+      row?.handledBy,
+      "an unmapped id routes `unsure`, which the engine owns since §10 step 8 — a message " +
+        "nobody claims is now the exception rather than the default",
+    ).toBe("attendance-engine");
   });
 
   // ── Over-writing: the dangerous direction, first ──────────────────
 
   test("a message the engine does NOT own cannot be written by it", async ({ request, db }) => {
+    // ── PORTED 2026-09-06, §10 STEP 8. THE ROUTE HAD TO MOVE. ────────
+    //
+    // This used `unsure`, on the reasoning that "`unsure` is
+    // attendance-SHAPED and deliberately not owned: the router could not
+    // settle it, so the analyzer decides". `unsure` JOINED `ENGINE_ROUTES`
+    // in step 8 (`gate.ts:265-270`) and for exactly that reason inverted:
+    // with no analyzer, the question a doubtful route asks is no longer
+    // "engine or analyzer" but "engine or silence", and §11.1 answers it
+    // the other way — a false positive costs one extractor call that
+    // returns no claims, a false negative costs a player their slot.
+    //
+    // The PROPERTY under test is unchanged; the example had to move.
+    // `none` is now the strongest statement of it: the router called it
+    // banter, a perfectly good IN is sitting in the extractor stub, and
+    // the engine must still not touch the row. This is that constant
+    // (`ENGINE_ROUTES` excludes `none`) asserted end to end rather than
+    // read.
     const g = await createGroup(request, db, { attendance: [] });
-    // `unsure` is attendance-SHAPED and deliberately not owned: the
-    // router could not settle it, so the analyzer decides. Even with
-    // facts sitting in the stub, the engine must not touch it.
-    engineOn({ "maybe later?": { route: "unsure", facts: IN() } });
+    engineOn({ "😂😂 never": { route: "none", facts: IN() } });
 
-    await g.postBatch([{ player: "pete", body: "maybe later?", verdict: { intent: "unclear" } }]);
+    await g.postBatch([{ player: "pete", body: "😂😂 never" }]);
 
     const row = await db.one<{ handledBy: string }>(
-      `SELECT "handledBy" FROM "AnalyzedMessage" WHERE "orgId" = $1 AND body = 'maybe later?'`,
+      `SELECT "handledBy" FROM "AnalyzedMessage" WHERE "orgId" = $1 AND body = '😂😂 never'`,
       [g.orgId],
     );
     expect(row?.handledBy).not.toBe("attendance-engine");
@@ -629,43 +715,104 @@ const LIVE = process.env.MT_SIM_LIVE_LLM === "1";
     expect(await g.attendanceOf("dan")).toMatchObject({ status: "CONFIRMED" });
   });
 
-  test("an extractor failure hands the message to the ANALYZER, not to silence", async ({
+  test("an extractor failure now LOSES the write, and says so — the second line is gone", async ({
     request,
     db,
   }) => {
-    // §11.4 asked for "fail closed and surface it". That was written
-    // before the analyzer was still standing beside this path, and
-    // closed here meant SILENT — no write, no reply, and a player who
-    // said IN not in the squad. The first live sweep measured 27
-    // `529 Overloaded` and 3 `500`s across 10 messages, which took two
-    // corpus cases from 3/3 to 0/3 without the engine ever deciding
-    // them wrongly.
+    // ═══════════════════════════════════════════════════════════════════
+    // ⚠️ THE MOST IMPORTANT BEHAVIOUR CHANGE §10 STEP 8 MADE, AND IT IS
+    //    A LOSS. THIS TEST NOW PINS THE LOSS.
+    // ═══════════════════════════════════════════════════════════════════
     //
-    // So the message goes back to the incumbent, with every seatbelt
-    // still around it: the step's own revert, applied per message and
-    // automatically. Possible only because the engine runs BEFORE
-    // `analyzeBatch`, so nothing has been written and no batch sent.
+    // What this test asserted until 2026-09-06, under the title "an
+    // extractor failure hands the message to the ANALYZER, not to
+    // silence":
+    //
+    //     expect(await g.attendanceOf("pete")).toMatchObject({ status: "CONFIRMED" });
+    //     expect(row?.handledBy).toBe("llm");
+    //
+    // …and the reasoning, verbatim: "§11.4 asked for 'fail closed and
+    // surface it'. That was written before the analyzer was still
+    // standing beside this path, and closed here meant SILENT — no
+    // write, no reply, and a player who said IN not in the squad. The
+    // first live sweep measured 27 `529 Overloaded` and 3 `500`s across
+    // 10 messages, which took two corpus cases from 3/3 to 0/3 without
+    // the engine ever deciding them wrongly. So the message goes back to
+    // the incumbent, with every seatbelt still around it."
+    //
+    // THE INCUMBENT IS DELETED. `attendance-engine-batch.ts` still drops
+    // a failed extraction out of `ownedIds` and still logs "handing this
+    // message back to the analyzer" — there is nothing to hand it to.
+    // The message reaches `route.ts`'s "NOBODY OWNED IT" branch: no
+    // write, no reply, an `AnalyzedMessage` row, and one deduped
+    // operator DM.
+    //
+    // So the exact failure §10 step 6 refused to accept — "a player who
+    // said IN is not in the squad, because the API was busy" — is now
+    // the shipped behaviour when an extractor call fails after the SDK's
+    // four retries. It is written down here, as a passing test, rather
+    // than discovered by a club on a Tuesday. WHAT WOULD MAKE IT
+    // ACCEPTABLE is not a fallback decider (there is none to build) but
+    // a RETRY or a REPLAY of the failed id, and neither exists yet.
+    //
+    // What is still proved, and is why this is a port and not a
+    // deletion: the failure is LOUD. Nothing is written, nothing
+    // cheerful is said, the row records why, and the operator note
+    // fires. Silence with no signal is §9's signature failure; silence
+    // WITH a signal is the accepted one.
     const g = await createGroup(request, db, { attendance: [] });
     setRouterStub({ enabled: false, floor: false, engine: true, bodies: { in: "self_att" } });
     // Something `extractJson` cannot read at all.
     setExtractorStub({ bodies: { in: "not json at all" as never } });
 
-    await g.postBatch([
-      {
-        player: "pete",
-        body: "in",
-        verdict: { intent: "in", registerAttendance: "IN", react: "✅" },
-      },
-    ]);
+    const res = await g.postBatch([{ player: "pete", body: "in" }]);
 
-    // The write still lands — by the OTHER decider.
-    expect(await g.attendanceOf("pete")).toMatchObject({ status: "CONFIRMED" });
-    const row = await db.one<{ handledBy: string }>(
-      `SELECT "handledBy" FROM "AnalyzedMessage" WHERE "orgId" = $1 AND body = 'in'`,
+    // THE LOSS: the write does not land. There is no second decider.
+    expect(
+      await g.attendanceOf("pete"),
+      "since §10 step 8 an extractor failure loses the registration outright",
+    ).toBeNull();
+    // And nothing cheerful is said about a write that did not happen.
+    expect(res.results[0].reply).toBeNull();
+
+    // THE SIGNAL: the row says why, and it is not `attendance-engine`
+    // (which would claim the engine decided it).
+    const row = await db.one<{ handledBy: string; reasoning: string }>(
+      `SELECT "handledBy", reasoning FROM "AnalyzedMessage" WHERE "orgId" = $1 AND body = 'in'`,
       [g.orgId],
     );
-    expect(row?.handledBy).toBe("llm");
     expect(row?.handledBy).not.toBe("attendance-engine");
+    expect(row?.reasoning).toContain("no owner:");
+    // The DEGRADATION has to reach the row, or an extractor failure is
+    // indistinguishable from ordinary banter nobody owned — and the two
+    // want completely different responses from a human.
+    //
+    // MEASURED, not assumed. The row reads:
+    //   no owner: route=self_att — extractor <id>: attendance extractor
+    //   output could not be parsed: no JSON object in the response
+    // i.e. the line comes from the EXTRACTOR stage, not from
+    // `ENGINE_APPLY_DEGRADED_PREFIX`. Asserted on the two facts a human
+    // needs (which stage, and that it was a failure rather than a
+    // decision) rather than on a marker string, which would pin the
+    // wording of a sentence nothing parses.
+    expect(row?.reasoning).toContain("extractor");
+    expect(row?.reasoning).toMatch(/could not be parsed|degraded|failed/i);
+
+    // And the operator hears about it — `lib/operator-note.ts`, the
+    // typed successor to the "LLM dropped N messages" DM. Matched on
+    // `OPERATOR_NOTE_MARKER` rather than on "some DM was sent", because
+    // this world also queues bench and squad DMs and "a DM exists" would
+    // pass for the wrong reason.
+    //
+    // The note's 1-hour dedupe is scoped to `orgId` and `createGroup`
+    // mints a fresh org per test, so an earlier test's note in this file
+    // cannot suppress this one.
+    const dms = res.dms.map((d) => d.text).join("\n");
+    expect(
+      dms,
+      "an unowned attendance message must raise the operator note — silence with no " +
+        "signal is §9's signature failure and is the only thing making this loss survivable",
+    ).toContain("routed to an action but nothing handled");
   });
 
   // ── the two defects the first live sweep found ────────────────────
@@ -707,7 +854,10 @@ const LIVE = process.env.MT_SIM_LIVE_LLM === "1";
     expect(res.results.filter((r) => (r.reply ?? "").length > 0).length).toBeGreaterThan(0);
   });
 
-  test("ONE squad post per batch even when both deciders speak", async ({ request, db }) => {
+  test("ONE squad post per batch — and a mixed batch now has only one speaker at all", async ({
+    request,
+    db,
+  }) => {
     // The other defect the first live sweep found, on
     // `S36-one-authoritative-squad-post-per-batch`: the engine posts the
     // roster whenever the squad changed, the analyzer answers the
@@ -715,31 +865,51 @@ const LIVE = process.env.MT_SIM_LIVE_LLM === "1";
     // incumbent avoided it for the wrong reason — a plain "in" got a
     // react and no reply — so the question's answer was the only send.
     //
-    // The squad post now rides on the LAST message that speaks,
-    // whichever decider produced it, so the answer and the roster
-    // arrive as one message.
+    // ── PORTED 2026-09-06, §10 STEP 8 ────────────────────────────────
+    //
+    // The old title was "even when both deciders speak", and the second
+    // decider was the mega-prompt answering the question. It is deleted,
+    // and the scenario it created is now UNREACHABLE BY CONSTRUCTION
+    // rather than merely handled: `answer-batch.ts`'s
+    // `batchCarriesAnythingElse` refuses to own ANY question in a batch
+    // that carries a message on a route step 7 does not own — the two
+    // INs here — because its answers are composed from a pre-write
+    // `SquadState` snapshot and "Yes, you're 2/14" beside somebody's own
+    // "in" is a claim about a squad that no longer exists.
+    //
+    // So the batch has one speaker by design, and this test now asserts
+    // BOTH halves: the single post still carries the batch-final roster
+    // read from the database (the original point), and the question is
+    // declined rather than answered from stale state (the stronger
+    // guarantee that replaced "both deciders, one post"). The step-7
+    // route is turned ON via `engineRoutes` so the decline is a real
+    // decision by a live owner and not the flag being off.
     const g = await createGroup(request, db, { attendance: [] });
-    engineOn({
-      in: { route: "self_att", facts: IN() },
-      "me too": { route: "self_att", facts: IN() },
-      "@Match Time how many are we now?": { route: "question" },
+    setRouterStub({
+      enabled: false,
+      floor: false,
+      engine: true,
+      engineRoutes: ["question"],
+      bodies: {
+        in: "self_att",
+        "me too": "self_att",
+        "@Match Time how many are we now?": "question",
+      },
+    });
+    setExtractorStub({
+      bodies: {
+        in: IN(),
+        "me too": IN(),
+        // Real question facts, so the answer engine's decline is its
+        // OWN mixed-batch rule and not a parse failure.
+        "@Match Time how many are we now?": { topic: "count", personRef: null, statedCount: null },
+      },
     });
 
     const res = await g.postBatch([
       { player: "pete", body: "in" },
       { player: "dan", body: "me too" },
-      {
-        player: "felix",
-        body: "@Match Time how many are we now?",
-        tag: true,
-        verdict: {
-          intent: "question",
-          registerAttendance: null,
-          confidence: 0.9,
-          reply: "We're 2 in now, need plenty more.",
-          reasoning: "squad-state question",
-        },
-      },
+      { player: "felix", body: "@Match Time how many are we now?", tag: true },
     ]);
 
     const spoke = res.results.filter((r) => (r.reply ?? "").length > 0);
@@ -748,32 +918,54 @@ const LIVE = process.env.MT_SIM_LIVE_LLM === "1";
     // The one send carries the roster, composed from the database.
     expect(spoke[0].reply).toContain("2/");
     expect(spoke[0].reply).not.toContain("[SQUAD]");
+    // …and it is NOT the question's answer. A batch that writes must not
+    // also answer from the pre-write snapshot.
+    expect(spoke[0].waMessageId).not.toBe(res.results[2].waMessageId);
+    expect(res.results[2].reply).toBeNull();
     // Both writes landed.
     expect(await g.attendanceOf("pete")).toMatchObject({ status: "CONFIRMED" });
     expect(await g.attendanceOf("dan")).toMatchObject({ status: "CONFIRMED" });
   });
 
-  test("turning the flag back off is a complete revert, mid-suite", async ({ request, db }) => {
-    // §10's revert column for step 6 is one flag. This is that claim as
-    // a test rather than a sentence: the same body, the same world, the
-    // flag flipped, and the analyzer decides again.
+  test("the stubs do not leak between tests — clearing them is a complete reset", async ({
+    request,
+    db,
+  }) => {
+    // ── DELETED AND REPLACED 2026-09-06, §10 STEP 8 ──────────────────
+    //
+    // WHAT WAS HERE: "turning the flag back off is a complete revert,
+    // mid-suite" — the same body, the same world, `ATTENDANCE_ENGINE_ENABLED`
+    // flipped off mid-file, asserting `handledBy === "llm"`, i.e. that
+    // the mega-prompt decided it again. It was §10's revert column for
+    // step 6 written as a test rather than a sentence.
+    //
+    // THAT CLAIM NO LONGER HAS A SUBJECT. The flag is deleted from
+    // `pipeline/gate.ts`, and so is the analyzer it reverted to. There
+    // is no mid-suite flip to make and nothing for it to flip to; the
+    // revert for step 8 is `git revert`, which that file says in terms.
+    // COVERED NOW by `src/lib/pipeline/__tests__/gate.test.ts`'s "names
+    // no predicate for a flag that was deleted", which is a tombstone
+    // for exactly these names and sends the next person who wants a kill
+    // switch to the essay explaining why there isn't one.
+    //
+    // WHAT REPLACES IT, and why this file still needs a last case: the
+    // property that made the old test worth running at the END was
+    // isolation — that twenty-odd stubbed cases leave no residue for the
+    // next one. That is now the only thing left to check here, and it
+    // still matters: `afterEach` clears both stub files, and a leak
+    // would make every case after the leaking one test a world nobody
+    // described. Same shape as the old test, one flag lighter.
     const g = await createGroup(request, db, { attendance: [] });
     clearRouterStub();
     clearExtractorStub();
 
-    await g.postBatch([
-      {
-        player: "pete",
-        body: "in",
-        verdict: { intent: "in", registerAttendance: "IN", react: "✅" },
-      },
-    ]);
+    const res = await g.postBatch([{ player: "pete", body: "in" }]);
 
-    expect(await g.attendanceOf("pete")).toMatchObject({ status: "CONFIRMED" });
-    const row = await db.one<{ handledBy: string }>(
-      `SELECT "handledBy" FROM "AnalyzedMessage" WHERE "orgId" = $1 AND body = 'in'`,
-      [g.orgId],
-    );
-    expect(row?.handledBy).toBe("llm");
+    // No facts survive from any earlier case, so nothing is written and
+    // nothing is said — whoever ends up owning the message.
+    expect(await g.attendanceOf("pete")).toBeNull();
+    expect(res.results[0].reply).toBeNull();
+    expect(res.groupPosts).toEqual([]);
+    expect(await g.counts()).toMatchObject({ confirmed: 0, bench: 0 });
   });
 });

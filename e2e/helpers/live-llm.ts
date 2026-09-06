@@ -11,11 +11,32 @@
  *
  * Four seconds. 8 of 47 cases "passed". Exit 0. Not one of the 141 runs
  * reached Anthropic: `buildTestEnv()` forwards `ANTHROPIC_API_KEY: ""`
- * when the orchestrator has no key, `getAnthropic()` returns null, and
- * every message gets `offlineVerdict(…, "ANTHROPIC_API_KEY not set")`.
+ * when the orchestrator has no key, `getAnthropic()` returned null, and
+ * every message got `offlineVerdict(…, "ANTHROPIC_API_KEY not set")`.
  * Nothing errored. The same failure shape as the pre-#34 port collision
  * and for the same reason: a measurement that silently did not happen
  * still renders as a number, and a number renders as confidence.
+ *
+ * ── WHAT §10 STEP 8 CHANGED HERE (2026-09-06) ────────────────────────
+ * `offlineVerdict` and `analyzeBatch` are deleted, so the exact string
+ * this file was written to hunt for can no longer be written. THE
+ * FAILURE CLASS DID NOT GO WITH THEM — it changed shape, and in a
+ * direction that is harder to see, not easier:
+ *
+ *   BEFORE  no key → every message gets a verdict saying "no key", and
+ *           the sweep scores whatever an all-silent analyzer scores.
+ *   NOW     no key, or every route flag off, or a router that returned
+ *           nothing → every message reaches the end of the batch with
+ *           NO OWNER, `route.ts` records `reasoning: "no owner: route=…"`
+ *           and says nothing to the group. The sweep scores whatever a
+ *           silent bot scores. There is no second decider left to make
+ *           the misconfiguration visible.
+ *
+ * So the classifier below gained an `unowned` class and a rule that
+ * fails a live sweep in which more messages were decided by nobody than
+ * reached a model, and the probe stopped asking one model whether it
+ * works and started asking the three the pipeline actually calls. Both
+ * are documented at their definitions.
  *
  * It is worse than the port collision, because every live figure quoted
  * from a sweep — the corpus baselines, the replay noise floor, the
@@ -57,10 +78,43 @@ export const EXTRACTOR_STUB_FILE_ENV = "MT_TEST_EXTRACTOR_STUB_FILE";
 export const KEY_ENV = "ANTHROPIC_API_KEY";
 
 /**
- * The model `analyzeBatch` actually calls. Probing anything else would
- * prove the wrong thing — a key can be entitled to one model and not
- * another — so `live-llm.test.ts` reads `const MODEL` out of
- * `src/lib/message-analyzer.ts` and fails if these drift apart.
+ * EVERY model a live sweep can bill, and the reason this is a list.
+ *
+ * It was a single string — `claude-sonnet-4-5`, the model `analyzeBatch`
+ * called — and probing one model is only sound while one model exists.
+ * §10 step 8 deleted `analyzeBatch` and left the pipeline, which calls
+ * THREE, on two different families:
+ *
+ *   claude-haiku-4-5   the router          (`pipeline/llm.ts:54`)
+ *   claude-sonnet-5    every extractor     (`pipeline/llm.ts:55`)
+ *   claude-sonnet-4-5  the scheduled-chase composer
+ *                      (`message-analyzer.ts`'s surviving `MODEL`)
+ *
+ * A key entitled to `sonnet-4-5` and not to `sonnet-5` would have sailed
+ * through the old single probe and then failed EVERY extractor call —
+ * which lands as `attendance-engine: degraded —` on each message and, per
+ * `route.ts`'s catch-all, as silence. That is precisely the "runs, looks
+ * plausible, measured nothing" shape this whole file exists to refuse,
+ * reintroduced by a deletion that had nothing to do with it. Probing all
+ * three costs three tokens.
+ *
+ * `live-llm.test.ts` reads the model constants out of
+ * `src/lib/pipeline/llm.ts` and `src/lib/message-analyzer.ts` and fails
+ * if this list drifts from them.
+ */
+export const PROBE_MODELS: readonly string[] = [
+  "claude-haiku-4-5",
+  "claude-sonnet-5",
+  "claude-sonnet-4-5",
+];
+
+/**
+ * The single model `probeAnthropic` uses when the caller names none.
+ *
+ * Kept as a named export, and kept pointing at the CHASE composer's
+ * model, because that is the one `message-analyzer.ts` still declares
+ * and the drift test still reads from there. Callers that care about
+ * the whole surface use `PROBE_MODELS`.
  */
 export const PROBE_MODEL = "claude-sonnet-4-5";
 
@@ -109,9 +163,10 @@ export function assertSeamMatchesMode(
       throw new E2EPreflightError(
         `e2e: REFUSING to run — ${LIVE_ENV_FLAG}=1 asks for a LIVE model run, but ` +
           `${KEY_ENV} is empty.\n` +
-          `  Every message would fall through to offlineVerdict("${KEY_ENV} not set"), the ` +
-          `sweep would score whatever an all-silent analyzer scores, and it would PASS. ` +
-          `That is a fabricated measurement, not a result.\n` +
+          `  Every router and extractor call would throw "${KEY_ENV} not set" ` +
+          `(pipeline/llm.ts:138), every message would reach the end of the batch with no ` +
+          `owner, the bot would say nothing, and the sweep would score whatever a silent ` +
+          `bot scores — and PASS. That is a fabricated measurement, not a result.\n` +
           `  Fix:  set -a; source .env; set +a   (the key lives in the repo-root .env)\n` +
           `  A fresh worktree has no .env of its own — copy one in, or export ${KEY_ENV} ` +
           `for this run.`,
@@ -121,8 +176,9 @@ export function assertSeamMatchesMode(
       throw new E2EPreflightError(
         `e2e: REFUSING to run — ${LIVE_ENV_FLAG}=1 asks for a LIVE model run, but the ` +
           `server under test would still see ${STUB_FILE_ENV}=${childEnv[STUB_FILE_ENV]}.\n` +
-          `  analyzeBatch short-circuits to the stub file before it ever builds a prompt, so ` +
-          `the "live" sweep would be stubbed end to end and would report the stub's numbers ` +
+          `  Since §10 step 8 this variable no longer stubs verdicts (analyzeBatch is ` +
+          `deleted) — it is dm-qa.ts's stub flag, and with it set every scoped DM answer ` +
+          `would be the SCOPED CONTEXT echoed back rather than a model's answer, reported ` +
           `as the model's.\n` +
           `  Fix:  unset ${STUB_FILE_ENV} in your shell — the suite sets it itself for ` +
           `stubbed runs and pins it empty for live ones.`,
@@ -157,8 +213,9 @@ export function assertSeamMatchesMode(
   if (blank(childEnv[STUB_FILE_ENV])) {
     throw new E2EPreflightError(
       `e2e: REFUSING to run — this is a STUBBED run (${LIVE_ENV_FLAG} is not 1) but the ` +
-        `server under test would have no ${STUB_FILE_ENV}, so analyzeBatch would try the ` +
-        `real model.\n` +
+        `server under test would have no ${STUB_FILE_ENV}, so dm-qa.ts would try the real ` +
+        `model and the DM-Q&A no-leak assertions would be grading a model's prose instead ` +
+        `of the scoped context itself.\n` +
         `  Fix:  run the suite via \`npm run test:e2e\`; do not clear ${STUB_FILE_ENV}.`,
     );
   }
@@ -321,27 +378,46 @@ function firstLine(text: string): string {
   return t.length > 240 ? `${t.slice(0, 240)}…` : t;
 }
 
-/** The whole live pre-flight: seam, then a real token. Returns the probe
- *  so the caller can print it — a live run should say, on its own first
- *  lines, that it really is live. */
+/**
+ * The whole live pre-flight: seam, then a real token on EVERY model the
+ * sweep can bill. Returns one probe per model so the caller can print
+ * them — a live run should say, on its own first lines, that it really
+ * is live, and against what.
+ *
+ * Sequential rather than `Promise.all`, deliberately: the first refusal
+ * is the one worth reading, and three concurrent failures produce three
+ * stack-shaped messages where one named model is the answer.
+ */
 export async function assertLiveLlmReady(opts: {
   childEnv: Record<string, string | undefined>;
   fetchImpl?: FetchLike;
-}): Promise<ProbeResult> {
+  /** Override for the harness's own tests. Defaults to `PROBE_MODELS`. */
+  models?: readonly string[];
+}): Promise<ProbeResult[]> {
   assertSeamMatchesMode("live", opts.childEnv);
-  return probeAnthropic({
-    key: opts.childEnv[KEY_ENV]!.trim(),
-    ...(opts.childEnv.ANTHROPIC_BASE_URL ? { baseUrl: opts.childEnv.ANTHROPIC_BASE_URL } : {}),
-    ...(opts.fetchImpl ? { fetchImpl: opts.fetchImpl } : {}),
-  });
+  const results: ProbeResult[] = [];
+  for (const model of opts.models ?? PROBE_MODELS) {
+    results.push(
+      await probeAnthropic({
+        key: opts.childEnv[KEY_ENV]!.trim(),
+        model,
+        ...(opts.childEnv.ANTHROPIC_BASE_URL ? { baseUrl: opts.childEnv.ANTHROPIC_BASE_URL } : {}),
+        ...(opts.fetchImpl ? { fetchImpl: opts.fetchImpl } : {}),
+      }),
+    );
+  }
+  return results;
 }
 
-export function describeProbe(p: ProbeResult): string {
-  return (
-    `[e2e] LLM: LIVE — probe OK. ${p.model} answered in ${p.ms}ms and billed ` +
-    `${p.inputTokens} in / ${p.outputTokens} out tokens to key ${p.fingerprint}` +
-    (p.baseUrl === DEFAULT_BASE_URL ? "." : ` via ${p.baseUrl}.`)
-  );
+export function describeProbe(p: ProbeResult | ProbeResult[]): string {
+  const all = Array.isArray(p) ? p : [p];
+  if (all.length === 0) return `[e2e] LLM: LIVE — no model was probed.`;
+  const key = all[0].fingerprint;
+  const via = all[0].baseUrl === DEFAULT_BASE_URL ? "" : ` via ${all[0].baseUrl}`;
+  const each = all
+    .map((r) => `${r.model} (${r.ms}ms, ${r.inputTokens} in / ${r.outputTokens} out)`)
+    .join(", ");
+  return `[e2e] LLM: LIVE — probe OK on ${all.length} model(s): ${each}; billed to key ${key}${via}.`;
 }
 
 // ─── (4): the sweep really did ask the model ─────────────────────────
@@ -351,7 +427,14 @@ export function describeProbe(p: ProbeResult): string {
  * `AnalyzedMessage.reasoning` — the one place the server already
  * records it, so none of this needs a change under `src/`.
  */
-export type ReachClass = "model" | "offline" | "offline-fatal" | "stub" | "fast-path" | "gated";
+export type ReachClass =
+  | "model"
+  | "offline"
+  | "offline-fatal"
+  | "stub"
+  | "fast-path"
+  | "gated"
+  | "unowned";
 
 /**
  * `AnalyzedMessage.handledBy` for a message the §10 step 5 router gate
@@ -362,24 +445,129 @@ export type ReachClass = "model" | "offline" | "offline-fatal" | "stub" | "fast-
  */
 export const GATED_HANDLED_BY = "router-gate";
 
-/** Offline fallbacks that are CONFIGURATION or INFRASTRUCTURE faults.
- *  None of these is ever tolerable in a run being reported as live. */
-export const OFFLINE_FATAL_PREFIXES = [
+/**
+ * Offline fallbacks that are CONFIGURATION or INFRASTRUCTURE faults.
+ * None of these is ever tolerable in a run being reported as live.
+ *
+ * Matched as SUBSTRINGS, not prefixes, and that changed with §10 step 8.
+ * They used to be the whole of `offlineVerdict`'s reason, printed at the
+ * front of `AnalyzedMessage.reasoning`. `offlineVerdict` is deleted; the
+ * same underlying failures now arrive wrapped in an engine's degradation
+ * line, e.g.
+ *
+ *   attendance-engine: degraded — <id>: ANTHROPIC_API_KEY not set
+ *   team-ops-engine: degraded — state load failed (…)
+ *
+ * so a prefix test would silently stop matching every one of them. That
+ * is the exact failure mode this file exists to prevent, arriving via a
+ * refactor rather than via a missing key.
+ */
+export const OFFLINE_FATAL_SUBSTRINGS = [
   "ANTHROPIC_API_KEY not set",
   "Claude API error:",
   "Unknown group",
+  "state load failed",
+  "feature load failed",
+  "the match lookup failed",
 ] as const;
 
-/** Offline fallbacks that are real, occasional MODEL behaviour. The
- *  analyze route already DMs an admin about these in production. */
+/** Back-compat alias. Same list, and the name says "prefix" only because
+ *  it used to be one; `classifyReasoning` matches it anywhere in the
+ *  string. Kept exported because the corpus report reads it. */
+export const OFFLINE_FATAL_PREFIXES = OFFLINE_FATAL_SUBSTRINGS;
+
+/**
+ * The five owners' degradation markers — `attendance-engine: degraded —`
+ * and its four siblings, from `attendance-engine.ts`, `answer-batch.ts`,
+ * `score-engine.ts`, `admin-ops-engine.ts` and `team-ops-engine.ts`.
+ *
+ * DUPLICATED HERE RATHER THAN IMPORTED, for the reason `GATED_HANDLED_BY`
+ * below is: those modules reach the Prisma client's type surface and this
+ * file must stay loadable with nothing but `vitest`. `live-llm.test.ts`
+ * greps the constants out of `src/` and fails if the two drift.
+ *
+ * Classified as TOLERATED, not fatal, unless the detail also matches
+ * `OFFLINE_FATAL_SUBSTRINGS`. A degraded extractor call is real model
+ * behaviour under load — the first live sweep of §10 step 6 measured 27
+ * `529 Overloaded` and 3 `500`s across 10 of 177 messages — and the SDK
+ * already retries four times before one gets here. A configuration fault
+ * wearing the same prefix is not, and is caught by the substring list.
+ */
+export const ENGINE_DEGRADED_PREFIXES = [
+  "attendance-engine: degraded —",
+  "answer-engine: degraded —",
+  "score-engine: degraded —",
+  "admin-ops-engine: degraded —",
+  "team-ops-engine: degraded —",
+] as const;
+
+/**
+ * Offline fallbacks that are real, occasional MODEL behaviour.
+ *
+ * ⚠️ THE FIRST TWO ARE UNREACHABLE SINCE §10 STEP 8 and are kept, not
+ * deleted, deliberately. They were `offlineVerdict`'s two tolerated
+ * reasons — "Claude emitted no verdict for this id" (the model skipped
+ * an id in a batch) and "No text in Claude response". Both were
+ * properties of asking ONE model for a JSON object keyed by message id;
+ * the pipeline asks per-message with a strict `json_schema`, so a
+ * response that omits a message is not expressible. If either string
+ * ever appears in `AnalyzedMessage.reasoning` again it means somebody
+ * has reintroduced a batch-keyed free-text response, and it should still
+ * be counted — which is why the strings stay rather than the list being
+ * emptied.
+ */
 export const OFFLINE_TOLERATED_PREFIXES = [
   "Claude emitted no verdict for this id",
   "No text in Claude response",
 ] as const;
 
-/** The stub seam's own fingerprints. Seeing either in a live sweep means
- *  the sweep was not live. */
+/**
+ * The verdict stub seam's own fingerprints.
+ *
+ * ⚠️ NEITHER CAN BE WRITTEN ANY MORE, and this is the one guard §10 step
+ * 8 genuinely removed rather than moved. `test-stub:` came from
+ * `stubbedVerdictsForTest` and `sim default:` from `e2e/sim/group.ts`'s
+ * `inferVerdict`; both fed `AnalysisVerdict.reasoning`, which the route
+ * wrote straight into `AnalyzedMessage.reasoning`. The successors —
+ * `MT_TEST_ROUTER_STUB_FILE` and `pipeline/extractor-stub.ts` — return a
+ * ROUTE and a FACTS OBJECT, and neither leaves a trace in the reasoning
+ * string, so a stubbed live sweep can no longer be detected after the
+ * fact from the database.
+ *
+ * WHAT CARRIES THAT GUARANTEE NOW, both of them stronger than a prefix
+ * match on prose:
+ *
+ *   1. `assertSeamMatchesMode("live", …)` above refuses the run outright
+ *      if the child env can see EITHER stub file. It runs before
+ *      Postgres, before Playwright, before anything is spent.
+ *   2. `e2e/replay/meter.ts` proxies every Anthropic call a live run
+ *      makes and `run.ts:assertMeterSawTraffic` fails the run when the
+ *      count is zero — a fact about HTTP traffic rather than a fact
+ *      about a string somebody remembered to write.
+ *
+ * The constants stay so that a reintroduced verdict stub is still
+ * classified rather than counted as model reach.
+ */
 export const STUB_PREFIXES = ["test-stub:", "sim default:"] as const;
+
+/**
+ * `AnalyzedMessage.reasoning`'s prefix for a message that reached the end
+ * of the batch with no owner — `route.ts`'s "NOBODY OWNED IT" branch.
+ *
+ * THIS IS §10 STEP 8'S REPLACEMENT FOR THE ALL-OFFLINE SWEEP, and it is
+ * why `unowned` exists as a class. With the mega-prompt deleted, a live
+ * run with no key, with every route flag off, or with a router that
+ * returned nothing does not produce error verdicts — it produces a
+ * silent bot and a table full of these rows. Under the old classifier
+ * they fell through to the default and were counted as `model`, so the
+ * most likely misconfiguration in the new architecture would have been
+ * reported as a 100%-model-reach sweep.
+ */
+export const UNOWNED_REASON_PREFIX = "no owner: route=";
+
+/** The one route for which "no owner" is the DESIGNED answer: banter.
+ *  69.3% of real traffic, and `composeOperatorNote` drops it too. */
+const UNOWNED_NONE = `${UNOWNED_REASON_PREFIX}none`;
 
 export function classifyReasoning(
   reasoning: string | null | undefined,
@@ -387,8 +575,17 @@ export function classifyReasoning(
 ): ReachClass {
   const r = (reasoning ?? "").trim();
   if (STUB_PREFIXES.some((p) => r.startsWith(p))) return "stub";
-  if (OFFLINE_FATAL_PREFIXES.some((p) => r.startsWith(p))) return "offline-fatal";
+  if (OFFLINE_FATAL_SUBSTRINGS.some((p) => r.includes(p))) return "offline-fatal";
   if (OFFLINE_TOLERATED_PREFIXES.some((p) => r.startsWith(p))) return "offline";
+  if (ENGINE_DEGRADED_PREFIXES.some((p) => r.startsWith(p))) return "offline";
+  // `none` FIRST: a message the router called banter and nobody owned is
+  // the system working, and it is indistinguishable from the failure
+  // case on `handledBy` alone (the gate writes `router-gate` only when
+  // ROUTER_GATE_ENABLED is on; with it off the same banter lands here as
+  // `ignored`). The route is in the reasoning string, so the split is
+  // made on the route rather than on a flag's position.
+  if (r.startsWith(UNOWNED_NONE)) return "gated";
+  if (r.startsWith(UNOWNED_REASON_PREFIX)) return "unowned";
   if (handledBy === "fast-path") return "fast-path";
   // AFTER the offline and stub checks, deliberately. The gate's
   // handledBy must never let a real offline verdict pass as something
@@ -411,10 +608,22 @@ export interface ReachSummary {
   offlineFatal: number;
   stub: number;
   fastPath: number;
-  /** Messages the §10 step 5 router gate deliberately did not send. Not
-   *  a failure, and not evidence of liveness either — reported, and
-   *  excluded from `attributable`. */
+  /** Messages the §10 step 5 router gate deliberately did not send, plus
+   *  the `none`-routed ones nobody owned. Not a failure, and not
+   *  evidence of liveness either — reported, and excluded from
+   *  `attributable`. */
   gated: number;
+  /**
+   * Messages the router sent SOMEWHERE and no owner claimed: §10 step
+   * 8's silence. A handful is normal (`rename` and `swap` are handed
+   * back on purpose, and `team-ops-engine-batch.ts`'s header enumerates
+   * the rest); a sweep made mostly of them is a misconfiguration
+   * reporting itself as a result. Excluded from `attributable` — these
+   * messages never reached an owner's extractor, so they are not a
+   * model-reach question — and judged by its own rule in
+   * `liveReachFailure`.
+   */
+  unowned: number;
   /** Denominator for the rate: rows that SHOULD have reached the model. */
   attributable: number;
   offlineRate: number;
@@ -431,6 +640,7 @@ export function summariseReach(rows: ReachRow[]): ReachSummary {
     stub: 0,
     fastPath: 0,
     gated: 0,
+    unowned: 0,
     attributable: 0,
     offlineRate: 0,
     byReason: {},
@@ -442,6 +652,7 @@ export function summariseReach(rows: ReachRow[]): ReachSummary {
     else if (cls === "offline-fatal") s.offlineFatal += 1;
     else if (cls === "stub") s.stub += 1;
     else if (cls === "gated") s.gated += 1;
+    else if (cls === "unowned") s.unowned += 1;
     else s.fastPath += 1;
     if (cls !== "model" && cls !== "fast-path" && cls !== "gated") {
       const key = truncateReason(row.reasoning ?? "(no reasoning)");
@@ -469,15 +680,38 @@ export function liveReachFailure(
     .map(([reason, n]) => `      ${String(n).padStart(5)} × ${reason}`)
     .join("\n");
   const tail =
-    `\n  Analyzed messages: ${s.total} (${s.model} reached the model, ${s.offline} dropped, ` +
+    `\n  Analyzed messages: ${s.total} (${s.model} reached the model, ${s.offline} degraded, ` +
     `${s.offlineFatal} fell back offline, ${s.stub} came from the stub seam, ${s.fastPath} ` +
-    `never needed the model).` +
+    `never needed the model, ${s.gated} were gated or routed \`none\`, ${s.unowned} were ` +
+    `routed somewhere and owned by nobody).` +
     (breakdown ? `\n  Why they missed:\n${breakdown}` : "");
 
   if (s.attributable === 0) {
     return (
-      `LIVE SWEEP DID NOT HAPPEN — no message reached the analyzer at all, so there is ` +
+      `LIVE SWEEP DID NOT HAPPEN — no message reached an owner at all, so there is ` +
       `nothing to report and certainly nothing to pass.${tail}`
+    );
+  }
+  // §10 STEP 8's OWN FAILURE SHAPE. With the mega-prompt deleted, a live
+  // run with an unusable key, with every route flag off, or with a
+  // router that answered nothing does not produce error verdicts — it
+  // produces silence. `unowned > model` says more messages were decided
+  // by nobody than by a model, which no correctly-configured sweep
+  // produces and every misconfigured one does. The threshold is a
+  // comparison rather than a percentage on purpose: a real sweep's
+  // legitimate hand-backs (`rename`, `swap`, an answer engine declining
+  // a money question) are a handful against a majority that reached a
+  // model, and no arbitrary number has to be chosen or defended.
+  if (s.unowned > s.model) {
+    return (
+      `LIVE SWEEP DECIDED ALMOST NOTHING — ${s.unowned} message(s) were routed and then ` +
+      `owned by nobody, against ${s.model} that reached a model. Since §10 step 8 there is ` +
+      `no analyzer behind the owners, so this is a silent bot being scored as a result.\n` +
+      `  The attendance path has no flag any more (ROUTER_GATE_ENABLED and ` +
+      `ATTENDANCE_ENGINE_ENABLED were deleted with it), and step 7's four default ON, so ` +
+      `this is NOT the usual "somebody forgot to export a flag" — check for a ` +
+      `*_ENGINE_ENABLED=0 in the environment, a router that answered nothing, and the ` +
+      `degradation lines below.${tail}`
     );
   }
   if (s.stub > 0) {
@@ -505,9 +739,10 @@ export function liveReachFailure(
 export function describeReach(s: ReachSummary): string {
   return (
     `[live] ${s.model} of ${s.attributable} analyzed messages reached the real model` +
-    (s.offline ? `, ${s.offline} dropped verdict(s)` : "") +
+    (s.offline ? `, ${s.offline} degraded call(s)` : "") +
     (s.fastPath ? `, ${s.fastPath} answered by a deterministic fast path` : "") +
-    (s.gated ? `, ${s.gated} gated out by the router before the analyzer` : "") +
+    (s.gated ? `, ${s.gated} gated out or routed \`none\`` : "") +
+    (s.unowned ? `, ${s.unowned} routed and owned by nobody` : "") +
     `.`
   );
 }

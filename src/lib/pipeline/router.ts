@@ -9,9 +9,21 @@
  *
  * §11.1 CALLS ROUTER MISCLASSIFICATION THE BIGGEST RISK IN THE DESIGN,
  * and a genuine regression: a message routed `none` disappears with no
- * write, no reply, no reaction and no signal, where today's mega-call at
- * least emits something for every message. Three of the four
- * containments it specifies live in this file:
+ * write, no reply, no reaction and no signal.
+ *
+ * ⚠️ ITS COMPARISON DIED ON 2026-09-06, AND THE RISK GOT WORSE. That
+ * sentence used to end "…where today's mega-call at least emits
+ * something for every message". §10 step 8 deleted `analyzeBatch`, the
+ * 19,850-token `SYSTEM_PROMPT` and `executeVerdict`. There is no
+ * mega-call and nothing that emits something for every message: a route
+ * this file gets wrong is not double-checked by a second decider,
+ * because there is no second decider. Every containment below is now
+ * load-bearing on its own rather than as a belt beside braces, and the
+ * fourth one (the nightly `none`-bucket sweep) is the ONLY remaining
+ * thing that ever looks at a `none` again. See `pipeline/gate.ts`, which
+ * carries the full argument.
+ *
+ * Three of the four containments live in this file:
  *
  *   1. BIAS TOWARD ACTION. In the prompt, and again in the parser: a
  *      missing id becomes `unsure` (which reaches an extractor), never
@@ -24,8 +36,20 @@
  *      "Kemal explicitly asked for this". So the floor is BUILT NEW and
  *      kept deliberately tiny, and reintroducing one at all is a product
  *      decision that needs his sign-off before step 5 ships.
- *   3. FAIL OPEN, NOT CLOSED. Router error → everything routes to the
- *      attendance extractor (§11.4). Expensive, correct, self-limiting.
+ *   3. FAIL OPEN, NOT CLOSED. Router error → everything routes to
+ *      `unsure`, i.e. the attendance extractor (§11.4). Expensive,
+ *      correct, self-limiting.
+ *
+ *      THIS ONE ONLY BECAME TRUE IN §10 STEP 8, and the comment at line
+ *      ~362 claimed it for months before it was. `unsure` was NOT an
+ *      engine route until step 8, so a router outage sent the whole
+ *      batch to the mega-prompt rather than to any extractor — and once
+ *      the mega-prompt went, that would have been silence for every
+ *      message in the batch, a bare "IN" included. Adding `unsure` to
+ *      `gate.ts`'s `ENGINE_ROUTES` is what finally made this sentence
+ *      describe the code, and `__tests__/gate.test.ts` pins it as its
+ *      own case so removing it again reads as "router-failure handling
+ *      broke".
  *
  * The fourth containment — shadowing the `none` bucket forever — belongs
  * to the harness, not here.
@@ -363,6 +387,14 @@ export async function routeBatch(
     // extractor. Expensive, correct, and self-limiting because batches
     // are small. The alternative — routing everything to `none` — is
     // the silent failure this whole design exists to remove.
+    //
+    // THIS COMMENT WAS NOT TRUE UNTIL §10 STEP 8. `unsure` was not an
+    // engine route, so the batch went to the mega-prompt instead of to
+    // any extractor. Step 8 added it to `gate.ts`'s `ENGINE_ROUTES`, so
+    // the sentence above now describes what happens; without that one
+    // line, a router outage after the deletion would have meant total
+    // silence for the whole batch. Do not remove `unsure` from that list
+    // without reading this.
     result = {
       routes: ids.map((id) => ({ messageId: id, route: "unsure" as const, source: "fallback" as const })),
       degradations: [
@@ -389,7 +421,10 @@ export async function routeBatch(
     // `overrodeRoute` is what makes a RESCUE distinguishable from a
     // mere relabel. Only `overrodeRoute === "none"` is the seatbelt
     // actually firing; `other_att → self_att` changes nothing about
-    // whether the analyzer sees the message.
+    // whether the message reaches an owner at all (it used to say
+    // "whether the analyzer sees the message" — same channel, and since
+    // §10 step 8 the thing on the far end of it is the attendance
+    // engine, since both routes are in `ENGINE_ROUTES`).
     return { ...r, route: f, source: "floor" as const, overrodeRoute: r.route };
   });
 
@@ -408,9 +443,13 @@ export async function routeBatch(
   //
   // Structurally it is the floor's one-directional override with a
   // different trigger: it only ever rewrites `none`, so it can add an
-  // analyzer call and can never remove one. `overrodeRoute` is set for
-  // the same reason it is on the floor — so "how often did this
-  // actually rescue something?" is a query and not a guess.
+  // extractor call and can never remove one. (It used to say "an
+  // analyzer call"; §10 step 8 deleted the analyzer, and `unsure` joined
+  // `gate.ts`'s `ENGINE_ROUTES` in the same change — WITHOUT which this
+  // rescue would, after step 8, have rescued a message into silence.)
+  // `overrodeRoute` is set for the same reason it is on the floor — so
+  // "how often did this actually rescue something?" is a query and not a
+  // guess.
   //
   // A `fallback` route is left alone: the batch is already going to the
   // extractor and relabelling it would hide a router failure.
@@ -424,7 +463,7 @@ export async function routeBatch(
             "router",
             r.messageId,
             `MatchTime is still waiting for an answer (${describeQuestion(awaiting)}); ` +
-              `none → unsure so the analyzer still sees it`,
+              `none → unsure so the attendance engine still sees it`,
           ),
         );
         return { ...r, route: "unsure" as const, source: "awaiting" as const, overrodeRoute: "none" as const };

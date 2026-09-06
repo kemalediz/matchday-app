@@ -96,11 +96,22 @@ const MSG = {
 };
 
 describe("a genuinely overloaded API, through the real SDK", () => {
-  it("retries FIVE times in total before giving up — the budget is real, not a comment", async () => {
-    // `maxRetries: 4` in `llm.ts` means one attempt plus four retries.
-    // The number is load-bearing (it is what took the corpus sweep from
-    // 10 lost messages to 0) and it is otherwise unverifiable from
-    // inside the process, so it is measured here from the server's side.
+  it("makes TEN requests on an attendance route — five per attempt, twice", async () => {
+    // TWO retry layers now, and both numbers are load-bearing.
+    //
+    //   `maxRetries: 4` in `llm.ts` is one request plus four, and it is
+    //   what took PR #44's corpus sweep from 10 lost messages to 0.
+    //
+    //   §10 step 8's retry in `extractors.ts` runs that whole ladder a
+    //   SECOND time, on the four routes that end in an attendance write
+    //   and no others. It exists because step 8 deleted what the SDK
+    //   retry used to fall back TO: `attendance-engine-batch.ts` handed
+    //   a still-failed extraction to the analyzer, and there is no
+    //   analyzer. The alternative is silence for a message the router
+    //   already called attendance-shaped.
+    //
+    // 5 × 2 = 10, measured from the server's side, because neither
+    // number is visible from inside the process.
     const api = await overloadedApi(529, 1);
     point(api);
 
@@ -108,7 +119,7 @@ describe("a genuinely overloaded API, through the real SDK", () => {
     const res = await extractForRoute(anthropicModel(), "self_att", MSG);
     const ms = Date.now() - t0;
 
-    expect(api.attempts()).toBe(5);
+    expect(api.attempts()).toBe(10);
     // With `retry-after-ms: 1` honoured the ladder collapses, which is
     // how this stays a fast test. The ladder itself is measured below.
     expect(ms).toBeLessThan(10_000);
@@ -130,8 +141,30 @@ describe("a genuinely overloaded API, through the real SDK", () => {
     const [d] = res.degradations;
     expect(d.stage).toBe("extractor");
     expect(d.messageId).toBe("wa-overload");
-    expect(d.detail).toMatch(/^attendance extractor failed: /);
+    // "TWICE" rather than "failed:", because step 8's retry ran and also
+    // failed. The distinction reaches a human: one failure is a message
+    // the model found odd, two full ladders in a row is the API having a
+    // bad minute, and an operator reading that DM at 22:00 acts
+    // differently on each. The `/failed|could not be parsed/i` match
+    // that `attendance-engine-batch.ts` keys off is unchanged.
+    expect(d.detail).toMatch(/^attendance extractor failed TWICE: /);
     expect(d.detail).toMatch(/failed|could not be parsed/i);
+  }, 60_000);
+
+  it("does NOT double the ladder on a read route — only the write path pays", async () => {
+    // The other half of step 8's decision, and the reason it is not
+    // simply "retry everything". §13: "a missed add is recoverable in
+    // one message; a wrong registration on a paid match is not." A
+    // missed QUESTION is recoverable in one message too, so it does not
+    // buy a second ladder — it takes the first failure and the operator
+    // note.
+    const api = await overloadedApi(529, 1);
+    point(api);
+
+    const res = await extractForRoute(anthropicModel(), "question", MSG);
+
+    expect(api.attempts()).toBe(5);
+    expect(res.degradations[0].detail).toMatch(/^question extractor failed: /);
   }, 60_000);
 
   it("throws the message the cheap seams claim it throws", async () => {
@@ -164,8 +197,8 @@ describe("a genuinely overloaded API, through the real SDK", () => {
 
     const res = await extractForRoute(anthropicModel(), "self_att", MSG);
 
-    expect(api.attempts()).toBe(5);
-    expect(res.degradations[0].detail).toMatch(/^attendance extractor failed: /);
+    expect(api.attempts()).toBe(10);
+    expect(res.degradations[0].detail).toMatch(/^attendance extractor failed TWICE: /);
   }, 60_000);
 
   it("MEASURES the real retry ladder, with no `retry-after` to collapse it", async () => {
@@ -181,8 +214,15 @@ describe("a genuinely overloaded API, through the real SDK", () => {
     await extractForRoute(anthropicModel(), "self_att", MSG);
     const ms = Date.now() - t0;
 
-    expect(api.attempts()).toBe(5);
+    expect(api.attempts()).toBe(10);
     expect(ms).toBeGreaterThan(1_000);
-    console.log(`[overload] 5 attempts over ${ms}ms of real SDK backoff`);
-  }, 120_000);
+    // PRINTED, not bounded by an assertion, because this number IS the
+    // honest cost of step 8's second ladder and somebody should read it
+    // rather than have a threshold hide it. Against the Pi's 10-minute
+    // flush budget it is affordable, and the extractors fan out in
+    // parallel, so it is a per-BATCH cost rather than a per-message one.
+    // If it ever stops being affordable the lever is `RETRYING_ROUTES`
+    // in `extractors.ts`, not a looser assertion here.
+    console.log(`[overload] 10 attempts (two full ladders) over ${ms}ms of real SDK backoff`);
+  }, 180_000);
 });

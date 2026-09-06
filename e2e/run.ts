@@ -14,12 +14,15 @@
  *      wrong numbers without either run erroring — see PR #34.
  *   0b. Checks the MODEL seam against the mode (helpers/live-llm.ts).
  *      A live run proves it can reach Anthropic — and spends one token
- *      doing it — before any work starts; a stubbed run proves it
- *      cannot. A keyless `test:corpus:live` used to score 8/47 in four
- *      seconds and PASS, every case having fallen through to
- *      `offlineVerdict`. For live runs every model call is then metered
- *      on the way out, so the run can state what it really cost and
- *      fail if the answer is nothing.
+ *      on EACH of the three models the pipeline calls — before any work
+ *      starts; a stubbed run proves it cannot. A keyless
+ *      `test:corpus:live` used to score 8/47 in four seconds and PASS,
+ *      every case having fallen through to `offlineVerdict`. Since §10
+ *      step 8 deleted `offlineVerdict` the same misconfiguration shows
+ *      up as SILENCE instead, which is harder to see, so the reach guard
+ *      counts unowned messages too. For live runs every model call is
+ *      metered on the way out, so the run can state what it really cost
+ *      and fail if the answer is nothing.
  *   1. Starts an EMBEDDED Postgres (binaries from the `embedded-postgres`
  *      npm package) on this checkout's db port, data dir under .e2e/ —
  *      fully isolated, no Docker, no system Postgres, no prod anywhere.
@@ -77,8 +80,10 @@ async function assertLlmSeamReady(): Promise<void> {
   if (!isLiveRun()) {
     assertSeamMatchesMode("stub", childEnv);
     console.log(
-      `[e2e] LLM: STUBBED — verdicts come from ${E2E.LLM_STUB_FILE}; ` +
-        `ANTHROPIC_API_KEY is pinned empty, so this run cannot call a model or spend anything.`,
+      `[e2e] LLM: STUBBED — routes come from ${E2E.ROUTER_STUB_FILE}, facts from ` +
+        `${E2E.EXTRACTOR_STUB_FILE}; ANTHROPIC_API_KEY is pinned empty, so this run cannot ` +
+        `call a model or spend anything. (${E2E.LLM_STUB_FILE} is written too, but since ` +
+        `§10 step 8 nothing reads it — see e2e/helpers/stub.ts.)`,
     );
     return;
   }
@@ -114,8 +119,13 @@ function assertMeterSawTraffic(meter: AnthropicMeter, playwrightExitCode: number
             `LIVE sweep. It measured nothing.\n`
           : `  Playwright also failed, so the run was broken before it got that far.\n`) +
         `  Either every spec selected was skipped (a live spec skips unless it is the one you ` +
-        `named), or the server under test never reached analyzeBatch's model path.\n` +
-        `  Check the spec selection, and that no MT_TEST_LLM_STUB_FILE is set in your shell.`,
+        `named), or the server under test never reached the router or an extractor — which ` +
+        `since §10 step 8 is exactly what "every route flag is off" looks like: no error, no ` +
+        `verdict, just a bot that said nothing.\n` +
+        `  Check the spec selection, and that no MT_TEST_ROUTER_STUB_FILE / ` +
+        `MT_TEST_EXTRACTOR_STUB_FILE / MT_TEST_LLM_STUB_FILE is set in your shell. Step 7's ` +
+        `four route flags default ON, so a *_ENGINE_ENABLED=0 left in the environment is the ` +
+        `other thing that produces this.`,
     );
   }
   const sum = (f: (c: (typeof calls)[number]) => number) => calls.reduce((a, c) => a + f(c), 0);

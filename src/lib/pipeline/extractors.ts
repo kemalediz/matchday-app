@@ -46,6 +46,21 @@ import type {
 
 const EXTRACTOR_MAX_TOKENS = 1_024;
 
+/**
+ * The routes whose extraction is retried once. See the essay in
+ * `extractForRoute`.
+ *
+ * Deliberately spelled out here rather than derived from
+ * `gate.ts:ENGINE_ROUTES`, even though the two lists are identical
+ * today. They mean different things — that one is "who decides this
+ * route", this one is "where is silence expensive enough to pay for a
+ * second call" — and a future route could join one without joining the
+ * other. `__tests__/extractors.test.ts` asserts both halves by name, so
+ * a drift shows up as a named failure rather than as a silent change of
+ * policy on the write path.
+ */
+const RETRYING_ROUTES: readonly Route[] = ["self_att", "other_att", "offer", "unsure"];
+
 /** Which specialist a route reaches. Four routes share the attendance
  *  extractor because they are four ways of saying the same kind of
  *  thing; `unsure` is included because §11.1's asymmetry sends every
@@ -130,25 +145,35 @@ Report nothing (an empty claims array) only when the message genuinely makes no 
 
   teams: `You read ONE message about the two team line-ups and report what it asks for. You never pick the teams.
 
-  action       "show" re-post the teams that already exist
-               "generate" work out new teams
-               "rename" change the team names
-               "swap" move named players between the two teams
+  action       "show" re-post the teams that already exist, unchanged
+               "generate" work out new teams ("generate the teams", "regenerate", "make the teams", "set up the teams again", "come up with an alternative")
+               "rename" change the NAMES of the existing teams and leave the line-ups exactly as they are
+               "swap" move named players between the two teams, leaving everyone else where they are
   includeRefs  names the message says to include, verbatim
-  teamNames    the two new names, in order, or an empty array
-  swaps        for "swap": each named person and the team they should be on ("RED" or "YELLOW")`,
+  teamNames    the two names the message SUPPLIES, in order, or an empty array
+  swaps        for "swap": each named person and the team they should be on ("RED" or "YELLOW")
+  pairings     people the message says must be on the SAME team as each other, verbatim, one array per group ("put me and David on the same team" -> [["me","David"]]). Empty when the message names no such pair.
+
+Choose the action on what would have to CHANGE. If the line-ups have to be worked out again, it is "generate" — even when the message also asks for new names, and even when it says "again", "once more" or "instead". "rename" is ONLY for a message that wants the SAME two line-ups under different names. A message that asks you to invent names while generating is "generate": leave teamNames empty, because it supplies none.
+
+A person the message says to include ("generate the teams, Ibrahim is playing") goes in includeRefs. A person the message puts on a NAMED side ("put David in Red") goes in swaps. A person the message puts WITH somebody rather than on a side goes in pairings. The sender may refer to themselves as "me", "myself" or "I" — keep that word verbatim; do not guess their name.`,
 
   score: `You read ONE message reporting a football result and return the two numbers, in the order the teams are named in the message. first = the first team mentioned, second = the other. Nothing else.`,
 
   admin: `You read ONE instruction to the bot and report what it says.
 
   action       "bulk_payment" someone paid for several players
-               "reminder" the sender wants to be reminded
+               "reminder" the sender wants to be reminded, at a time
+               "recruit" the sender is asking the bot to CONTACT or INVITE players who are not registered yet — "message the lads from the last few games", "DM everyone who played recently and invite them", "ask the regulars if they can play", "we need more players, can you round some up"
                "other"
   payerRef     for bulk_payment: who paid, verbatim. "" when not applicable
   count        for bulk_payment: how many players they paid for. 0 when not applicable
   coveredRefs  for bulk_payment: the specific people covered, verbatim, if named
-  phrase       for reminder: the time phrase EXACTLY as written ("on Monday", "tomorrow at 6"). Do not convert it to a date. "" when not applicable`,
+  phrase       for reminder: the time phrase EXACTLY as written ("on Monday", "tomorrow at 6"). Do not convert it to a date. "" when not applicable
+  note         for reminder: WHAT to remind them about, in their own words ("bring the bibs"). "" when the message names nothing to remember
+  lookbackMatches  for recruit: how many recent matches the message says to draw players from ("the last 5 matches" -> 5, "the last couple of games" -> 2). 0 when the message names no number.
+
+"recruit" is about reaching people OUTSIDE the current squad. A message asking to SHOW, LIST or COUNT the players already registered is not recruit — that is "other".`,
 };
 
 // ── Schemas ────────────────────────────────────────────────────────────
@@ -242,8 +267,12 @@ const TEAMS_SCHEMA = {
         additionalProperties: false,
       },
     },
+    // An array OF arrays: one group per "these people together". A flat
+    // list could not tell "A with B, C with D" from "A, B, C and D all
+    // together", and those are different line-ups.
+    pairings: { type: "array", items: { type: "array", items: { type: "string" } } },
   },
-  required: ["action", "includeRefs", "teamNames", "swaps"],
+  required: ["action", "includeRefs", "teamNames", "swaps", "pairings"],
   additionalProperties: false,
 } as const;
 
@@ -257,13 +286,17 @@ const SCORE_SCHEMA = {
 const ADMIN_SCHEMA = {
   type: "object",
   properties: {
-    action: { type: "string", enum: ["bulk_payment", "reminder", "other"] },
+    action: { type: "string", enum: ["bulk_payment", "reminder", "recruit", "other"] },
     payerRef: { type: "string" },
     count: { type: "number" },
     coveredRefs: { type: "array", items: { type: "string" } },
     phrase: { type: "string" },
+    note: { type: "string" },
+    // 0 is the schema's stand-in for null, the same convention
+    // `statedCount` uses. A nullable number is rejected by the API.
+    lookbackMatches: { type: "number" },
   },
-  required: ["action", "payerRef", "count", "coveredRefs", "phrase"],
+  required: ["action", "payerRef", "count", "coveredRefs", "phrase", "note", "lookbackMatches"],
   additionalProperties: false,
 } as const;
 
@@ -439,6 +472,12 @@ export function parseFacts(
             team: str(s.team).toUpperCase() === "YELLOW" ? ("YELLOW" as const) : ("RED" as const),
           }))
           .filter((s) => s.personRef),
+        // A "pairing" of one person constrains nothing, so a stray
+        // single-element group is dropped here rather than pinning
+        // somebody to an arbitrary colour on the strength of it.
+        pairings: (Array.isArray(raw.pairings) ? (raw.pairings as unknown[]) : [])
+          .map((g) => (Array.isArray(g) ? g.map(str).filter(Boolean) : []))
+          .filter((g) => g.length >= 2),
       };
       return { facts, degradations };
     }
@@ -456,7 +495,7 @@ export function parseFacts(
 
     case "admin": {
       const action = str(raw.action).toLowerCase();
-      if (!["bulk_payment", "reminder", "other"].includes(action)) {
+      if (!["bulk_payment", "reminder", "recruit", "other"].includes(action)) {
         bad(`unknown admin action "${str(raw.action)}"`);
         return { facts: { kind: "none" }, degradations };
       }
@@ -469,6 +508,16 @@ export function parseFacts(
           ? { coveredRefs: raw.coveredRefs.map(str).filter(Boolean) }
           : {}),
         ...(typeof raw.phrase === "string" && raw.phrase ? { phrase: raw.phrase } : {}),
+        ...(typeof raw.note === "string" && raw.note ? { note: raw.note } : {}),
+        // 0 (the schema's stand-in for "not stated") and anything
+        // non-finite are DROPPED rather than carried through as a
+        // number, so the engine's `lookbackMatches === undefined` means
+        // exactly one thing: use the shipped default of 5.
+        ...(typeof raw.lookbackMatches === "number" &&
+        Number.isFinite(raw.lookbackMatches) &&
+        raw.lookbackMatches > 0
+          ? { lookbackMatches: raw.lookbackMatches }
+          : {}),
       };
       return { facts, degradations };
     }
@@ -525,33 +574,94 @@ export async function extractForRoute(
     maxTokens: EXTRACTOR_MAX_TOKENS,
     schema: SCHEMAS[kind],
     label: `extractor:${kind}`,
+    // THINKING OFF. Measured, not assumed — see `llm.ts`'s
+    // `ModelRequest.thinking` and `__tests__/thinking-off.test.ts`. On a
+    // self-contradictory message, adaptive thinking spent the whole
+    // token budget and returned no JSON at all, 5 runs of 5, against the
+    // live club. An extractor that deliberates would be the
+    // mega-prompt's failure mode reappearing one layer down — the prompt
+    // is deleted (§10 step 8), the failure mode is not — and §6.2's
+    // contract is "FACTS about the text only".
+    thinking: "off",
   };
 
-  try {
-    const resp = await model.complete(req);
-    const parsed = parseFacts(kind, resp.text, msg.id);
-    return {
-      ...parsed,
-      usage: {
-        costUsd: resp.costUsd,
-        ms: resp.ms,
-        inputTokens: resp.usage.inputTokens + resp.usage.cacheReadTokens,
-        outputTokens: resp.usage.outputTokens,
-      },
-    };
-  } catch (err) {
-    // §11.4: on extractor failure, fail CLOSED — but say so. The
-    // existing partial-response admin DM is the surface for this, and
-    // under the new design it matches a typed error rather than
-    // prefix-matching free-text `reasoning`, which is what it always
-    // wanted to be.
-    return {
-      facts: { kind: "none" },
-      degradations: [
-        degradation("extractor", msg.id, `${kind} extractor failed: ${(err as Error).message}`),
-      ],
-    };
+  // ── ONE RETRY, AND ONLY WHERE SILENCE COSTS A SLOT (§10 step 8) ────
+  //
+  // `llm.ts` already raises the SDK's retries from 2 to 4, and its
+  // comment says why and what it was relying on:
+  //
+  //   "§10 step 6 puts these calls on the WRITE path, and the failure
+  //    mode of a call that gives up is a player who said IN not being in
+  //    the squad… It is the FIRST of two defences:
+  //    `attendance-engine-batch.ts` hands a message whose extraction
+  //    still failed back to the ANALYZER rather than letting it go
+  //    silent."
+  //
+  // Step 8 deletes the second defence. An extraction that fails now
+  // means MatchTime says nothing, for a message the router already
+  // decided was attendance-shaped.
+  //
+  // The SDK's four retries cover the transport class — 408, 409, 429,
+  // 5xx — with exponential backoff. They do NOT cover the other half of
+  // the failure surface: a response the strict schema rejects, or one
+  // `parseFacts` cannot read. That half is non-deterministic in exactly
+  // the way a fresh call fixes, and it is the half `TruncatedResponseError`
+  // and `extractJson` throw on.
+  //
+  // So: ONE application-level retry, and only on the four routes that
+  // end in an attendance write. §11.1 prices the asymmetry — "a false
+  // positive costs one extractor call (~$0.002); a false negative costs
+  // a player their slot" — and that asymmetry simply does not hold for
+  // a question or a score, where a miss costs one answer and §13's rule
+  // applies instead: "a missed add is recoverable in one message."
+  // Retrying those would spend latency on the write path's worst minute
+  // to buy nothing.
+  //
+  // NOT TWO retries. Past the second attempt the cause is far more
+  // likely the message than the weather, and the honest answer is the
+  // operator note rather than a third bill and another two seconds of a
+  // ten-minute flush budget.
+  const attempts = RETRYING_ROUTES.includes(route) ? 2 : 1;
+  const failures: string[] = [];
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      const resp = await model.complete(req);
+      const parsed = parseFacts(kind, resp.text, msg.id);
+      return {
+        ...parsed,
+        usage: {
+          costUsd: resp.costUsd,
+          ms: resp.ms,
+          inputTokens: resp.usage.inputTokens + resp.usage.cacheReadTokens,
+          outputTokens: resp.usage.outputTokens,
+        },
+      };
+    } catch (err) {
+      failures.push((err as Error).message);
+    }
   }
+
+  // §11.4: on extractor failure, fail CLOSED — but say so. Until step 8
+  // the surface was the partial-response admin DM matching one of six
+  // free-text `reasoning` prefixes; it is now `lib/operator-note.ts`,
+  // which selects on the typed fact that nobody owned the message.
+  //
+  // The wording distinguishes one failure from two. They are different
+  // signals about the same minute: once is a message the model found
+  // odd, twice in a row is the model having a bad time, and an operator
+  // reading a DM at 22:00 acts differently on each.
+  return {
+    facts: { kind: "none" },
+    degradations: [
+      degradation(
+        "extractor",
+        msg.id,
+        failures.length > 1
+          ? `${kind} extractor failed TWICE: ${failures.join(" | ")}`
+          : `${kind} extractor failed: ${failures[0]}`,
+      ),
+    ],
+  };
 }
 
 export function defaultExtractorModel(): PipelineModel {

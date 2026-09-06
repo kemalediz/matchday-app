@@ -4,9 +4,20 @@
  * `(facts, squad state, actor, org features) → decisions`. Pure: no I/O,
  * no model, no clock (the caller injects `now`). This is where the 36%
  * of the 18,315-token prompt that §3.2 categorises as **B** — "a
- * decision that should be deterministic code" — goes to live, and it is
+ * decision that should be deterministic code" — went to live, and it is
  * exhaustively unit tested in `__tests__/engine.test.ts`, one describe
  * block per incident.
+ *
+ * THE OTHER 64% IS NOT SOMEWHERE ELSE. §10 step 8 deleted the prompt
+ * (measured at 19,850 tokens by the time it went; 18,315 is the figure
+ * §3.2 counted), `analyzeBatch` and `executeVerdict`. So this file is no
+ * longer "the deterministic third of a decider that still exists" — for
+ * every route an owner claims, it is the ONLY decider, and a message no
+ * owner claims is answered by nobody: silence in the group plus one
+ * deduped operator DM (`route.ts`'s "NOBODY OWNED IT" branch, `lib/operator-note.ts`). Read
+ * every `degrade()` below with that in mind. A degradation used to mean
+ * "the analyzer will take this"; it now means "MatchTime says nothing
+ * and an admin is told".
  *
  * WHAT IT MUST NEVER DO
  * ---------------------
@@ -42,6 +53,8 @@ import {
 } from "../promote-authorization";
 import { shouldAskForGuestName } from "../guest-name-ask";
 import { RECRUIT_COMMAND_IMPLIES_ADDRESSED } from "../recruit-request";
+import { RECRUIT_LOOKBACK_MAX, resolveLookbackMatches } from "../recruit-lookback";
+import { resolveReminderPhrase } from "../reminder-time";
 import { resolvePerson } from "./identity";
 import type {
   AttendanceFacts,
@@ -63,6 +76,25 @@ const CONFIDENCE_FLOOR = 0.7;
 
 /** Scores are clamped, never trusted (§9 "value clamps" — survives). */
 const MAX_SCORE = 99;
+
+/**
+ * The shipped reminder window, reproduced from `route.ts:3938-3947`.
+ *
+ * A 60-second grace so "remind me in a minute" is not lost to the round
+ * trip, and a 60-day ceiling because anything further out "is almost
+ * certainly a parse error, not a real request".
+ */
+const REMINDER_PAST_GRACE_MS = 60_000;
+const REMINDER_MAX_AHEAD_MS = 60 * 24 * 60 * 60 * 1000;
+
+/**
+ * First-person references in a payment credit's covered list.
+ *
+ * A CLOSED list, matched exactly, and never handed to `identity.ts` —
+ * which is right to refuse to match "me" against a roster of names. The
+ * shipped path does the same substitution at `route.ts:3846-3850`.
+ */
+const SELF_REFS = new Set(["me", "myself", "i", "my self"]);
 
 interface Working {
   rows: Map<string, AttendanceRow>;
@@ -838,9 +870,204 @@ export function decide(input: EngineInput): EngineResult {
         out.reasons.push("re-posting the existing teams; the balancer is not re-run");
         return;
       }
+
+      // ── `generate` — §10 STEP 8 ────────────────────────────────────
+      //
+      // The club's most-used command: 23 "generate the teams" in 120
+      // days on Sutton FC, more than every question shape put together.
+      // Deleting the mega-prompt without an owner for it would take the
+      // feature with it, which is why it is here rather than degrading
+      // alongside `rename` and `swap`.
+      //
+      // WHAT THIS BRANCH DECIDES, AND WHAT IT DOES NOT:
+      //
+      //   • It resolves NAMES — who to force-confirm, who to pin — and
+      //     nothing else. The line-ups are `team-balancer.ts`'s, the
+      //     target match is the runner's, and the post is
+      //     `generateTeamsForMatch`'s.
+      //   • It requires the @Match Time tag (checked above for the whole
+      //     handler): `generate_teams_request` is in `ACTIONY_INTENTS`.
+      //   • It does NOT require an admin, because the shipped path does
+      //     not (`route.ts:3552`) — any tagged member may ask. An admin
+      //     gate here would be a regression dressed as caution.
+      //   • It does NOT touch `w`. The force-include is applied by
+      //     `team-ops-engine.ts` in its own transaction, so modelling it
+      //     in the projection would flip `squadChanged` and make the
+      //     composer emit a batch-level squad post BESIDE the team post —
+      //     two posts for one message, §3.2 S36 exactly. The cost is
+      //     that `nextState` under-reports a force-include; the runner
+      //     composes the team post from the balancer's own output and
+      //     never from `nextState`, so nothing reads the stale half.
+      if (facts.action === "generate") {
+        const senderFirstRef = msg.senderName?.trim().split(/\s+/)[0] ?? null;
+        /** "me" / "myself" / "I" → the sender, from a CLOSED list. The
+         *  shipped path rebinds these the same way
+         *  (`route.ts:3637-3641`); `identity.ts` correctly refuses to
+         *  match "me" against a roster, so the mapping happens here and
+         *  never by asking a model who "me" is. */
+        const deSelf = (ref: string): string =>
+          SELF_REFS.has(ref.trim().toLowerCase()) && senderFirstRef ? senderFirstRef : ref;
+
+        /** Members with ANY attendance row on the match. The shipped
+         *  force-include matches against exactly this set
+         *  (`route.ts:3570-3574`) — a BENCH or DROPPED player is the
+         *  whole point of the feature, so CONFIRMED-only would break it. */
+        const attending = w.roster.filter((mem) => w.rows.has(mem.userId));
+
+        const forceInclude: Array<{ userId: string; name: string; ref: string }> = [];
+        const unmatchedIncludes: string[] = [];
+        for (const rawRef of facts.includeRefs) {
+          const r = resolvePerson(deSelf(rawRef), attending);
+          if (r.kind !== "resolved") {
+            // Reported to the group as "couldn't find … — ignored",
+            // never dropped in silence. STRICTER than the shipped path,
+            // which takes the first fuzzy hit: `resolvePerson` refuses
+            // an ambiguous first name rather than force-confirming
+            // whichever of two Amirs happened to sort first.
+            unmatchedIncludes.push(rawRef);
+            out.reasons.push(`include "${rawRef}" did not resolve to one member (${r.kind})`);
+            continue;
+          }
+          if (forceInclude.some((f) => f.userId === r.member.userId)) continue;
+          forceInclude.push({ userId: r.member.userId, name: r.member.name, ref: rawRef });
+        }
+
+        // Pins resolve against the squad AS IT WILL BE — CONFIRMED rows
+        // plus anyone this same message force-includes. The shipped path
+        // re-reads the roster after the flips for exactly this reason
+        // and calls it "the (now possibly updated) roster"
+        // (`route.ts:3630`).
+        const forcedIds = new Set(forceInclude.map((f) => f.userId));
+        const pinnable = w.roster.filter(
+          (mem) => forcedIds.has(mem.userId) || w.rows.get(mem.userId)?.status === "CONFIRMED",
+        );
+
+        const pinned: Array<{ userId: string; name: string; team: "RED" | "YELLOW" }> = [];
+        const unmatchedPins: string[] = [];
+        const pin = (rawRef: string, team: "RED" | "YELLOW") => {
+          const r = resolvePerson(deSelf(rawRef), pinnable);
+          if (r.kind !== "resolved") {
+            unmatchedPins.push(rawRef);
+            out.reasons.push(`pin "${rawRef}" did not resolve to one confirmed player (${r.kind})`);
+            return;
+          }
+          // First pin wins. Two instructions about one player contradict
+          // each other and the balancer can honour only one; taking the
+          // earlier is at least the one the message said first.
+          if (pinned.some((p) => p.userId === r.member.userId)) return;
+          pinned.push({ userId: r.member.userId, name: r.member.name, team });
+        };
+
+        for (const s of facts.swaps) pin(s.personRef, s.team);
+
+        // ── PAIRINGS: "put me and David on the same team" ─────────────
+        //
+        // THE HONEST BIT. `generateTeamsForMatch` takes `pinnedToTeam` —
+        // an ABSOLUTE colour per player — and has no notion of
+        // "together". So a pairing is honoured by pinning the whole
+        // group to ONE side, and WHICH side is arbitrary: it inherits
+        // the colour of any member the message already pinned by name,
+        // and otherwise falls to RED. Red and Yellow carry no meaning of
+        // their own (the labels are per-match display names), so the
+        // constraint the message actually expressed — these people
+        // together — is preserved exactly, and the only thing invented
+        // is a colour that means nothing.
+        //
+        // The shipped path has the SAME limitation and resolves it
+        // worse: the mega-prompt had to pick the colour itself, so a
+        // pairing arrived as two model-authored `teamOverrides`.
+        //
+        // `team-balancer.ts:63-66` caps pins at `perTeam` per side and
+        // lets the overflow fall back into the ordinary pool, so an
+        // over-large pairing degrades into a partial constraint rather
+        // than an impossible match. No cap is re-implemented here.
+        for (const group of facts.pairings) {
+          const resolved: Array<{ userId: string; name: string }> = [];
+          for (const rawRef of group) {
+            const r = resolvePerson(deSelf(rawRef), pinnable);
+            if (r.kind !== "resolved") {
+              unmatchedPins.push(rawRef);
+              out.reasons.push(
+                `pairing member "${rawRef}" did not resolve to one confirmed player (${r.kind})`,
+              );
+              continue;
+            }
+            resolved.push({ userId: r.member.userId, name: r.member.name });
+          }
+          if (resolved.length < 2) {
+            // One resolved name is not a pairing, and pinning them alone
+            // would impose a colour the message never asked for.
+            if (resolved.length === 1) {
+              out.reasons.push(
+                `pairing "${group.join(" + ")}" resolved only ${resolved[0].name}; a group of ` +
+                  `one constrains nothing, so no pin was made`,
+              );
+            }
+            continue;
+          }
+          const already = resolved
+            .map((r) => pinned.find((p) => p.userId === r.userId)?.team)
+            .find((t): t is "RED" | "YELLOW" => t !== undefined);
+          const team = already ?? "RED";
+          for (const r of resolved) {
+            if (pinned.some((p) => p.userId === r.userId)) continue;
+            pinned.push({ userId: r.userId, name: r.name, team });
+          }
+          out.reasons.push(
+            `pairing ${resolved.map((r) => r.name).join(" + ")} honoured by pinning the group ` +
+              `to ${team} (the colour is arbitrary; the balancer has no "together" constraint)`,
+          );
+        }
+
+        emit({
+          kind: "generate_teams",
+          forceInclude,
+          unmatchedIncludes,
+          pinned,
+          unmatchedPins,
+          // Only when the message SUPPLIED both names. "come up with fun
+          // team names" supplies none, and the extractor is told not to
+          // invent any — `team-ops-engine-batch.ts` records what that
+          // loses relative to the mega-prompt.
+          teamNames: facts.teamNames,
+          sourceMessageId: msg.id,
+          reason: "team generation requested",
+        });
+        // NO SPEECH INTENT, deliberately. The group post is
+        // `generateTeamsForMatch`'s `groupPost` — the real balancer
+        // output, with the real names and the real ratings — and the
+        // composer cannot produce it from `SquadState`, because the
+        // line-ups do not exist until the write has run.
+        // `team-ops-engine.ts` composes it from what LANDED: the same
+        // shape the payment ack uses, for the same reason (§3.2 S7 — the
+        // words must match the action).
+        return;
+      }
+
+      // ── `rename` AND `swap`: NEITHER IS OWNED, each for its own
+      //    reason ─────────────────────────────────────────────────────
+      //
+      //   • `swap` HAS AN OWNER ALREADY. `route.ts`'s
+      //     `handleTeamSwapIfApplicable` / `handleColorSwapIfApplicable`
+      //     is a deterministic pre-peel that runs on the RAW BODY with no
+      //     verdict at all, so it survived the mega-prompt's deletion
+      //     untouched — §10 step 8 moved it UP out of the loop rather
+      //     than through it. Owning it here would put two deciders on
+      //     one message, which is the failure this file is organised to
+      //     prevent.
+      //   • `rename` IS NOT A GENERATE. Mapping it onto
+      //     generate-with-names would re-run the balancer over line-ups
+      //     an admin may have hand-swapped — 2026-06-18 (`c408649`), the
+      //     incident that split `show` from `generate` in the first
+      //     place. Renaming WITHOUT reshuffling is a `Match.teamLabels`
+      //     write this path does not model. Losing a rename costs one
+      //     message; the alternative costs the teams.
       degrade(
-        `team action "${facts.action}" is not implemented in the dry-run pipeline; ` +
-          `the existing balancer still owns it`,
+        `team action "${facts.action}" has no owner in the pipeline` +
+          (facts.action === "swap"
+            ? `; route.ts's deterministic swap pre-peel owns it on the raw body`
+            : `; renaming without reshuffling is not modelled, and generating instead ` +
+              `would re-run the balancer over an admin's manual swap (c408649)`),
       );
     }
 
@@ -855,7 +1082,37 @@ export function decide(input: EngineInput): EngineResult {
       const senderIsAdmin =
         !!msg.senderUserId && !!w.roster.find((m2) => m2.userId === msg.senderUserId)?.isAdmin;
       const played = !!msg.senderUserId && completed.participantUserIds.includes(msg.senderUserId);
-      if (!senderIsAdmin && !played) {
+      // ── AN UNRESOLVED SENDER IS PERMITTED, AND THAT IS DELIBERATE ───
+      //
+      // Restored from the shipped path (`route.ts:3457-3462`, in its own
+      // words): *"If we CAN'T resolve them (e.g. WhatsApp hid the phone
+      // via @lid and the pushname didn't match any player) → still write
+      // the score, because the message came from the monitored org's
+      // group chat and losing the score entirely is a worse failure mode
+      // than occasionally trusting a wrong number. Admin can correct via
+      // the dashboard."*
+      //
+      // This is NOT a hole in the §9 authorisation seatbelt, which
+      // survives untouched one line below: a RESOLVED member who neither
+      // played nor is an admin is still refused. The distinction is
+      // between "we know who this is and they may not" and "WhatsApp did
+      // not tell us who this is" — and since the @lid change, the second
+      // is a routine condition in a real group rather than an exotic
+      // one, which is why the shipped path is written this way.
+      //
+      // The blast radius is bounded on all sides: the message must be in
+      // the org's own monitored group, the target must be a match that
+      // has already been played, and `handleScore` refuses to overwrite
+      // a result that is already recorded — so the worst case is one
+      // wrong number on one match, correctable in the dashboard, against
+      // the certainty of losing every score reported from an @lid.
+      const senderUnresolved = !msg.senderUserId;
+      if (senderUnresolved) {
+        out.reasons.push(
+          "score from an unresolved sender: accepted, because losing the score entirely " +
+            "is a worse failure mode (route.ts:3457-3462)",
+        );
+      } else if (!senderIsAdmin && !played) {
         // §9 authorisation — survives untouched. Nothing about the
         // model's competence changes who may report a result.
         out.reasons.push("score reported by someone who neither played nor is an admin");
@@ -886,8 +1143,15 @@ export function decide(input: EngineInput): EngineResult {
         red,
         yellow,
         sourceMessageId: msg.id,
-        reason: "final result reported by a participant or admin",
+        reason: senderUnresolved
+          ? "final result reported from the org's own group by an unresolved sender"
+          : "final result reported by a participant or admin",
       });
+      // The match moves to COMPLETED as part of applying this write
+      // (`route.ts:3510-3517`), so the projection has to move too or a
+      // second `score` message in the same batch would see an
+      // unfinished match and try again.
+      completed.status = "COMPLETED";
       speech.push({ kind: "score_ack", messageId: msg.id, red, yellow });
       out.react = "👍";
     }
@@ -933,11 +1197,53 @@ export function decide(input: EngineInput): EngineResult {
           );
           return;
         }
+        const refs = facts.coveredRefs ?? [];
         const covered: string[] = [];
-        for (const ref of facts.coveredRefs ?? []) {
+        for (const ref of refs) {
+          // "Amir paid for me and Adam". The shipped path maps the
+          // first-person refs onto the SENDER (`route.ts:3846-3850`);
+          // `identity.ts` correctly refuses to match "me" against a
+          // roster, so the mapping is done here, from a closed list, and
+          // never by asking a model who "me" is.
+          if (SELF_REFS.has(ref.trim().toLowerCase())) {
+            if (msg.senderUserId) {
+              covered.push(msg.senderUserId);
+              continue;
+            }
+            out.reasons.push(`covered name "${ref}" is the sender, who is unresolved`);
+            continue;
+          }
           const r = resolvePerson(ref, w.roster);
           if (r.kind === "resolved") covered.push(r.member.userId);
           else out.reasons.push(`covered name "${ref}" did not resolve`);
+        }
+        // ── NAMED, BUT NOBODY RESOLVED ─────────────────────────────────
+        //
+        // A shipped defect, not reproduced. `route.ts:3841-3886` takes
+        // the named branch on `coveredNames.length > 0`, stamps nothing
+        // when none of them match, creates no `PaymentCredit` — and then
+        // replies "credited *Amir* with 4 payments" anyway. The group is
+        // told a payment landed and the chase math never saw it.
+        //
+        // The alternative — falling through to the aggregate branch — is
+        // worse: it would credit a NUMBER for people the message named
+        // and nobody could identify.
+        //
+        // WHERE THE MESSAGE GOES, corrected 2026-09-06. This used to end
+        // "so the message goes back to the analyzer, which is the one
+        // direction that cannot invent money". §10 step 8 deleted the
+        // analyzer. Refusing still cannot invent money — that is the
+        // whole point and it is unchanged — but nothing credits it
+        // either: the payment is not recorded, the group is told
+        // nothing, and the admin gets one line on the operator DM naming
+        // the message. On a live club with real money that is the
+        // correct direction and a worse silence than before, both.
+        if (refs.length > 0 && covered.length === 0) {
+          degrade(
+            `payment credit names ${refs.length} player(s) (${refs.join(", ")}) and none of them ` +
+              `resolve to a member; refusing rather than crediting a count nobody checked`,
+          );
+          return;
         }
         emit({
           kind: "payment_credit",
@@ -945,6 +1251,10 @@ export function decide(input: EngineInput): EngineResult {
           payerName: payer.member.name,
           count,
           coveredUserIds: covered,
+          // From the FACTS, never from `covered.length`: the two differ
+          // exactly when some names resolved and some did not, and that
+          // is the case the apply layer must still treat as named.
+          namedCovered: refs.length > 0,
           sourceMessageId: msg.id,
           reason: "admin-credited bulk payment",
         });
@@ -962,8 +1272,36 @@ export function decide(input: EngineInput): EngineResult {
           out.reasons.push("reminder request requires an @Match Time tag");
           return;
         }
+        if (!state.features.reminders) {
+          // The per-org gate `route.ts:3113-3121` maps `reminder_request`
+          // onto, reproduced rather than left to the caller: a
+          // MoM-and-ratings-only org gets total silence, not a queued DM.
+          out.reasons.push("reminders are off for this org");
+          return;
+        }
         if (!msg.senderUserId) {
           degrade("reminder requested by an unresolved sender; nowhere to send it");
+          return;
+        }
+        const sender = w.roster.find((m2) => m2.userId === msg.senderUserId);
+        if (!sender?.hasPhone) {
+          // `route.ts:3968-3974` answers this in the group rather than
+          // swallowing it ("I don't have your number on file yet"). The
+          // engine has no copy for that, and inventing a second wording
+          // for a shipped sentence is how two bots start disagreeing.
+          //
+          // ⚠️ WHAT THE DEGRADATION NOW COSTS. This used to end "so the
+          // message degrades and `admin-ops-engine-batch.ts` hands it
+          // back to the analyzer, which still says it". §10 step 8
+          // deleted the analyzer: NOBODY says it. A member with no phone
+          // number who asks for a reminder gets total silence, and only
+          // an admin sees the operator note. The no-second-wording
+          // argument still holds; the price is a confused player rather
+          // than one analyzer call. `admin-ops-engine-batch.ts`'s header
+          // lists this and the `subReminderDm` branch as the two
+          // clearest candidates for a follow-up that composes the
+          // shipped sentences deterministically.
+          degrade("reminder requested by a member with no phone number on file");
           return;
         }
         const phrase = (facts.phrase ?? "").trim();
@@ -971,17 +1309,86 @@ export function decide(input: EngineInput): EngineResult {
           degrade("reminder request with no time phrase");
           return;
         }
-        // §3.2 S22: the extractor returns the PHRASE; `date-fns-tz`
-        // resolves it at the apply site. The engine does no calendar
-        // arithmetic and neither does the model.
+        // §3.2 S22: the extractor returns the PHRASE and `date-fns-tz`
+        // resolves it. Neither the model nor this file does calendar
+        // arithmetic — `resolveReminderPhrase` is a pure function of
+        // (phrase, now) and refuses anything it is not sure about.
+        const when = resolveReminderPhrase(phrase, input.now);
+        if (!when.ok) {
+          degrade(`reminder time could not be resolved: ${when.reason}`);
+          return;
+        }
+        // The shipped window, reproduced exactly (`route.ts:3941-3947`):
+        // in the future with a 60-second grace, and inside 60 days.
+        // Anything outside it "is almost certainly a parse error, not a
+        // real request. Stay silent rather than fire a wrong-day DM."
+        const deltaMs = when.at.getTime() - input.now.getTime();
+        if (deltaMs <= -REMINDER_PAST_GRACE_MS || deltaMs > REMINDER_MAX_AHEAD_MS) {
+          degrade(
+            `reminder resolves to ${when.at.toISOString()}, outside the 60-day window; refusing`,
+          );
+          return;
+        }
         emit({
           kind: "reminder",
           userId: msg.senderUserId,
           phrase,
+          sendAt: when.at,
+          whenLabel: when.whenLabel,
+          // The message itself when the extractor named nothing. A nudge
+          // whose body is empty is worse than a nudge that quotes the
+          // request back, and neither is a decision.
+          note: (facts.note ?? "").trim() || msg.body.trim(),
           sourceMessageId: msg.id,
           reason: "reminder requested",
         });
-        speech.push({ kind: "reminder_ack", messageId: msg.id, phrase });
+        speech.push({
+          kind: "reminder_ack",
+          messageId: msg.id,
+          phrase,
+          whenLabel: when.whenLabel,
+        });
+        return;
+      }
+
+      if (facts.action === "recruit") {
+        // ── WHO MAY ASK. Not when it runs — see `recruit_blast`. ───────
+        //
+        // Admin-only, exactly as `route.ts:1548-1557` gates it, and NO
+        // tag required: PR #33's `RECRUIT_COMMAND_IMPLIES_ADDRESSED`
+        // says an admin's recruit command is itself a direct instruction
+        // to MatchTime. Both pipelines read that same constant so
+        // flipping it reverts both together.
+        if (!senderIsAdmin) {
+          out.reasons.push("only an admin may send a recruit blast");
+          return;
+        }
+        if (!msg.tagged && !RECRUIT_COMMAND_IMPLIES_ADDRESSED) {
+          out.reasons.push("recruit blast requires an @Match Time tag");
+          return;
+        }
+        // "the last 5 matches" is a fact about the TEXT. The number the
+        // model reports is untrusted and clamped to [1, 12] here, by
+        // `recruit.ts`'s own clamp, because the ceiling exists for a
+        // reason that has nothing to do with language: the bot runs on
+        // an unofficial WhatsApp client and a mass DM risks the account
+        // ban that takes the whole product down.
+        const asked = facts.lookbackMatches;
+        const lookback =
+          typeof asked === "number" && Number.isFinite(asked) && asked > 0
+            ? resolveLookbackMatches(asked)
+            : null;
+        if (lookback !== null && lookback !== Math.floor(asked as number)) {
+          out.reasons.push(
+            `recruit lookback ${asked} clamped to ${lookback} (max ${RECRUIT_LOOKBACK_MAX})`,
+          );
+        }
+        emit({
+          kind: "recruit_blast",
+          lookbackMatches: lookback,
+          sourceMessageId: msg.id,
+          reason: "admin asked for a recruit blast",
+        });
         return;
       }
 

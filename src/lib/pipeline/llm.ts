@@ -83,6 +83,33 @@ export interface ModelRequest {
   maxTokens: number;
   /** Structured output. `output_config.format`, not a tool. */
   schema?: Record<string, unknown>;
+  /**
+   * `"off"` sends `thinking: {type: "disabled"}`. Omitted sends nothing.
+   *
+   * ── WHY THIS FIELD EXISTS (measured 2026-09-06, §10 step 8) ────────
+   *
+   * `claude-sonnet-5` runs ADAPTIVE THINKING when `thinking` is omitted.
+   * On a self-contradictory message it can spend the ENTIRE `max_tokens`
+   * budget deliberating and return `stop_reason: max_tokens` with
+   * `thinking` blocks and NO text block at all — probed directly at
+   * 1,024, 2,048 and 4,096 tokens, zero text every time, 5 runs of 5.
+   * The truncation guard below then throws, correctly, and the message
+   * gets no answer.
+   *
+   * Raising the cap does not fix it; it just buys a bigger bill for the
+   * same silence. Turning thinking off does, because the extractors were
+   * never meant to reason: §6.2's whole contract is "FACTS about the
+   * text only… No intent… No `reasoning` prose", and
+   * `output_config.format` gives the answer nowhere to put a
+   * deliberation anyway.
+   *
+   * OPT-IN rather than default-off, and per model rather than global:
+   * `{type: "disabled"}` is accepted on `claude-sonnet-5` but the router
+   * runs `claude-haiku-4-5`, an older model with a different thinking
+   * contract, and nothing here needs to send it a parameter it may not
+   * take. The extractors ask; the router does not.
+   */
+  thinking?: "off";
   /** Appears in logs and in the cost breakdown. */
   label: string;
 }
@@ -150,9 +177,22 @@ export function anthropicModel(opts?: { apiKey?: string }): PipelineModel {
       // The SDK retries 408/409/429/5xx with exponential backoff, which
       // is exactly this class. Four attempts rather than two costs a
       // few seconds on a bad minute and nothing at all on a good one.
-      // It is the FIRST of two defences: `attendance-engine-batch.ts`
-      // hands a message whose extraction still failed back to the
-      // analyzer rather than letting it go silent.
+      //
+      // ── THE SECOND DEFENCE CHANGED ON 2026-09-06 (§10 step 8) ──────
+      //
+      // This comment used to end: "It is the FIRST of two defences:
+      // `attendance-engine-batch.ts` hands a message whose extraction
+      // still failed back to the ANALYZER rather than letting it go
+      // silent." There is no analyzer. A failed extraction now means
+      // MatchTime says nothing and an admin gets a DM.
+      //
+      // So the second defence moved INTO the pipeline:
+      // `extractors.ts:extractForRoute` retries once, on the four routes
+      // that end in an attendance write and no others. It is a genuinely
+      // different retry from this one and both are needed — this one
+      // covers the transport class the SDK knows about, that one covers
+      // a response the strict schema rejects, which the SDK considers a
+      // successful call. Neither subsumes the other.
       const client = new Anthropic({ apiKey, maxRetries: 4 });
       const cacheAttempted = req.system.length >= MIN_CACHEABLE_CHARS;
       const t0 = Date.now();
@@ -173,6 +213,11 @@ export function anthropicModel(opts?: { apiKey?: string }): PipelineModel {
         ...(req.schema
           ? { output_config: { format: { type: "json_schema" as const, schema: req.schema } } }
           : {}),
+        // See `ModelRequest.thinking`. Sent ONLY when the caller asked;
+        // an omitted parameter and `{type: "adaptive"}` mean the same
+        // thing on sonnet-5, and sending nothing keeps this layer honest
+        // about which callers made a decision and which did not.
+        ...(req.thinking === "off" ? { thinking: { type: "disabled" as const } } : {}),
       });
       const ms = Date.now() - t0;
 

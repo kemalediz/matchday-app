@@ -8,10 +8,19 @@
  * decided by a path with less context than the analyzer had, or a
  * message decided twice.
  *
- * So the whole "fail open" table from the module header is asserted
- * here, one row at a time, and the assertion is always the same: OWNS
- * NOTHING, which means the analyzer keeps the batch, which is today's
- * behaviour and therefore cannot be a regression.
+ * So the whole decline table from the module header is asserted here,
+ * one row at a time, and the assertion is always the same: OWNS NOTHING.
+ *
+ * WHAT "OWNS NOTHING" MEANS CHANGED ON 2026-09-06. This used to add
+ * "which means the analyzer keeps the batch, which is today's behaviour
+ * and therefore cannot be a regression". §10 step 8 deleted
+ * `analyzeBatch`, the 19,850-token `SYSTEM_PROMPT` and `executeVerdict`,
+ * so nothing keeps the batch: a message this engine declines goes SILENT
+ * in the group and produces one line on a deduped operator DM
+ * (`route.ts`'s "NOBODY OWNED IT" branch, `lib/operator-note.ts`). The assertions below are
+ * unchanged and still right — the engine must not guess — but they now
+ * pin a behaviour change rather than a no-op, so read `ownedIds.size ===
+ * 0` as "MatchTime said nothing", not as "somebody else handled it".
  */
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -45,7 +54,7 @@ function state(over: Partial<SquadState> = {}): SquadState {
     completedMatch: null,
     appearances: [],
     lastBotPost: null,
-    features: { attendance: true, paymentTracking: false, statsQa: false },
+    features: { attendance: true, paymentTracking: false, statsQa: false, reminders: false },
     smallerFormats: [],
     guestAskedUserIds: [],
     ...over,
@@ -175,9 +184,9 @@ describe("the engine owns the three routes and writes through the shipped apply"
   });
 });
 
-// ── fail open: every row of the module header's table ───────────────
+// ── every row of the module header's decline table ──────────────────
 
-describe("it fails OPEN — every failure owns nothing and the analyzer keeps the batch", () => {
+describe("every failure owns nothing — which since §10 step 8 means silence + an operator note", () => {
   it("the flag is off", async () => {
     const d = deps();
     const r = await run([msg()], d, false);
@@ -185,8 +194,15 @@ describe("it fails OPEN — every failure owns nothing and the analyzer keeps th
     expect(d.registered).toEqual([]);
   });
 
-  it("the route is not one of the three", async () => {
-    for (const route of ["question", "balancer", "score", "admin_ops", "unsure", "none"] as const) {
+  // `unsure` LEFT this list on 2026-09-06 (§10 step 8). It used to be
+  // refused here for the reason `gate.ts`'s `ENGINE_ROUTES` gave — doubt
+  // costs an analyzer call — and step 8 deletes the analyzer, so the
+  // choice became "engine or silence" and §11.1's asymmetry answers it
+  // the other way. See the essay on `ENGINE_ROUTES`. It is owned by the
+  // case below this one, which asserts it goes through the same rules as
+  // `self_att` rather than a looser set.
+  it("the route is not one of the four", async () => {
+    for (const route of ["question", "balancer", "score", "admin_ops", "none"] as const) {
       const d = deps();
       const r = await run([msg({ route })], d);
       expect(r.ownedIds.size, `route ${route} was owned`).toBe(0);
@@ -198,6 +214,54 @@ describe("it fails OPEN — every failure owns nothing and the analyzer keeps th
     const d = deps();
     const r = await run([msg({ route: undefined })], d);
     expect(r.ownedIds.size).toBe(0);
+  });
+
+  // ── §10 STEP 8 — `unsure` IS OWNED, AND ON THE SAME TERMS ──────────
+  //
+  // Three cases rather than one, because "we now own `unsure`" is only
+  // safe if it means "the same rules, entered by a different door". The
+  // risk of the change is not that the engine acts on a doubtful
+  // message; it is that a doubtful message gets a LOOSER path than a
+  // confident one. So: it is owned; a claim on it writes exactly as
+  // `self_att` writes; and a message the extractor cannot make a claim
+  // from writes nothing, which is the §6.2 worst case, accepted.
+  it("OWNS `unsure` — step 8 deleted the thing it used to fall back to", async () => {
+    const d = deps();
+    const r = await run([msg({ route: "unsure" })], d);
+    expect(r.ownedIds.size).toBe(1);
+  });
+
+  it("puts an `unsure` message through the SAME write path as a `self_att` one", async () => {
+    const viaUnsure = deps();
+    await run([msg({ route: "unsure" })], viaUnsure);
+    const viaSelfAtt = deps();
+    await run([msg({ route: "self_att" })], viaSelfAtt);
+    expect(viaUnsure.registered).toEqual(viaSelfAtt.registered);
+    expect(viaUnsure.registered).toEqual(["u-pete"]);
+  });
+
+  it("writes nothing and says nothing for an `unsure` message with no claim in it", async () => {
+    // §6.2's accepted worst case, and the reason the false-positive side
+    // of §11.1's asymmetry is cheap: an extractor call that returns no
+    // claims costs ~$0.002 and changes nothing at all.
+    //
+    // Note it is still OWNED. That is deliberate and it is the honest
+    // shape: the engine looked at this message and decided nothing
+    // happens, so it carries an outcome with a reason and a row in
+    // `AnalyzedMessage` — which is §11.2's own mitigation, "log the
+    // route alongside the extracted facts, so triage is one query".
+    // Leaving it unowned would send it to step 8's operator note, and
+    // an admin DM for every banter message the router happened to call
+    // `unsure` is the nagging that makes an operator surface useless.
+    const d = deps({
+      model: modelReturning({ claims: [], affirmation: "none", sideRequests: [] }),
+    });
+    const r = await run([msg({ route: "unsure" })], d);
+    expect(d.registered).toEqual([]);
+    expect(d.cancelled).toEqual([]);
+    const outcome = r.outcomes.get("wa-1");
+    expect(outcome?.action).toBe("none");
+    expect(outcome?.reply).toBeNull();
   });
 
   it("step 5's gate already skipped it", async () => {
@@ -216,7 +280,7 @@ describe("it fails OPEN — every failure owns nothing and the analyzer keeps th
   it("attendance is off for the org", async () => {
     const d = deps({
       loadState: async () =>
-        state({ features: { attendance: false, paymentTracking: false, statsQa: false } }),
+        state({ features: { attendance: false, paymentTracking: false, statsQa: false, reminders: false } }),
     });
     const r = await run([msg()], d);
     expect(r.ownedIds.size).toBe(0);
@@ -332,13 +396,14 @@ describe("an extractor failure hands the message BACK to the analyzer", () => {
     };
     const d = deps({ model: broken });
     const r = await run([msg()], d);
-    // NOT owned → the route leaves it in `batchInputs` and the
-    // 18,315-token prompt decides it, exactly as it does today.
+    // NOT owned. Since §10 step 8 there is nothing behind this file, so
+    // "not owned" means silence in the group plus one line on the
+    // operator DM (`lib/operator-note.ts`) — not a hand-back.
     expect(r.ownedIds.size).toBe(0);
     expect(r.outcomes.size).toBe(0);
     expect(d.registered).toEqual([]);
     // Loud, not silent: the reason is on the record for the operator.
-    expect(r.degradations.join(" ")).toMatch(/handing this message back to the analyzer/);
+    expect(r.degradations.join(" ")).toMatch(/nobody handles this message/);
     warn.mockRestore();
   });
 
@@ -358,16 +423,21 @@ describe("an extractor failure hands the message BACK to the analyzer", () => {
     warn.mockRestore();
   });
 
-  it("one failed extraction does not cost the REST of the batch its decider", async () => {
-    // The fallback is per MESSAGE. A batch where one extractor call
-    // times out must not send four healthy ones to the analyzer too.
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    let n = 0;
-    const flaky: PipelineModel = {
+  /**
+   * A model that fails the first N attempts for ONE message body and
+   * always succeeds for anything else. Keyed on the BODY rather than a
+   * global counter because the extractors fan out in parallel, so a
+   * counter would make which message failed depend on scheduling.
+   */
+  function flakyFor(body: string, failures: number): PipelineModel {
+    let seen = 0;
+    return {
       name: "flaky",
-      async complete() {
-        n += 1;
-        if (n === 1) throw new Error("529 Overloaded");
+      async complete(req) {
+        if (req.user.includes(body)) {
+          seen += 1;
+          if (seen <= failures) throw new Error("529 Overloaded");
+        }
         return {
           text: JSON.stringify(SELF_IN),
           stopReason: "end_turn",
@@ -377,16 +447,48 @@ describe("an extractor failure hands the message BACK to the analyzer", () => {
         };
       },
     };
-    const d = deps({ model: flaky });
+  }
+
+  it("RESCUES a message whose extraction failed once (§10 step 8's retry)", async () => {
+    // This case used to assert `ownedIds.size === 1` — that the failed
+    // message was lost and the other survived. That was correct while
+    // the loser went to the ANALYZER. With no analyzer, losing it means
+    // silence for someone who said "in", so `extractors.ts` retries the
+    // attendance routes once and BOTH are now owned. The old assertion
+    // would have quietly locked in the worse behaviour.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const d = deps({ model: flakyFor("aaa", 1) });
     const r = await run(
       [
-        msg({ waMessageId: "a", senderUserId: "u-pete" }),
-        msg({ waMessageId: "b", senderUserId: "u-dan" }),
+        msg({ waMessageId: "a", body: "aaa", senderUserId: "u-pete" }),
+        msg({ waMessageId: "b", body: "bbb", senderUserId: "u-dan" }),
+      ],
+      d,
+    );
+    expect(r.ownedIds.size).toBe(2);
+    expect(d.registered.sort()).toEqual(["u-dan", "u-pete"]);
+    warn.mockRestore();
+  });
+
+  it("one PERMANENTLY failed extraction does not cost the REST of the batch its decider", async () => {
+    // The original point of this case, restated against a failure the
+    // retry cannot rescue: the fallback is per MESSAGE. A batch where
+    // one extractor call fails both attempts must not silence the
+    // healthy ones alongside it.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const d = deps({ model: flakyFor("aaa", 2) });
+    const r = await run(
+      [
+        msg({ waMessageId: "a", body: "aaa", senderUserId: "u-pete" }),
+        msg({ waMessageId: "b", body: "bbb", senderUserId: "u-dan" }),
       ],
       d,
     );
     expect(r.ownedIds.size).toBe(1);
-    expect(d.registered).toHaveLength(1);
+    expect(d.registered).toEqual(["u-dan"]);
+    // And the one that was lost says so, loudly enough to reach the
+    // operator note rather than vanishing.
+    expect(r.degradations.join(" ")).toMatch(/529 Overloaded/);
     warn.mockRestore();
   });
 
@@ -462,7 +564,7 @@ describe("an extractor failure hands the message BACK to the analyzer", () => {
       expect(r.degradations.join("\n")).toContain(id);
     }
     expect(
-      r.degradations.filter((x) => /handing this message back to the analyzer/.test(x)),
+      r.degradations.filter((x) => /nobody handles this message/.test(x)),
     ).toHaveLength(3);
     expect(warn.mock.calls.map((c) => String(c[0])).join("\n")).toMatch(/3 of 3/);
     warn.mockRestore();

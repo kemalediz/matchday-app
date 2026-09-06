@@ -295,20 +295,28 @@ describe("shapes that stay with the analyzer", () => {
   });
 });
 
-// ── 3. Per-shape hand-backs, decided AFTER extraction ─────────────────
+// ── 3. Per-shape refusals, decided AFTER extraction ───────────────────
 
-describe("a shape the composer cannot answer well goes to the analyzer", () => {
+describe("a shape the composer cannot answer well is answered by nobody", () => {
   it.each([
     ["other", { topic: "other", personRef: "", statedCount: -1 }],
     ["stats", { topic: "stats", personRef: "", statedCount: -1 }],
     ["options", { topic: "options", personRef: "", statedCount: -1 }],
   ])("question topic %s", async (_topic, facts) => {
+    // This describe block was titled "…goes to the analyzer" and
+    // asserted /analyzer/i, which was true until §10 step 8 deleted
+    // `analyzeBatch` and the 19,850-token `SYSTEM_PROMPT`. These three
+    // topics are now answered by NOBODY: silence in the group plus one
+    // line on the operator DM. The refusal is still right (see
+    // `ANSWERABLE_TOPICS`'s essay on the composed-format traps), and the
+    // degradation is now the only signal, so it is what gets asserted.
     const body = "@Match Time what do you reckon?";
     const { model } = stubModel({ [body]: facts });
     const res = await run({ messages: [msg({ body, route: "question" })], model });
     expect([...res.ownedIds]).toEqual([]);
     expect(res.outcomes.size).toBe(0);
-    expect(res.degradations.join(" ")).toMatch(/analyzer/i);
+    expect(res.degradations.join(" ")).toMatch(/nobody answers this message/i);
+    expect(res.degradations.join(" ")).not.toMatch(/analyzer/i);
   });
 
   it("owns the six topics answered from the database", async () => {
@@ -472,12 +480,21 @@ describe("a shape the composer cannot answer well goes to the analyzer", () => {
     expect([...res.ownedIds]).toHaveLength(1);
   });
 
-  it.each(["generate", "rename", "swap"])(
-    "hands back a `%s` team request — only showing is a read",
-    async (action) => {
+  it.each([
+    // §10 step 8 gave `generate` an owner of its own on this same route
+    // — `team-ops-engine-batch.ts`, selected by this same FACT. What
+    // does NOT change is that this module owns none of the three: it is
+    // a read path with no apply layer, and the degradation now names
+    // where each one actually goes.
+    ["generate", /team-ops-engine-batch\.ts owns it/],
+    ["rename", /no module owns it/],
+    ["swap", /no module owns it/],
+  ] as const)(
+    "hands a `%s` team request on — only showing is a read",
+    async (action, expected) => {
       const body = "@Match Time do the teams";
       const { model } = stubModel({
-        [body]: { action, includeRefs: [], teamNames: [], swaps: [] },
+        [body]: { action, includeRefs: [], teamNames: [], swaps: [], pairings: [] },
       });
       const res = await run({
         messages: [msg({ body, route: "balancer" })],
@@ -485,7 +502,7 @@ describe("a shape the composer cannot answer well goes to the analyzer", () => {
         worldOpts: { confirmed: ELEVEN, teams: { kemal: "RED", elvin: "YELLOW" } },
       });
       expect([...res.ownedIds]).toEqual([]);
-      expect(res.degradations.join(" ")).toMatch(/balancer|generate|analyzer/i);
+      expect(res.degradations.join(" ")).toMatch(expected);
     },
   );
 
@@ -516,16 +533,24 @@ describe("a shape the composer cannot answer well goes to the analyzer", () => {
     expect(res.writes).toEqual([]);
   });
 
-  it("hands a message back when its extraction FAILED, rather than going silent", async () => {
+  it("disowns a message when its extraction FAILED, and says where it went", async () => {
     // Step 6's measured lesson: 27 `529 Overloaded` in one live sweep
     // took two corpus cases from 3/3 to 0/3 — not because the engine
     // decided them wrongly but because it never got to decide them.
+    //
+    // This used to assert /analyzer/i, because a failed extraction was
+    // handed back to the mega-prompt. §10 step 8 deleted it, so the
+    // message now goes SILENT and the degradation is the only signal
+    // left — it is what `lib/operator-note.ts` prints beside the lost
+    // message on the admin DM. Asserting the sentence is asserting that
+    // the operator is told the truth.
     const { model } = stubModel({ [COUNT_Q]: COUNT_FACTS }, { throwOn: COUNT_Q });
     const res = await run({ messages: [msg({ body: COUNT_Q, route: "question" })], model });
     expect([...res.ownedIds]).toEqual([]);
     expect(res.outcomes.size).toBe(0);
     expect(res.degradations.join(" ")).toMatch(/529|failed/i);
-    expect(res.degradations.join(" ")).toMatch(/analyzer/i);
+    expect(res.degradations.join(" ")).toMatch(/nobody answers this message/i);
+    expect(res.degradations.join(" ")).not.toMatch(/analyzer/i);
   });
 
   it("owns the messages it can when only ONE of several extractions failed", async () => {

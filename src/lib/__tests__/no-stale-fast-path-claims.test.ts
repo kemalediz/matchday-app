@@ -21,6 +21,29 @@
  * prompt cannot see, and none of them touch IN / OUT / score. The one that
  * did overlap with attendance, recruit, was deleted on 2026-09-01 in PR #33
  * after it swallowed a third-party OUT.
+ *
+ * ─────────────────────────────────────────────────────────────────────
+ * RE-CHECKED AFTER §10 STEP 8 (2026-09-06): KEPT, AND IT GUARDS MORE
+ * ─────────────────────────────────────────────────────────────────────
+ *
+ * Step 8 deletes `analyzeBatch`, so "before the LLM batch" now means
+ * "before the router and the engines". Every claim this file polices is
+ * still false and still worth policing, and the surface it watches GREW
+ * rather than shrank:
+ *
+ *   • `analyze/route.ts` now peels FOUR deterministic paths ahead of the
+ *     router (colour swap, team swap, the bench-prompt answer, the
+ *     pasted roster) on top of the stats/help/DM ones. Every one is
+ *     `handledBy: "fast-path"`, none classifies IN/OUT/score on a regex,
+ *     and each carries a comment explaining why it is deterministic. A
+ *     comment that overstated any of them would be the exact rot this
+ *     file exists to catch, on a bigger set of files than before.
+ *   • The cost-provenance case matters more, not less: §8's figures were
+ *     modelled against a mega-prompt that no longer runs, so any bare
+ *     per-club figure left in the tree is now doubly stale.
+ *
+ * The premise case below (handlers.ts has no classification left) is
+ * unaffected: `whatsapp-bot/` was not touched by step 8 at all.
  */
 import { describe, it, expect } from "vitest";
 import fs from "node:fs";

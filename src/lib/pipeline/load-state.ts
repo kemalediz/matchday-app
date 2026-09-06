@@ -115,16 +115,39 @@ export async function loadSquadState(
       ).map((t) => ({ userId: t.userId, team: t.team as "RED" | "YELLOW" }))
     : [];
 
-  const completed = await db.match.findFirst({
-    where: { activity: { orgId }, status: "COMPLETED", date: { lte: now } },
+  // THE LAST MATCH ACTUALLY PLAYED — see `SquadState.completedMatch`.
+  //
+  // The three statuses and the "kickoff + duration has passed" test are
+  // the shipped score path's, copied deliberately (`route.ts:3471-3487`):
+  // a match only becomes COMPLETED when somebody records a score, so
+  // asking for COMPLETED alone would mean the FIRST score of every match
+  // had nowhere to land. `take: 10` then `.find(ended)` is also its
+  // shape — the ten most recent, the first that has finished.
+  const completedCandidates = await db.match.findMany({
+    where: {
+      activity: { orgId },
+      status: { in: ["TEAMS_GENERATED", "TEAMS_PUBLISHED", "COMPLETED"] },
+      date: { lte: now },
+    },
     select: {
       id: true,
+      date: true,
+      status: true,
+      isHistorical: true,
       redScore: true,
       yellowScore: true,
+      activity: { select: { matchDurationMins: true } },
       attendances: { where: { status: "CONFIRMED" }, select: { userId: true } },
     },
     orderBy: { date: "desc" },
+    take: 10,
   });
+  const completed =
+    completedCandidates.find(
+      (m) =>
+        new Date(m.date.getTime() + m.activity.matchDurationMins * 60 * 1000).getTime() <=
+        now.getTime(),
+    ) ?? null;
 
   // Appearances across completed matches, for the stats answer that
   // today costs a whole extra LLM call and once returned the squad
@@ -196,6 +219,8 @@ export async function loadSquadState(
     completedMatch: completed
       ? {
           id: completed.id,
+          status: completed.status as "TEAMS_GENERATED" | "TEAMS_PUBLISHED" | "COMPLETED",
+          isHistorical: completed.isHistorical,
           redScore: completed.redScore,
           yellowScore: completed.yellowScore,
           participantUserIds: completed.attendances.map((a) => a.userId),
@@ -210,6 +235,7 @@ export async function loadSquadState(
       attendance: features.attendance,
       paymentTracking: features.paymentTracking ?? false,
       statsQa: features.statsQa ?? false,
+      reminders: features.reminders ?? false,
     },
     smallerFormats,
     guestAskedUserIds: guestAsked,

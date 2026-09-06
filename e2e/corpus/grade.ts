@@ -23,9 +23,10 @@
  *    next copy tweak and then nobody trusts it.
  * 2. The grader consumes a `CorpusObservation`, which is pipeline-
  *    agnostic: rows, member names, what the bot said, what it DM'd,
- *    what it reacted. `AnalysisVerdict` does not appear anywhere in this
- *    file, so step 2's router+extractor+engine can be graded by exactly
- *    the same cases as today's mega-prompt.
+ *    what it reacted. No verdict type appears anywhere in this file, so
+ *    step 2's router+extractor+engine could be graded by exactly the
+ *    same cases as the mega-prompt — and when §10 step 8 deleted
+ *    `AnalysisVerdict` on 2026-09-06, this file did not change.
  */
 
 // ── §3.2 taxonomy ──────────────────────────────────────────────────────
@@ -99,6 +100,17 @@ export interface CorpusWorld {
     confirmedKeys: string[];
     redScore?: number | null;
     yellowScore?: number | null;
+    /**
+     * Default COMPLETED. A match only reaches that status when SOMEBODY
+     * RECORDS A SCORE, so the real state of a Tuesday night that nobody
+     * has reported yet is `TEAMS_PUBLISHED` — and that is the shape the
+     * first score of every match lands on. Declarable here so a case can
+     * pin it (see `SquadState.completedMatch`).
+     */
+    status?: "TEAMS_GENERATED" | "TEAMS_PUBLISHED" | "COMPLETED";
+    /** Pre-existing team assignments on the played match, so the Elo
+     *  deltas have something to move. */
+    teams?: Record<string, "RED" | "YELLOW">;
   };
   /** Open a real BenchSlotOffer by dropping this confirmed player first
    *  (the only way to get the "OPEN BENCH SLOT" context block). */
@@ -249,10 +261,11 @@ export interface CorpusCase {
 // ── What a pipeline hands back ─────────────────────────────────────────
 
 /**
- * The adapter boundary. Deliberately free of `AnalysisVerdict`, intents,
- * reasoning and every other artefact of today's design — a step-2
- * router+extractor+engine can fill this in from proposed writes without
- * ever producing a verdict.
+ * The adapter boundary. Deliberately free of verdicts, intents,
+ * reasoning and every other artefact of the mega-prompt's design — a
+ * router+extractor+engine fills this in from proposed writes without
+ * ever producing a verdict, which is why it outlived `AnalysisVerdict`
+ * (deleted, §10 step 8).
  */
 export interface CorpusObservation {
   attendanceBefore: Array<{ name: string; status: AttStatus }>;

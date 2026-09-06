@@ -31,7 +31,6 @@ import {
   buildBenchAskedLine,
   benchClaimPhrasingExample,
 } from "@/lib/bench-offer-copy";
-import { SYSTEM_PROMPT } from "@/lib/message-analyzer";
 
 const GROUP = {
   context: "on *Reds* (replacing Ehtisham Ekin) for *Tuesday 7-a-side* tonight",
@@ -197,29 +196,33 @@ describe("buildBenchAskedLine — the honest status line the server prepends", (
 });
 
 /**
- * The LLM writes group text too. If the PROMPT keeps offering "👍/👎
- * above" as a phrasing example the model will keep saying it however the
- * copy constants are set, so the prompt is pinned to the same flag.
+ * ── THREE OF THESE FOUR CASES DIED WITH `SYSTEM_PROMPT` (§10 step 8) ──
+ *
+ * They pinned the PROMPT to the same feature flag as the copy constants,
+ * because "if the prompt keeps offering '👍/👎 above' as a phrasing
+ * example the model will keep saying it however the copy constants are
+ * set". There is no prompt: the bench-offer copy is rendered from these
+ * constants directly, so the two cannot disagree and there is nothing
+ * left to pin.
+ *
+ * The fourth — "still teaches the model to READ a 👍 as a bench claim" —
+ * was the only one asserting BEHAVIOUR rather than prompt text, and the
+ * behaviour did not go anywhere. It moved to a database row: a 👍 from a
+ * player with an open offer is caught by `pipeline/awaiting-answer.ts`
+ * (the router's open-question rescue, PR #42) and, for an open
+ * `PendingBenchConfirmation`, by `lib/bench-prompt-answer.ts`. Both are
+ * tested where they live, and both are stronger than a prompt line: they
+ * read a row instead of hoping the model remembered a rule.
+ *
+ * What survives here is the half that was never about the model.
  */
-describe("the system prompt is pinned to the same flag", () => {
-  it("hands the model the gated phrasing example", () => {
-    expect(SYSTEM_PROMPT).toContain(benchClaimPhrasingExample());
-  });
-
-  it("no longer suggests the model tell a player to use the 👍 above", () => {
+describe("the phrasing example honours the flag in both directions", () => {
+  it("does not tell a player to use the 👍 above when reactions are off", () => {
     expect(benchClaimPhrasingExample({ mentionReactions: false })).not.toContain("👍");
-    expect(SYSTEM_PROMPT).not.toContain("👍/👎 above");
   });
 
   it("restores the reaction example when the flag is flipped back on", () => {
     expect(benchClaimPhrasingExample({ mentionReactions: true })).toContain("👍");
-  });
-
-  it("still teaches the model to READ a 👍 as a bench claim (handling is untouched)", () => {
-    // The instruction is withdrawn; the interpretation is not. An
-    // unprompted 👍 in the group must still count the moment it arrives.
-    expect(SYSTEM_PROMPT).toContain("benchConfirmation");
-    expect(SYSTEM_PROMPT).toContain("👍");
   });
 });
 

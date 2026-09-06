@@ -1,47 +1,100 @@
 /**
- * Window-based shadow analyzer (2026-05-29).
+ * ═════════════════════════════════════════════════════════════════════
+ * THE SHADOW WINDOW-ANALYZER IS RETIRED (§10 step 7/8, 2026-09-06).
+ * WHAT IS LEFT OF THIS FILE IS THE `WindowVerdict` PAYLOAD CONTRACT.
+ * ═════════════════════════════════════════════════════════════════════
  *
- * Why this exists — context:
- *   The live `/api/whatsapp/analyze` route forces Claude to emit a
- *   structured verdict per message in the batch (intent +
- *   registerAttendance + registerFor + …), then runs server-side
- *   regex safety-nets to "fix" verdicts the LLM may have got wrong.
- *   That bandaid layer is itself the source of recurring incidents
- *   (Kemal dropped from his own squad 2026-05-28; Mojib not dropped
- *   2026-05-26; Erdal/Najib before that). Every fix loosens or
- *   tightens a regex and the next case finds a new gap.
+ * From 2026-05-29 this module took the same window the live analyzer saw
+ * (fresh batch + history + match context) and asked Claude for ONE
+ * coherent state diff for the whole window, then persisted it to the
+ * `WindowVerdict` table so `/admin/shadow` could show it side by side
+ * with the live per-message verdicts. It never wrote attendance. §8.1
+ * measured it at roughly 30% of the whole analyzer bill — a second,
+ * entirely uncached `claude-sonnet-4-5` call per batch — and it was
+ * switched off by default on 2026-08-31 (PR #28) after three months of
+ * paying for a comparison nobody had read.
  *
- *   This module takes the SAME window the live analyzer sees (fresh
- *   batch + history + match context) and asks Claude for ONE
- *   coherent state diff for the whole window — no per-message
- *   verdicts to conflict, no safety nets to override.
+ * §10 step 7 says "RETIRE THE SHADOW", and step 8 is what makes that
+ * unarguable rather than merely thrifty: THE SHADOW WAS A COMPARISON,
+ * AND IT COMPARED AGAINST THE MEGA-PROMPT. With `analyzeBatch` and the
+ * 19,850-token `SYSTEM_PROMPT` deleted there is nothing on the other
+ * side of the diff. Turning it on would spend a Sonnet call per batch to
+ * produce a verdict no live path reads and no dashboard can contrast
+ * with anything.
  *
- * Shadow only:
- *   This module never writes to attendance. Its output is persisted to
- *   the `WindowVerdict` table so the /admin/shadow dashboard can show
- *   it side-by-side with the live analyzer's per-message verdicts.
+ * §7.1 is fair to what it was — "its infrastructure is exactly right and
+ * is the migration harness… building it was not wasted work; it was the
+ * previous step of this same journey" — and this is the journey
+ * arriving.
  *
- * ⚠️ OFF BY DEFAULT since 2026-08-31 — set `SHADOW_ANALYZER_ENABLED=1`.
- *   It ran on every batch from 2026-05-29, a second entirely-uncached
- *   Sonnet call at ~$0.014/batch — roughly 30% of the whole analyzer
- *   bill (MDs/analyzer-redesign-2026-08-31.md §8.1) — to gather "a
- *   week of comparison data" for a decision that was never taken.
- *   Three months of that is enough.
+ * ─────────────────────────────────────────────────────────────────────
+ * WHAT WAS DELETED, AND WHY NOTHING IT GUARDED CAN HAPPEN NOW
+ * ─────────────────────────────────────────────────────────────────────
  *
- *   It is deliberately NOT deleted: it is the safest tool available for
- *   the migration in §10 of that document — run the new pipeline and
- *   the old one over the same live traffic and diff them. Switch it on
- *   when that comparison is actually being read, and off again after.
+ *   • `analyzeWindow` + its private `SYSTEM_PROMPT` — the one-coherent-
+ *     diff prompt. Nothing calls it. It read `BatchInputMessage` /
+ *     `BatchInputHistory` from `message-analyzer.ts`, both of which were
+ *     deleted in step 8; `tsc` was failing on that import.
+ *   • `runShadowAnalysis` — the `after()` entry point the analyze route
+ *     called on every batch. The route no longer calls it and carries
+ *     its own tombstone explaining the retirement.
+ *   • `isShadowAnalysisEnabled` / `SHADOW_ANALYZER_ENABLED` — the flag
+ *     that kept it from costing anything. A flag guarding a function
+ *     that does not exist guards nothing; the spend it prevented is now
+ *     prevented by there being no call site. `SHADOW_DAILY_USD_CAP` and
+ *     `shadowCapReached` went with it for the same reason — a daily cost
+ *     cap on a call nobody makes.
+ *   • `computeBatchHash`, `buildShadowMatchContext`, the Sonnet pricing
+ *     constants, `extractFirstJsonObject`, `coerceVerdict` — all reached
+ *     only from the two entry points above.
+ *   • `src/lib/pipeline/shadow.ts` (`runDryRunShadow`, `toWindowShape`,
+ *     `shadowPipelineMode` / `SHADOW_PIPELINE`) and its test. That
+ *     module existed to REPOINT this harness at the step-2/3 dry run —
+ *     "same harness, same table, same dashboard" — and `runShadowAnalysis`
+ *     was its only caller. `pipeline/run.ts` does not need it:
+ *     `scripts/dryrun-pipeline.ts` and `e2e/corpus/dryrun-pipeline.ts`
+ *     call `runPipeline` directly, and `api/cron/none-bucket-shadow`
+ *     uses `none-shadow.ts`'s own `toWindowShape`, which is a different
+ *     function with the same name.
+ *
+ * ─────────────────────────────────────────────────────────────────────
+ * WHAT IS KEPT, DELIBERATELY, AND WHY THIS FILE STILL EXISTS AT THIS
+ * PATH
+ * ─────────────────────────────────────────────────────────────────────
+ *
+ * The `WindowVerdict` TABLE, every historical row in it, and
+ * `/admin/shadow` which renders them. Three months of shadow runs are
+ * the record of how this decision was reached and are not ours to
+ * delete.
+ *
+ * And the table is NOT dormant. `src/app/api/cron/none-bucket-shadow/`
+ * still WRITES new `WindowVerdict` rows for a completely different
+ * purpose: §11.1's fourth containment, "shadow the `none` bucket
+ * forever… the regression detector the current architecture has never
+ * had". That sweep matters MORE after step 8, not less — it is now the
+ * only thing that ever looks again at a message the router called
+ * banter, because there is no second decider to catch a real IN the
+ * router got wrong.
+ *
+ * So the types below are a LIVE payload contract with two writers and
+ * one reader, not an archive. They stay in `src/lib/` rather than moving
+ * into `app/admin/shadow/page.tsx` for three reasons:
+ *
+ *   1. `prisma/schema.prisma` documents `WindowVerdict.verdictJson` by
+ *      pointing at THIS PATH ("See `src/lib/window-analyzer.ts` for the
+ *      type"). A database column's payload contract does not belong in a
+ *      page component, and moving it would either break that comment or
+ *      require editing the schema in a deletion PR.
+ *   2. `src/lib/pipeline/types.ts`'s `WindowShapedVerdict` is this shape
+ *      plus the pipeline's own detail, and `none-shadow.ts` projects
+ *      onto it. A shared shape belongs beside its other producer, not
+ *      inside one of its consumers.
+ *   3. A page is a reader. Two writers and one reader means the contract
+ *      goes where all three can import it.
+ *
+ * If the `none`-bucket sweep is ever retired too, this file goes with
+ * it and the types move into whatever still renders the table.
  */
-
-import Anthropic from "@anthropic-ai/sdk";
-import type { BatchInputHistory, BatchInputMessage } from "./message-analyzer";
-import { db } from "./db";
-// §10 step 2 — the shadow is the migration harness, repointed at the new
-// pipeline. See src/lib/pipeline/shadow.ts.
-import { runDryRunShadow, shadowPipelineMode } from "./pipeline/shadow";
-import { format as formatDate } from "date-fns";
-import { resolveTeamLabels } from "./team-labels";
 
 export type WindowStateChangeAction =
   | "drop"
@@ -53,20 +106,16 @@ export type WindowStateChangeAction =
 
 export interface WindowStateChange {
   action: WindowStateChangeAction;
-  /** Human-readable name as the LLM saw it in the chat. Server-side
-   *  resolution against memberships happens later (when we cut over);
-   *  for shadow we just persist the name. */
+  /** Human-readable name as it appeared in the chat. */
   targetName: string;
-  /** Resolved User.id if the live analyzer already mapped this person
-   *  (we pre-resolve from the batch's authorUserId hints). */
+  /** Resolved `User.id` where the producer already knew it. */
   targetUserId?: string;
   /** For "swap" — the other player. */
   swapWithName?: string;
   /** For "score" — the match outcome. */
   scoreRed?: number;
   scoreYellow?: number;
-  /** LLM's one-line justification — what about the window made this
-   *  change correct. */
+  /** One line on what about the window made this change correct. */
   reason: string;
 }
 
@@ -77,446 +126,25 @@ export interface WindowReaction {
   kind: string;
 }
 
+/**
+ * The shape stored in `WindowVerdict.verdictJson`.
+ *
+ * Read by `/admin/shadow`. Written today by
+ * `api/cron/none-bucket-shadow` (via `pipeline/none-shadow.ts`), and
+ * historically by the retired shadow analyzer. Producers may add fields
+ * alongside these — `none-shadow.ts` adds `pipeline` and its own detail
+ * — but every producer must fill in all four of these, because the
+ * dashboard renders them unconditionally.
+ */
 export interface WindowVerdict {
-  /** One sentence: what happened in this window. Goes to the dashboard
-   *  so we can scan correctness at a glance. */
+  /** One sentence: what happened in this window. */
   windowSummary: string;
-  /** Every change the squad should reflect after this window. EMPTY
-   *  when the window had no state-relevant content. NOT per-message. */
+  /** Every change the squad should reflect after this window. EMPTY when
+   *  the window had no state-relevant content. NOT per-message. */
   stateChanges: WindowStateChange[];
-  /** Per-message emoji reactions. Keep minimal — only when an ack adds
-   *  value (e.g. ✅ for an IN, 👋 for an OUT). Skip for chitchat. */
+  /** Per-message emoji reactions. */
   reactions: WindowReaction[];
-  /** One group reply for the whole window. Null when no reply is
-   *  warranted (chitchat, silent ack). The live analyzer emits replies
-   *  per-message which often produces 3-4 contiguous bot posts; one
-   *  consolidated reply reads better. */
+  /** One group reply for the whole window, or null when none is
+   *  warranted. */
   groupReply: string | null;
 }
-
-export interface WindowAnalyzerInput {
-  /** Same as analyzeBatch's input — the messages flushed by the Pi. */
-  messages: BatchInputMessage[];
-  /** Same as analyzeBatch's history — chat preceding this batch for
-   *  context. */
-  history: BatchInputHistory[];
-  /** Compact match context block. Built by the live analyzer; we
-   *  reuse the exact same string so both paths see the same world. */
-  matchContext: string;
-}
-
-export interface WindowAnalyzerResult {
-  verdict: WindowVerdict;
-  modelMs: number;
-  costUsd: number | null;
-  /** SHA-256 of the sorted waMessageIds in the batch. Used for dedupe
-   *  + matching to live AnalyzedMessage rows on the dashboard. */
-  batchHash: string;
-}
-
-const SYSTEM_PROMPT = `You are MatchTime, the analyzer for a football WhatsApp group. You read a window of recent messages and return ONE coherent state diff for the whole window — not a verdict per message.
-
-You always receive three blocks:
-1. MATCH CONTEXT — the current squad (CONFIRMED, BENCH, DROPPED), pending bench-confirmation prompts, open bench-slot offers, alternative formats, and player roster with first names.
-2. RECENT HISTORY — chat that preceded the new batch (last hour or so), for context only. Do NOT emit state changes for history-only events.
-3. NEW MESSAGES — what just arrived. Apply state changes ONLY for these.
-
-You return JSON only — no prose, no markdown fences, no preamble. The shape:
-
-\`\`\`
-{
-  "windowSummary": "one sentence",
-  "stateChanges": [
-    { "action": "drop" | "add" | "bench" | "swap" | "score" | "no_change",
-      "targetName": "<player first name as written in chat>",
-      "swapWithName"?: "<other player>",
-      "scoreRed"?: 0, "scoreYellow"?: 0,
-      "reason": "one line on what in the window justifies this" }
-  ],
-  "reactions": [
-    { "waMessageId": "<id>", "emoji": "✅ | 👋 | 🪑 | 👍 | 🙏 | 📣", "kind": "ack-in | ack-out | ack-bench | ack-info" }
-  ],
-  "groupReply": "<one WhatsApp-friendly message>" | null
-}
-\`\`\`
-
-CORE RULES (small set on purpose — be smart about edge cases):
-
-R1. The window summary + state changes describe the WHOLE conversation, not message-by-message. If three people say "I'm in", that's three "add" changes in ONE summary, not three batches.
-
-R2. Only emit a stateChange when the WINDOW conclusion is clear. If a message is ambiguous, contradicted later in the window, or just chatter ("@all we need more players", "anyone free?", "great game!"), emit nothing for it. Default to NO action when uncertain. Use the empty stateChanges array freely.
-
-R3. Sender-drops itself ("I can't play") → action "drop", targetName = the sender's first name. Sender asks the group for cover but stays in ("running late but coming", "@everyone we need more players") → NO state change, that's chase nudge / chitchat.
-
-R4. Third-party drops ("Habib can't make it", "replace Ehtisham") → "drop" for the named player. Third-party adds ("bringing Najib", "my dad Faris is in") → "add" for the named player.
-
-R5. Replacement messages "X is ill, can Y take their spot?" → drop X. If Y later confirms ("active", "yes", "ok I'm in"), add Y. If Y doesn't confirm in the window, leave Y alone — don't speculate.
-
-R6. Two confirmed players swapping teams ("swap X with Y" between two CONFIRMED) → action "swap" with swapWithName. NOT a drop.
-
-R7. Score message ("we won 5-3", "final 4-4") from someone who played or an admin → action "score" with scoreRed/scoreYellow mapped to the two team labels in match context order.
-
-R8. groupReply rules: at most ONE message for the whole window. Required for: confirmed drops with replacement context, score acknowledgement, "@MatchTime …" direct asks, squad-now-full announcements. Null for: pure chitchat, single IN/OUT (the react is enough), bench claims (those have their own message path).
-
-R9. Reactions: one ack emoji per actionable message. ✅ = in/confirmed, 👋 = out/dropped, 🪑 = bench, 👍 = generic ack, 📣 = note-for-the-group. Skip reactions on chitchat. Don't react to your own previous bot messages.
-
-R10. NEVER invent a player. targetName must appear in the chat (or its trivial variant — "Eman" / "EMAN" / "eman" same). If unsure who's meant, leave the action out and add a one-line note in windowSummary.
-
-Trust your reading of the conversation. There is no safety net behind you that will "fix" a mistake — what you emit is what would happen. Be deliberate; prefer NO change over a guessed one.`;
-
-function sha256Hex(s: string): string {
-  // Web Crypto-free fallback for node: use built-in crypto.
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const crypto = require("node:crypto") as typeof import("node:crypto");
-  return crypto.createHash("sha256").update(s).digest("hex");
-}
-
-export function computeBatchHash(messages: BatchInputMessage[]): string {
-  const ids = messages.map((m) => m.waMessageId).sort();
-  return sha256Hex(ids.join("\n"));
-}
-
-/** Sonnet 4.5 list prices, USD per million tokens.
- *  Source: anthropic.com/pricing as of 2026-05-29. */
-const SONNET_INPUT_PER_MTOK = 3.0;
-const SONNET_OUTPUT_PER_MTOK = 15.0;
-
-function costFromUsage(input: number, output: number): number {
-  return (input / 1_000_000) * SONNET_INPUT_PER_MTOK + (output / 1_000_000) * SONNET_OUTPUT_PER_MTOK;
-}
-
-function formatMessagesBlock(msgs: BatchInputMessage[]): string {
-  if (msgs.length === 0) return "(empty)";
-  return msgs
-    .map(
-      (m) =>
-        `[${m.timestamp.toISOString()}] ${m.authorName ?? "(unknown)"} (${m.waMessageId}): ${m.body}`,
-    )
-    .join("\n");
-}
-
-function formatHistoryBlock(history: BatchInputHistory[]): string {
-  if (history.length === 0) return "(none)";
-  return history
-    .map((h) => `[${h.timestamp.toISOString()}] ${h.authorName ?? "(unknown)"}: ${h.body}`)
-    .join("\n");
-}
-
-function extractFirstJsonObject(text: string): unknown {
-  // Strip ``` fences if present.
-  const stripped = text.replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/i, "");
-  // Find first { ... } balanced span.
-  const start = stripped.indexOf("{");
-  if (start === -1) throw new Error("No JSON object in response");
-  let depth = 0;
-  for (let i = start; i < stripped.length; i++) {
-    const c = stripped[i];
-    if (c === "{") depth++;
-    else if (c === "}") {
-      depth--;
-      if (depth === 0) {
-        return JSON.parse(stripped.slice(start, i + 1));
-      }
-    }
-  }
-  throw new Error("Unterminated JSON object in response");
-}
-
-function coerceVerdict(raw: unknown): WindowVerdict {
-  if (typeof raw !== "object" || raw === null) {
-    throw new Error("Verdict is not an object");
-  }
-  const r = raw as Record<string, unknown>;
-  const summary = typeof r.windowSummary === "string" ? r.windowSummary : "";
-  const stateChanges = Array.isArray(r.stateChanges) ? (r.stateChanges as WindowStateChange[]) : [];
-  const reactions = Array.isArray(r.reactions) ? (r.reactions as WindowReaction[]) : [];
-  const groupReply = typeof r.groupReply === "string" ? r.groupReply : null;
-  return { windowSummary: summary, stateChanges, reactions, groupReply };
-}
-
-export async function analyzeWindow(
-  input: WindowAnalyzerInput,
-): Promise<WindowAnalyzerResult> {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) throw new Error("ANTHROPIC_API_KEY not set");
-
-  const userPrompt = [
-    "## MATCH CONTEXT",
-    input.matchContext.trim() || "(no upcoming match)",
-    "",
-    "## RECENT HISTORY",
-    formatHistoryBlock(input.history),
-    "",
-    "## NEW MESSAGES",
-    formatMessagesBlock(input.messages),
-    "",
-    "Return the JSON only.",
-  ].join("\n");
-
-  const anthropic = new Anthropic({ apiKey });
-  const t0 = Date.now();
-  const resp = await anthropic.messages.create({
-    model: "claude-sonnet-4-5",
-    max_tokens: 4096,
-    system: SYSTEM_PROMPT,
-    messages: [{ role: "user", content: userPrompt }],
-  });
-  const modelMs = Date.now() - t0;
-
-  const textBlock = resp.content.find((c) => c.type === "text");
-  if (!textBlock || textBlock.type !== "text") {
-    throw new Error("No text in Claude response");
-  }
-  const parsed = extractFirstJsonObject(textBlock.text);
-  const verdict = coerceVerdict(parsed);
-
-  const inputTok = resp.usage.input_tokens ?? 0;
-  const outputTok = resp.usage.output_tokens ?? 0;
-  const costUsd = costFromUsage(inputTok, outputTok);
-
-  return {
-    verdict,
-    modelMs,
-    costUsd,
-    batchHash: computeBatchHash(input.messages),
-  };
-}
-
-/** Build a compact match-context string for the shadow. Deliberately
- *  simpler than the live analyzer's matchContext — we want a fair
- *  comparison of LLM reasoning, not to import the kitchen-sink prompt. */
-export async function buildShadowMatchContext(orgId: string): Promise<string> {
-  const now = new Date();
-  const match = await db.match.findFirst({
-    where: {
-      activity: { orgId },
-      status: { in: ["UPCOMING", "TEAMS_GENERATED", "TEAMS_PUBLISHED"] },
-      attendanceDeadline: { gt: now },
-    },
-    include: {
-      activity: {
-        select: {
-          name: true,
-          venue: true,
-          sport: { select: { name: true, playersPerTeam: true, teamLabels: true } },
-        },
-      },
-      attendances: {
-        include: { user: { select: { id: true, name: true } } },
-        orderBy: { position: "asc" },
-      },
-    },
-    orderBy: { date: "asc" },
-  });
-
-  const orgLabels = await db.organisation.findUnique({
-    where: { id: orgId },
-    select: { teamLabels: true },
-  });
-
-  const memberRows = await db.membership.findMany({
-    where: { orgId, leftAt: null },
-    include: { user: { select: { name: true } } },
-  });
-  const memberFirstNames = memberRows
-    .map((m) => m.user.name?.split(/\s+/)[0])
-    .filter((n): n is string => !!n);
-
-  if (!match) {
-    return [
-      "No upcoming match.",
-      `Active members (first names): ${memberFirstNames.join(", ") || "—"}`,
-    ].join("\n");
-  }
-
-  const confirmed = match.attendances.filter((a) => a.status === "CONFIRMED");
-  const bench = match.attendances.filter((a) => a.status === "BENCH");
-  const dropped = match.attendances.filter((a) => a.status === "DROPPED");
-
-  const fmt = (a: { user: { name: string | null } }) => a.user.name ?? "(unnamed)";
-
-  const offers = await db.benchSlotOffer.findMany({
-    where: { matchId: match.id, resolvedAt: null },
-    select: { id: true, replacingUserId: true },
-  });
-  const offerReplacingNames = offers
-    .map((o) =>
-      o.replacingUserId
-        ? match.attendances.find((a) => a.userId === o.replacingUserId)?.user.name ?? "—"
-        : "—",
-    )
-    .join(", ");
-
-  const lines: string[] = [];
-  lines.push(`Activity: ${match.activity.name} (${match.activity.sport.name})`);
-  lines.push(`Date: ${formatDate(match.date, "EEE d MMM HH:mm")} UK (UTC ${match.date.toISOString()})`);
-  lines.push(`Venue: ${match.activity.venue ?? "—"}`);
-  lines.push(`Max players: ${match.maxPlayers} (${match.activity.sport.playersPerTeam}-a-side)`);
-  const [redLbl, yellowLbl] = resolveTeamLabels(match, orgLabels, match.activity.sport);
-  lines.push(`Team labels: first team = "${redLbl}" (scoreRed), second team = "${yellowLbl}" (scoreYellow)`);
-  lines.push(`Squad: ${confirmed.length}/${match.maxPlayers} confirmed, ${bench.length} bench, ${dropped.length} dropped`);
-  lines.push("");
-  lines.push("CONFIRMED:");
-  confirmed.forEach((a, i) => lines.push(`  ${i + 1}. ${fmt(a)}`));
-  if (bench.length > 0) {
-    lines.push("BENCH:");
-    bench.forEach((a, i) => lines.push(`  ${i + 1}. ${fmt(a)}`));
-  }
-  if (dropped.length > 0) {
-    lines.push("DROPPED (last 7d):");
-    dropped.forEach((a) => lines.push(`  - ${fmt(a)}`));
-  }
-  if (offers.length > 0) {
-    lines.push(`Open bench-slot offers: ${offers.length} (replacing: ${offerReplacingNames})`);
-  }
-  lines.push("");
-  lines.push(`Active members (first names): ${memberFirstNames.join(", ") || "—"}`);
-  return lines.join("\n");
-}
-
-/**
- * Is the shadow comparison switched on?
- *
- * Default OFF. Only an explicit affirmative value turns it on, so a
- * stray `SHADOW_ANALYZER_ENABLED=` or a leftover `false` in an env file
- * cannot silently start paying for a second analysis of every batch.
- */
-export function isShadowAnalysisEnabled(): boolean {
-  const raw = process.env.SHADOW_ANALYZER_ENABLED?.trim().toLowerCase();
-  return raw === "1" || raw === "true" || raw === "yes" || raw === "on";
-}
-
-/** So the "it's off" line is said once per process, not per batch. */
-let loggedShadowDisabled = false;
-
-/** Has today's shadow spend exceeded the cap? Reads
- *  SHADOW_DAILY_USD_CAP (default $5/day). */
-async function shadowCapReached(): Promise<boolean> {
-  const capStr = process.env.SHADOW_DAILY_USD_CAP;
-  const cap = capStr ? Number(capStr) : 5;
-  if (!isFinite(cap) || cap <= 0) return true; // 0 = disabled
-  const dayStart = new Date();
-  dayStart.setUTCHours(0, 0, 0, 0);
-  const agg = await db.windowVerdict.aggregate({
-    where: { createdAt: { gte: dayStart } },
-    _sum: { costUsd: true },
-  });
-  return (agg._sum.costUsd ?? 0) >= cap;
-}
-
-/** Single entry point the live analyzer route calls (via after()).
- *  Self-contained: own DB lookups, own Claude call, own persistence.
- *  NEVER throws — errors are logged and swallowed so the live path
- *  is unaffected. */
-export async function runShadowAnalysis(opts: {
-  orgId: string;
-  groupId: string;
-  messages: BatchInputMessage[];
-  history: BatchInputHistory[];
-  /** AnalyzedMessage IDs that the live per-message analyzer wrote for
-   *  this same batch. Persisted on the WindowVerdict so the dashboard
-   *  can render the two side-by-side. */
-  currentVerdictIds: string[];
-}): Promise<void> {
-  try {
-    // Explicit switch, default OFF. Checked FIRST so a disabled shadow
-    // costs nothing at all — no query, no Claude call, no row.
-    if (!isShadowAnalysisEnabled()) {
-      if (!loggedShadowDisabled) {
-        loggedShadowDisabled = true;
-        console.log(
-          "[shadow] window-analyzer is DISABLED (default since 2026-08-31) — " +
-            "set SHADOW_ANALYZER_ENABLED=1 to run the comparison. " +
-            "/admin/shadow will show historical runs only.",
-        );
-      }
-      return;
-    }
-
-    if (opts.messages.length === 0) return;
-
-    // Dedupe — if a row already exists for this batch hash, don't pay
-    // for a second Claude call (Pi catch-up sometimes resends).
-    const batchHash = computeBatchHash(opts.messages);
-    const existing = await db.windowVerdict.findUnique({
-      where: { orgId_batchHash: { orgId: opts.orgId, batchHash } },
-      select: { id: true },
-    });
-    if (existing) {
-      console.log(`[shadow] batch ${batchHash.slice(0, 8)} already analyzed, skipping`);
-      return;
-    }
-
-    if (await shadowCapReached()) {
-      console.warn(`[shadow] daily cost cap reached — skipping`);
-      return;
-    }
-
-    const windowStart = opts.messages[0].timestamp;
-    const windowEnd = opts.messages[opts.messages.length - 1].timestamp;
-
-    // ── §10 step 2: the shadow can now run the NEW pipeline ───────────
-    // Same harness, same table, same dashboard; the payload is router →
-    // extractors → engine in DRY RUN. Still zero writes: nothing on this
-    // path registers attendance, queues a BotJob or sends anything.
-    // Default stays `window` so turning the shadow on does not silently
-    // change WHAT it is.
-    if (shadowPipelineMode() === "v2") {
-      const dry = await runDryRunShadow({
-        orgId: opts.orgId,
-        messages: opts.messages,
-        history: opts.history,
-      });
-      await db.windowVerdict.create({
-        data: {
-          orgId: opts.orgId,
-          windowStart,
-          windowEnd,
-          batchHash,
-          modelMs: dry.modelMs,
-          costUsd: dry.costUsd,
-          verdictJson: dry.payload as never,
-          currentVerdictRefs: opts.currentVerdictIds,
-        },
-      });
-      console.log(
-        `[shadow:v2] org ${opts.orgId} window ${windowStart.toISOString()}..${windowEnd.toISOString()} ` +
-          `→ ${dry.payload.stateChanges.length} proposed change(s), ` +
-          `${dry.result.cost.routerCalls} router + ${dry.result.cost.extractorCalls} extractor call(s), ` +
-          `${dry.modelMs}ms, $${dry.costUsd.toFixed(5)}` +
-          (dry.result.degradations.length > 0
-            ? ` — ${dry.result.degradations.length} degradation(s): ` +
-              dry.result.degradations.map((d) => `${d.stage}: ${d.detail}`).join(" | ")
-            : ""),
-      );
-      return;
-    }
-
-    const matchContext = await buildShadowMatchContext(opts.orgId);
-    const result = await analyzeWindow({
-      messages: opts.messages,
-      history: opts.history,
-      matchContext,
-    });
-
-    await db.windowVerdict.create({
-      data: {
-        orgId: opts.orgId,
-        windowStart,
-        windowEnd,
-        batchHash: result.batchHash,
-        modelMs: result.modelMs,
-        costUsd: result.costUsd,
-        verdictJson: result.verdict as never,
-        currentVerdictRefs: opts.currentVerdictIds,
-      },
-    });
-    console.log(
-      `[shadow] org ${opts.orgId} window ${windowStart.toISOString()}..${windowEnd.toISOString()} ` +
-        `→ ${result.verdict.stateChanges.length} changes, ${result.modelMs}ms, $${result.costUsd?.toFixed(4)}`,
-    );
-  } catch (err) {
-    console.error("[shadow] runShadowAnalysis failed:", err);
-  }
-}
-

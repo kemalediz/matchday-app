@@ -2,26 +2,54 @@
  * Smart-analysis entry point. Called by the bot once per flush cycle
  * (every ~10 min, or immediately on urgency). Accepts a batch of EVERY
  * message the group posted in that window — the bot has had no regex
- * pre-filter since 2026-04-21 — runs Claude Sonnet ONCE on the batch
- * (see MODEL in lib/message-analyzer.ts; this said "Haiku" until
- * 2026-09-01, three and a half months after the model changed),
- * executes verdicts, and returns per-message actions for the bot to
- * perform on the WhatsApp side. A few narrow `handledBy: "fast-path"`
- * branches below peel off grounded-data requests (personal stats link,
- * DM Q&A, admin rating progress) before the batch is built; none of
- * them touch attendance.
+ * pre-filter since 2026-04-21 — decides each one, and returns
+ * per-message actions for the bot to perform on the WhatsApp side.
+ *
+ * ─────────────────────────────────────────────────────────────────────
+ * THIS FILE STOPPED CALLING ONE BIG PROMPT ON 2026-09-06 (§10 step 8)
+ * ─────────────────────────────────────────────────────────────────────
+ *
+ * Until this change the middle of this function was a single
+ * `analyzeBatch()` call — one 19,850-token `SYSTEM_PROMPT` asked to
+ * understand English, decide what the database should say, do
+ * arithmetic and write the group's public message, all at once — plus
+ * roughly 1,200 lines correcting what came back. §5 counted fifty-four
+ * distinct guards over that output, two of which decided whether to drop
+ * a player from a paid match by running regular expressions over the
+ * model's English prose.
+ *
+ * `analyzeBatch` and `SYSTEM_PROMPT` are deleted. What replaced them:
+ *
+ *   0. DETERMINISTIC PEELS — no model at all. Personal stats link, the
+ *      admin stats blast, group→DM Q&A, admin rating progress, help,
+ *      the colour swap, the team swap, a bench-prompt answer, a pasted
+ *      roster. Each is a database row or a whole-message match, and
+ *      each is peeled before the router so nothing else can claim it.
+ *   1. ROUTER — `claude-haiku-4-5`, ~360 tokens, nine routes. Banter
+ *      exits here and costs nothing further. (`pipeline/gate.ts`)
+ *   2. EXTRACTORS — one small specialist per route, strict JSON schema,
+ *      returning FACTS about the text only. No intent, no reply, no
+ *      reasoning: there is no field in which the model can express a
+ *      decision, and no prose for a regex to parse.
+ *   3. ENGINES — pure TypeScript. Facts plus squad state decide every
+ *      write. One owner per route, asserted below, because two deciders
+ *      for one message would mean two replies for one message.
+ *   4. COMPOSERS — every number and every name the bot says is read from
+ *      the database, after the write landed.
+ *
+ * A message no owner claims produces SILENCE in the group and one
+ * deduped operator DM (`lib/operator-note.ts`). That is the honest cost
+ * of the change and §11.5 named it in advance: "the club will experience
+ * it as 'the bot got dumber' before they experience it as 'the bot
+ * stopped being wrong'."
  *
  * Flow:
  *   1. Dedupe: skip any waMessageId already in AnalyzedMessage
  *      (covers bot restarts + retries).
- *   2. Hand the batch + cached context to `analyzeBatch()` (one Claude call).
- *   3. For each verdict:
- *        a. Resolve author → User (phone, then fallback by pushname).
- *        b. If verdict says register IN/OUT and we have a User, update
- *           attendance via lib/attendance.ts.
- *        c. Record the outcome in AnalyzedMessage (intent, confidence,
- *           action, reasoning).
- *   4. Return the bot the per-message actions (react, reply) + the
+ *   2. Resolve each author → User (phone, then fallback by pushname).
+ *   3. Peel the deterministic paths; route the rest; run each owner.
+ *   4. Render one reply and one AnalyzedMessage row per message.
+ *   5. Return the bot the per-message actions (react, reply) + the
  *      next-kickoff timestamp it needs to decide urgency.
  *
  * Request:
@@ -43,19 +71,18 @@
  *     ]
  *   }
  */
-import { NextResponse, after } from "next/server";
+import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { normalisePhone } from "@/lib/phone";
-import { runShadowAnalysis, isShadowAnalysisEnabled } from "@/lib/window-analyzer";
 import { signMagicLinkToken, MAGIC_LINK_TTL } from "@/lib/magic-link";
 import { buildShortMagicLinkUrl } from "@/lib/short-link";
 import { answerScopedQuestion } from "@/lib/dm-qa";
-import {
-  analyzeBatch,
-  enforceProximity,
-  type AnalysisVerdict,
-  type BatchInputMessage,
-} from "@/lib/message-analyzer";
+// §10 step 8: `analyzeBatch`, `AnalysisVerdict` and `BatchInputMessage`
+// were imported here until this change. They no longer exist.
+// `enforceProximity` does, and stays: it rewrites "tonight" → "Tue 8 Sep"
+// and the 20:30/21:30 BST-vs-UTC slips, and it is applied to every
+// outgoing reply whatever composed it — it was never about the model.
+import { enforceProximity } from "@/lib/message-analyzer";
 import {
   composeSquadStateReply,
   stripSquadPostMarker,
@@ -63,66 +90,118 @@ import {
   type SquadTruth,
 } from "@/lib/group-copy";
 import {
+  composeOperatorNote,
+  OPERATOR_NOTE_MARKER,
+  type UnownedMessage,
+} from "@/lib/operator-note";
+import {
   gateBatch,
-  gatedVerdict,
-  isAttendanceEngineEnabled,
-  isRouterGateEnabled,
   routerIsNeeded,
-  engineHeaderOverride,
-  ENGINE_HEADER,
   GATED_HANDLED_BY,
 } from "@/lib/pipeline/gate";
-import { loadOpenQuestion } from "@/lib/pipeline/load-awaiting-answer";
-import { ENGINE_APPLY_DEGRADED_PREFIX, ENGINE_HANDLED_BY } from "@/lib/attendance-engine";
-import { describeEngineBatch, runAttendanceEngineBatch } from "@/lib/attendance-engine-batch";
-import { shouldForceSenderOut } from "@/lib/out-safety-net";
-import { resolveBenchConfirmation } from "@/lib/bench-confirmation";
-import { getOrgFeatures, type FeatureKey } from "@/lib/org-features";
-import { normaliseName } from "@/lib/squad-from-list";
 import {
-  clampRosterDerivedWrites,
-  parsePastedRoster,
-  reconcilePastedRoster,
-  rosterMentions,
-  sameName,
-} from "@/lib/pasted-roster";
+  enabledStepSevenRoutes,
+  routesHeaderOverride,
+  STEP_SEVEN_HEADER,
+} from "@/lib/pipeline/route-flags";
+import { runAnswerBatch, ANSWER_HANDLED_BY } from "@/lib/pipeline/answer-batch";
+import { runScoreBatch } from "@/lib/score-engine-batch";
+import { SCORE_HANDLED_BY } from "@/lib/score-engine";
+import { runAdminOpsBatch } from "@/lib/admin-ops-engine-batch";
+import { ADMIN_OPS_HANDLED_BY } from "@/lib/admin-ops-engine";
+import { runTeamOpsBatch } from "@/lib/team-ops-engine-batch";
+import { TEAM_OPS_HANDLED_BY } from "@/lib/team-ops-engine";
+import {
+  buildScoreApplyDeps,
+  buildAdminOpsApplyDeps,
+  buildTeamOpsApplyDeps,
+} from "@/lib/owner-deps";
+import { loadOpenQuestion } from "@/lib/pipeline/load-awaiting-answer";
+import { ENGINE_HANDLED_BY } from "@/lib/attendance-engine";
+import { describeEngineBatch, runAttendanceEngineBatch } from "@/lib/attendance-engine-batch";
+import { resolveBenchConfirmation } from "@/lib/bench-confirmation";
+import { getOrgFeatures } from "@/lib/org-features";
+// ── SEVENTEEN IMPORTS LEFT THIS FILE WITH THE MEGA-PROMPT (§10 step 8) ─
+//
+//   Each was the input to, or the correction of, a field on
+//   `AnalysisVerdict`. Listed here rather than silently dropped, because
+//   "we deleted a guard" and "we deleted a guard whose failure is now
+//   unrepresentable" are different claims and only the second one is
+//   allowed in this codebase:
+//
+//     shouldForceSenderOut       the OUT net's regexes over the model's
+//                                English prose (`out-safety-net.ts`,
+//                                still exported and still tested). §9's
+//                                first "no longer possible": one
+//                                `polarity` cannot contradict itself and
+//                                there is no `reasoning` to parse. The
+//                                per-player attribution it could never
+//                                have is now one claim per person.
+//     looksLikeHypotheticalOrPast  → the facts schema's `tense`
+//     offerIsAboutSomeoneElse      → `subject`, a field rather than an
+//                                    inference
+//     actionRequiresTag            still the policy, applied inside each
+//                                    owner (`engine.ts`, `answer-batch`)
+//                                    rather than over a verdict here
+//     isVagueGuestOfferVerdict     → `personNamed`
+//     stripPlaceholderGuests,
+//     shouldAskForGuestName,
+//     renderGuestNameAsk,
+//     guestNameAskKey,
+//     GUEST_NAME_ASK_KIND          the whole unnamed-guest ask, moved
+//                                    intact: `load-state.ts:183` reads
+//                                    the once-per-player dedupe row,
+//                                    `engine.ts:470` decides, and
+//                                    `compose.ts:298` renders the SAME
+//                                    copy from the same module
+//     clampRosterDerivedWrites,
+//     parsePastedRoster,
+//     reconcilePastedRoster,
+//     rosterMentions, sameName     → `pasted-roster-registration.ts`,
+//                                    peeled above before the router
+//     isPromoteFromBenchAuthorized  → `engine.ts`, unchanged in meaning
+//     computeEloDeltas,
+//     generateTeamsForMatch,
+//     formatTeamsPost,
+//     londonDateTimeToUtc,
+//     formatLondon,
+//     recordAttendanceEvent        → the apply layers in
+//                                    `owner-deps.ts`, `score-engine.ts`,
+//                                    `team-ops-engine.ts`
+//     buildBenchUpgradeReply       DEAD, and worth one sentence: it
+//                                    rewrote a reply that said "putting
+//                                    you on the bench" when the write had
+//                                    actually confirmed the player. The
+//                                    composer renders from the PROJECTED
+//                                    state after the engine decides, so a
+//                                    reply cannot describe a write that
+//                                    did not happen. The module and its
+//                                    tests are kept — they are pure, and
+//                                    the rule they encode is still the
+//                                    house rule — but nothing calls it.
+//     ENGINE_APPLY_DEGRADED_PREFIX  the partial-response net matched it
+//                                    as a seventh prose prefix; the note
+//                                    now matches ownership.
+//     FeatureKey, normaliseName     used only by `executeVerdict`.
 import {
   handleOnboardingTurn,
   buildHelpReply,
   parseHelpTopic,
 } from "@/lib/onboarding-conversation";
 import { registerAttendance, cancelAttendance } from "@/lib/attendance";
-import { recordAttendanceEvent } from "@/lib/attendance-events";
 import { currentAnalyzeBatchId, withAnalyzeBatch } from "@/lib/analyze-batch-context";
-import { buildBenchUpgradeReply } from "@/lib/bench-upgrade-ack";
 import {
   resolveAttendanceAck,
   attendanceFailureAction,
   attendanceFailureLog,
-  type AttendanceWriteFailure,
 } from "@/lib/attendance-write-outcome";
 import { recordTentative, resolveTentative } from "@/lib/tentative-store";
-import { isPromoteFromBenchAuthorized } from "@/lib/promote-authorization";
-import { computeEloDeltas } from "@/lib/elo";
 import { resolveTeamLabels } from "@/lib/team-labels";
-import { generateTeamsForMatch, formatTeamsPost } from "@/lib/team-generation";
-import { londonDateTimeToUtc, formatLondon } from "@/lib/london-time";
 import { selectRegistrationMatch } from "@/lib/registration-match-select";
-import {
-  messageTagsBot,
-  actionRequiresTag,
-  looksLikeHypotheticalOrPast,
-  offerIsAboutSomeoneElse,
-} from "@/lib/interaction-contract";
-import {
-  isVagueGuestOfferVerdict,
-  stripPlaceholderGuests,
-  shouldAskForGuestName,
-  renderGuestNameAsk,
-  guestNameAskKey,
-  GUEST_NAME_ASK_KIND,
-} from "@/lib/guest-name-ask";
-import { mergeRecruitReply, RECRUIT_COMMAND_IMPLIES_ADDRESSED } from "@/lib/recruit-request";
+import { messageTagsBot } from "@/lib/interaction-contract";
+import { mergeRecruitReply } from "@/lib/recruit-request";
+import { readBenchPromptAnswer } from "@/lib/bench-prompt-answer";
+import { decidePastedRosterRegistration } from "@/lib/pasted-roster-registration";
 
 interface InboundMessage {
   waMessageId: string;
@@ -623,15 +702,9 @@ async function handleAnalyzeRequest(request: Request) {
     results.push({ waMessageId: m.waMessageId, handledBy: "fast-path", intent: "help", react: "👋", reply });
   }
 
-  // Drop stats-requests + blast triggers from the batch the LLM sees.
-  for (let i = fresh.length - 1; i >= 0; i--) {
-    if (statsRequestIds.has(fresh[i].waMessageId)) fresh.splice(i, 1);
-  }
-
-  // Pre-load the ACTIVE registration match so we can post-process LLM
-  // replies through enforceProximity — guards against "20:30 vs 21:30"
-  // style BST/UTC mistakes the LLM occasionally makes when it tries to
-  // helpfully convert times.
+  // Pre-load the ACTIVE registration match. Every attendance WRITE in
+  // this request lands on it, every reply is proximity-checked against
+  // it, and the four deterministic peels below read it.
   //
   // UNIFIED with findRegistrationMatch (2026-06-18 rollover fix): this
   // MUST be the exact same match every attendance write lands on, picked
@@ -654,60 +727,403 @@ async function handleAnalyzeRequest(request: Request) {
       })
     : null;
 
+  // ═══════════════════════════════════════════════════════════════════
+  // §10 STEP 8 — FOUR DETERMINISTIC PEELS, NONE OF WHICH NEEDS A MODEL
+  // ═══════════════════════════════════════════════════════════════════
+  //
+  // Each of these was already deterministic. What made them look like
+  // model work was only that they hung off a field the model populated,
+  // and deleting the model would have deleted them by accident.
+  //
+  // They run BEFORE the router, on the raw body and on database rows, so
+  // no owner can also claim them and there is exactly one decider per
+  // message — the same invariant `claim()` asserts for the owners.
+  //
+  // Every one requires an `@Match Time` tag except the bench-prompt
+  // answer, which is a player answering a direct question MatchTime
+  // asked them about their own slot — the purest self-attendance there
+  // is, and `interaction-contract.ts` exempts exactly that. Requiring a
+  // tag there would mean ignoring the answer to our own question.
+  //
+  // ═════════════════════════════════════════════════════════════════
+  // WHAT A PEEL SKIPS. ASK THIS, NOT "IS MY NEW CODE CORRECT?"
+  // ═════════════════════════════════════════════════════════════════
+  //
+  // This file's worst bug class is a terminal branch that silently
+  // deletes every guard beneath it — three incidents in two days. A peel
+  // is terminal by construction: it pushes a result and adds the id to
+  // `statsRequestIds`, which the ONE splice below removes from `fresh`.
+  // So the message skips EVERYTHING after this point. Enumerated, with
+  // why each is covered, subsumed or inapplicable:
+  //
+  //   the router                    Inapplicable. The peel already knows
+  //                                 what the message is, from a database
+  //                                 row or a whole-message match. Paying
+  //                                 Haiku to label it would be paying for
+  //                                 an answer we have.
+  //   all five owners               COVERED, and this is the POINT. Two
+  //                                 deciders for one message is two
+  //                                 replies for one message. The engine
+  //                                 independently refuses a pasted roster
+  //                                 (its `parsePastedRoster` carve-out)
+  //                                 and a sender with an open bench
+  //                                 prompt (its `promptedUserIds` carve-out), so those two are
+  //                                 belt AND braces; the swaps are peeled
+  //                                 only because nothing else models a
+  //                                 `TeamAssignment` move.
+  //   the operator note             SUBSUMED. The note is for a message
+  //                                 NOBODY handled. A peel handled it,
+  //                                 and its `AnalyzedMessage` row records
+  //                                 what it did.
+  //   the unresolved-sender nudge   Inapplicable to three of the four
+  //                                 (they need no sender), and for the
+  //                                 bench answer the trigger IS a
+  //                                 resolved `senderUserId` — an
+  //                                 unresolved sender cannot be on the
+  //                                 `PendingBenchConfirmation` list, so
+  //                                 the peel never fires for one.
+  //   the react/status audit        Inapplicable: no peel emits a
+  //                                 registration react (✅/🪑/👋).
+  //   the batch-final squad post    NOT skipped for the one peel that
+  //                                 changes the squad. The pasted-roster
+  //                                 ack is `SQUAD_POST_MARKER`, and the
+  //                                 composer's candidate filter admits it
+  //                                 by name. The first draft did not, and
+  //                                 a paste that had just registered four
+  //                                 players said NOTHING — see the note
+  //                                 on `pastedRosterAck` below.
+  //
+  // ⚠️ THE ONE REAL COST, stated rather than discovered later: a peeled
+  // message is spliced out of `fresh`, so it is absent from the WINDOW
+  // the owners reason over. §10 step 6 is emphatic that this matters —
+  // "taking a message OUT of the batch changed what the mega-prompt
+  // concluded about the message NEXT to it". The splice is not new (the
+  // stats link, the blast, group→DM and help have always been spliced),
+  // but this change adds four shapes to it, and one of them —
+  // a bench-prompt answer — is attendance-shaped. If a batch ever
+  // contained both a bench answer and a third-party claim about that
+  // same player, the corroboration policy would not see the answer.
+  // Judged acceptable because the corroboration policy looks for a
+  // SELF-DROP, and a bench answer is neither, but it is a genuine
+  // narrowing and it is written down here rather than left to be found.
+
+  // ── 1 + 2. COLOUR SWAP and TEAM SWAP ───────────────────────────────
+  //
+  //   Both shipped, both already pure functions of `(orgId, body)`, and
+  //   both used to sit INSIDE the per-message loop after the tag gate —
+  //   which meant they were reached only when the model's verdict had
+  //   survived that far. They are moved up rather than rewritten.
+  //
+  //   The tag requirement is now EXPLICIT instead of being inherited
+  //   from `actionRequiresTag(verdict)`. That is the same policy stated
+  //   directly: both team intents are in `ACTIONY_INTENTS`, so an
+  //   untagged one was already refused. Measured on 120 days of real
+  //   traffic, every colour/team swap in the group carries the tag
+  //   ("@Match Time swap the colors and keep the same squad").
+  //
+  //   Order matters and is preserved from the loop: COLOUR first, so
+  //   "swap the colours" can never be read as a player swap.
+  for (const m of fresh) {
+    if (statsRequestIds.has(m.waMessageId)) continue;
+    if (!messageTagsBot(m)) continue;
+    const sender = senderById.get(m.waMessageId)!;
+    const colourResult = await handleColorSwapIfApplicable(org.id, m.body);
+    if (colourResult) {
+      statsRequestIds.add(m.waMessageId);
+      await recordAnalysis({
+        orgId: org.id, groupId: body.groupId, msg: m,
+        handledBy: "fast-path", intent: "team_colour_swap", action: "colour-swap",
+        confidence: 1, reasoning: colourResult.logReason,
+        authorUserId: sender.userId, authorName: m.authorName ?? null,
+      });
+      results.push({
+        waMessageId: m.waMessageId, handledBy: "fast-path",
+        intent: "team_colour_swap", react: "✅", reply: colourResult.reply,
+      });
+      continue;
+    }
+    // "swap A with B" between two CONFIRMED players is a TEAM swap,
+    // never a drop. This guard exists because the mega-prompt had a
+    // forceful "swap X with Y = X OUT" rule that wrongly dropped Elvin
+    // on 2026-05-19. The prompt is gone, so the rule that misfired is
+    // gone — but the FEATURE is not, and it is the reason this stays:
+    // "swap Mustafa and Idris" is a team change the group asks for
+    // every few weeks (5 in the last 90 days), and it is a `TeamAssignment`
+    // move that no attendance extractor models.
+    const swapResult = await handleTeamSwapIfApplicable(org.id, m.body);
+    if (swapResult) {
+      statsRequestIds.add(m.waMessageId);
+      await recordAnalysis({
+        orgId: org.id, groupId: body.groupId, msg: m,
+        handledBy: "fast-path", intent: "team_swap", action: "team-swap",
+        confidence: 1, reasoning: swapResult.logReason,
+        authorUserId: sender.userId, authorName: m.authorName ?? null,
+      });
+      results.push({
+        waMessageId: m.waMessageId, handledBy: "fast-path",
+        intent: "team_swap", react: "✅", reply: swapResult.reply,
+      });
+    }
+  }
+
+  // ── 3. THE BENCH-PROMPT ANSWER ─────────────────────────────────────
+  //
+  //   A bench player answering MatchTime's own "do you want the slot?"
+  //   in the GROUP instead of reacting to the DM. `executeVerdict` used
+  //   to reach `resolveBenchConfirmation` through
+  //   `verdict.benchConfirmation`, and `attendance-engine-batch.ts`
+  //   refuses the message for exactly that reason: "a bare 'yes' from
+  //   someone with a prompt open stays with the analyzer."
+  //
+  //   There is no analyzer. But there was never anything to classify
+  //   either: the TRIGGER is a `PendingBenchConfirmation` row for this
+  //   exact sender, so by the time the text is read the prior is
+  //   overwhelming and only a yes/no has to be told apart.
+  //   `lib/bench-prompt-answer.ts` does that on a whole-message
+  //   allowlist, never a substring, so "no idea what time we're playing"
+  //   and "yes but I can only do the first half" both come back null and
+  //   fall through to the ordinary pipeline.
+  //
+  //   ⚠️ ONE SHIPPED BEHAVIOUR IS PRESERVED THAT I WOULD QUESTION IF
+  //   THIS WERE NOT A DELETION PR. A bench player who writes "I'm out"
+  //   meaning "drop me from the match entirely" is read as DECLINING the
+  //   slot, which `resolveBenchConfirmation` treats as a no-op — they
+  //   stay on the bench rather than being dropped. That is exactly what
+  //   ships today: `route.ts:3186-3190`'s own comment said
+  //   "bench-confirmation outranks generic IN/OUT for users on the
+  //   open-prompt list". Changing it here would be inventing new product
+  //   semantics inside a change that is meant to preserve them, so it is
+  //   preserved and flagged instead.
+  if (nextMatchForReply) {
+    const openPrompts = await db.pendingBenchConfirmation.findMany({
+      where: { matchId: nextMatchForReply.id, resolvedAt: null },
+      select: { userId: true },
+    });
+    const prompted = new Set(openPrompts.map((p) => p.userId));
+    if (prompted.size > 0) {
+      for (const m of fresh) {
+        if (statsRequestIds.has(m.waMessageId)) continue;
+        const sender = senderById.get(m.waMessageId)!;
+        if (!sender.userId || !prompted.has(sender.userId)) continue;
+        const answer = readBenchPromptAnswer(m.body);
+        if (!answer) continue;
+        statsRequestIds.add(m.waMessageId);
+        // The server posts its own group announcement on a confirm, so
+        // the reply here is null in every branch and only the react
+        // speaks — byte-identical to `route.ts:3199-3206`.
+        let react: string | null = null;
+        try {
+          const result = await resolveBenchConfirmation({
+            matchId: nextMatchForReply.id,
+            userId: sender.userId,
+            decision: answer === "yes",
+          });
+          if (result.kind === "confirmed") react = "✅";
+          else if (result.kind === "declined") react = "👋";
+          // "ignored" — the prompt was resolved between the read above
+          // and here. Say nothing; there is nothing true to say.
+        } catch (err) {
+          console.error("[analyze] bench-prompt answer failed:", err);
+        }
+        await recordAnalysis({
+          orgId: org.id, groupId: body.groupId, msg: m,
+          handledBy: "fast-path", intent: "bench_confirmation",
+          action: react ? `bench-${answer}` : "none",
+          confidence: 1,
+          reasoning: `bench prompt open for this sender; answer read as "${answer}"`,
+          authorUserId: sender.userId, authorName: m.authorName ?? null,
+        });
+        results.push({
+          waMessageId: m.waMessageId, handledBy: "fast-path",
+          intent: "bench_confirmation", react, reply: null,
+        });
+      }
+    }
+  }
+
+  // ── 4. THE PASTED ROSTER ───────────────────────────────────────────
+  //
+  //   `attendance-engine-batch.ts` refuses any message
+  //   `parsePastedRoster` recognises, because "a fourteen-line roster
+  //   routed `other_att` is fourteen third-party IN claims it would
+  //   happily apply". The shipped handling lived in the per-message loop
+  //   and read the model's `registerFor`.
+  //
+  //   THE ARITHMETIC WAS NEVER THE MODEL'S. `reconcilePastedRoster`
+  //   decides whether the paste restates our own roster post in Match
+  //   Context order and, if it does, COMPUTES which lines are new. The
+  //   old code took the model's picks off the list and threw all of them
+  //   away, replacing them with that computation. So the peel loses only
+  //   the residue — names the model found that the LIST does not
+  //   mention, i.e. prose travelling alongside a paste ("here's the
+  //   list, also adding Kieran"). Kieran now needs one more message,
+  //   which is §13's stated trade: "a missed add is recoverable in one
+  //   message; a wrong registration on a paid match is not."
+  //
+  //   Anything that is NOT of record registers NOBODY — the clamp's
+  //   outcome, reached by construction rather than by subtraction, since
+  //   with no model there are no list-derived writes to clamp.
+  if (nextMatchForReply) {
+    const confirmedNames = nextMatchForReply.attendances.map((a) => a.user.name ?? "");
+    for (const m of fresh) {
+      if (statsRequestIds.has(m.waMessageId)) continue;
+      const sender = senderById.get(m.waMessageId)!;
+      const decision = decidePastedRosterRegistration({
+        body: m.body,
+        confirmedNames,
+        senderNames: [sender.name, m.authorName],
+      });
+      if (decision.kind === "not_a_roster") continue;
+      statsRequestIds.add(m.waMessageId);
+
+      if (decision.kind === "not_of_record") {
+        console.warn(
+          `[analyze] pasted-roster: "${(m.body || "").slice(0, 60)}" (${m.waMessageId}) is a ` +
+            `pasted list that does not restate the squad (${decision.reason}) — registering nobody. ` +
+            `A re-paste is a restatement, not a registration; org ${org.id} should use ` +
+            `featureSquadFromList if it maintains its squad this way.`,
+        );
+        await recordAnalysis({
+          orgId: org.id, groupId: body.groupId, msg: m,
+          handledBy: "fast-path", intent: "pasted_roster", action: "none",
+          confidence: 1, reasoning: `pasted roster, not of record (${decision.reason}) — nobody registered`,
+          authorUserId: sender.userId, authorName: m.authorName ?? null,
+        });
+        results.push({
+          waMessageId: m.waMessageId, handledBy: "fast-path",
+          intent: "pasted_roster", react: null, reply: null,
+        });
+        continue;
+      }
+
+      // Of record. The appended names are new, arithmetically.
+      const failures: string[] = [];
+      const registered: string[] = [];
+      for (const name of decision.additions) {
+        const isSender = name === decision.senderAddition;
+        try {
+          const target =
+            isSender && sender.userId
+              ? { userId: sender.userId, name: sender.name }
+              : await resolveOrProvisionByName(org.id, name);
+          if (!target) {
+            failures.push(name);
+            continue;
+          }
+          await registerAttendance(target.userId, nextMatchForReply.id, {
+            // The `pasted-roster` cause already exists in
+            // `attendance-events.ts` for the `featureSquadFromList`
+            // pipeline. This is the same event for the same reason on a
+            // different door, so it reuses the cause rather than
+            // inventing a synonym nobody would think to query for.
+            event: {
+              cause: "pasted-roster",
+              actorKind: isSender ? "player" : "member",
+              actorUserId: sender.userId ?? null,
+              sourceRef: m.waMessageId,
+              note: "appended to a pasted roster that restates the squad (S26)",
+            },
+          });
+          registered.push(target.name ?? name);
+        } catch (err) {
+          console.error(`[analyze] pasted-roster register failed for ${name}:`, err);
+          failures.push(name);
+        }
+      }
+      console.warn(
+        `[analyze] pasted-roster reconcile: "${(m.body || "").slice(0, 60)}" (${m.waMessageId}) ` +
+          `restates the confirmed squad in order, so the ${decision.additions.length} appended ` +
+          `name(s) [${decision.additions.join(", ")}] are new. Computed from the squad, not from ` +
+          `anyone's reading of the list.`,
+      );
+      await recordAnalysis({
+        orgId: org.id, groupId: body.groupId, msg: m,
+        handledBy: failures.length > 0 ? "error" : "fast-path",
+        intent: "pasted_roster",
+        action: registered.length > 0 ? `register:${registered.length}` : "none",
+        confidence: 1,
+        reasoning:
+          `pasted roster of record — registered [${registered.join(", ")}]` +
+          (failures.length > 0 ? `; FAILED for [${failures.join(", ")}]` : ""),
+        authorUserId: sender.userId, authorName: m.authorName ?? null,
+      });
+      // The honest ack: nothing cheerful is said about a write that
+      // threw, and the squad post below is composed from the DATABASE
+      // after every write in this request has landed, so it shows what
+      // actually happened either way (9f19040, §3.2 S7).
+      results.push({
+        waMessageId: m.waMessageId,
+        handledBy: failures.length > 0 ? "error" : "fast-path",
+        intent: "pasted_roster",
+        react: failures.length > 0 ? null : registered.length > 0 ? "✅" : null,
+        reply: registered.length > 0 ? SQUAD_POST_MARKER : null,
+      });
+    }
+  }
+
+  // Drop every peeled message from the batch the pipeline sees. ONE
+  // splice for all of them, after the last peel, so a peel added later
+  // cannot leave its message in the batch for an owner to claim as well.
+  for (let i = fresh.length - 1; i >= 0; i--) {
+    if (statsRequestIds.has(fresh[i].waMessageId)) fresh.splice(i, 1);
+  }
+
   const history = (body.history ?? []).map((h) => ({
     authorName: h.authorName,
     body: h.body,
     timestamp: new Date(h.timestamp),
   }));
 
-  // ── §10 STEP 5 — THE ROUTER GATE (ROUTER_GATE_ENABLED, default OFF) ──
+  // ── §10 STEP 5 — THE ROUTER GATE, NO LONGER BEHIND A FLAG ──────────
   //
-  //   "Router in front, mega-call behind. `none`-routed messages skip
-  //    the analyzer; everything else hits the existing prompt
-  //    unchanged."
+  //   "`none`-routed messages skip the analyzer; everything else hits
+  //    the existing prompt unchanged."
   //
   // 69.3% of real traffic is banter (measured over 1,723 production
-  // messages, PR #35), and today every one of those costs the full
-  // 18,315-token prompt and 14-19 s to conclude that a laughing emoji
-  // is a laughing emoji. A cheap Haiku router decides which messages
-  // the analyzer never sees.
+  // messages, PR #35). A cheap Haiku router decides which messages the
+  // rest of the pipeline is spent on.
   //
-  // THREE THINGS THIS DELIBERATELY DOES NOT DO:
+  // ─────────────────────────────────────────────────────────────────
+  // `ROUTER_GATE_ENABLED` AND `ATTENDANCE_ENGINE_ENABLED` ARE GONE
+  // ─────────────────────────────────────────────────────────────────
   //
-  //   1. It does not remove skipped messages from `fresh`. Downstream
-  //      guards SCAN THE BATCH — the banter-drop guard below looks for
-  //      the target's own message in it, and would flip from "strip
-  //      this OUT" to "apply it" if a `none` message vanished. So the
-  //      gate only narrows what the MODEL sees; every later pass sees
-  //      the whole window exactly as it does today.
-  //   2. It does not change any verdict. A skipped message gets the
-  //      same `intent: "noise"`, all-nulls verdict the mega-call emits
-  //      for banter, so nothing downstream can tell the difference.
+  // Both were reverts, and the thing they reverted TO was `analyzeBatch`.
+  // Step 8 deletes it, so their "off" positions stopped being reverts and
+  // became something much worse:
+  //
+  //   • `ATTENDANCE_ENGINE_ENABLED=0` would leave NOBODY handling
+  //     `self_att` / `other_att` / `offer` / `unsure`. Every "IN", every
+  //     "sorry lads can't make it", every admin demote would be silence
+  //     plus an operator note. That is not a lever, it is a kill switch
+  //     for the product's core write path with a name that reads like a
+  //     tuning flag.
+  //   • `ROUTER_GATE_ENABLED=0` used to mean "the analyzer sees the
+  //     banter too". With no analyzer it means only that `gatedIds` is
+  //     empty, and every owner already refuses a `none` route on its own
+  //     — so the flag is inert, and an inert flag is `gate.ts:227`'s
+  //     "worst kind of flag" seen from the other side.
+  //
+  // A flag whose off position has no implementation is worse than no
+  // flag, so both are deleted rather than defaulted ON. **The revert for
+  // step 8 is `git revert`, and that is worth saying plainly rather than
+  // leaving a switch that looks like one.** The four STEP-7 route flags
+  // are kept and default ON, because THEIR off position is a survivable
+  // degradation — see `pipeline/route-flags.ts`.
+  //
+  // THREE THINGS THE GATE DELIBERATELY DOES NOT DO, unchanged:
+  //
+  //   1. It does not remove skipped messages from `fresh`. Later passes
+  //      scan the whole batch, and a `none` message vanishing would
+  //      change what they conclude about its neighbours.
+  //   2. It does not decide anything. It labels.
   //   3. It does not go silent. A skipped message still gets its
-  //      `AnalyzedMessage` row, tagged `router-gate` — §11.1's
-  //      complaint about the `none` bucket is that the message
-  //      disappears with "no `AnalyzedMessage.action`", and this is
-  //      what makes "did the gate eat an IN?" a query.
-  //
-  // REVERT: unset ROUTER_GATE_ENABLED (or set it to 0). `gateGuard`
-  // then stays null, `gatedIds` stays empty, and every line below is
-  // the code that shipped on 2d52d7a.
-  //
-  // STEP 6 CHANGES ONE THING HERE: the router now runs when EITHER flag
-  // is on (`routerIsNeeded`), because the engine needs routes even when
-  // the gate is off. What the router's answer is USED for still splits
-  // by flag — `gate.skipped` is only honoured while ROUTER_GATE_ENABLED
-  // is on, so turning the engine on does not start skipping messages.
-  //
-  // The step-6 flag is resolved HERE, before the router call, and it
-  // carries the test-only per-request override the live A/B needs
-  // (`engineHeaderOverride` — inert unless MT_TEST_MODE is "1"). It is
-  // then PASSED to `routerIsNeeded` rather than re-read from the env
-  // there, so the two can never disagree about whether the engine is on.
-  const engineEnabled =
-    engineHeaderOverride(request.headers.get(ENGINE_HEADER)) ?? isAttendanceEngineEnabled();
+  //      `AnalyzedMessage` row, tagged `router-gate` — §11.1's complaint
+  //      about the `none` bucket is that the message disappears with "no
+  //      `AnalyzedMessage.action`", and this is what makes "did the gate
+  //      eat an IN?" a query. That row matters MORE now that it is the
+  //      nightly `none`-bucket sweep's only input.
   const gate =
-    fresh.length > 0 && routerIsNeeded(process.env, engineEnabled)
+    fresh.length > 0 && routerIsNeeded()
       ? await gateBatch(
           fresh.map((m) => ({
             waMessageId: m.waMessageId,
@@ -727,20 +1143,15 @@ async function handleAnalyzeRequest(request: Request) {
           { awaiting: await loadOpenQuestion(org.id) },
         )
       : null;
-  const gatedIds = new Set(isRouterGateEnabled() ? (gate?.skipped ?? []) : []);
+  const gatedIds = new Set(gate?.skipped ?? []);
   const gateRouteById = new Map((gate?.routes ?? []).map((r) => [r.messageId, r.route]));
   if (gate) {
     for (const d of gate.degradations) {
       console.warn(`[analyze] router-gate degraded (${d.messageId ?? "batch"}): ${d.detail}`);
     }
     console.log(
-      // With the gate OFF and only the engine on, the router still ran
-      // (the engine needs routes) but NOTHING is skipped — `gatedIds`
-      // is empty. Say which of those two worlds this is, or the line
-      // reads as messages having been dropped that were not.
-      `[analyze] router-gate ${isRouterGateEnabled() ? "ON" : "OFF (routes for the engine only)"}: ` +
-        `${gatedIds.size === 0 ? fresh.length : gate.analysed.length}/${fresh.length} to the analyzer, ` +
-        `${gatedIds.size} skipped, ${gate.floorForced.length} floor-forced, ` +
+      `[analyze] router: ${gate.routes.length}/${fresh.length} routed, ` +
+        `${gatedIds.size} banter, ${gate.floorForced.length} floor-forced, ` +
         `${gate.awaitingForced.length} forced by an open question ` +
         `(floor ${gate.floorEnabled ? "ON" : "OFF"})` +
         (gate.usage
@@ -749,45 +1160,53 @@ async function handleAnalyzeRequest(request: Request) {
     );
   }
 
-  // ── §10 STEP 6 — THE ATTENDANCE ENGINE (ATTENDANCE_ENGINE_ENABLED) ──
+  // ── §10 STEP 6 — THE ATTENDANCE ENGINE, NOW THE ONLY DECIDER ───────
   //
   //   "Swap the attendance path to extractor + engine. `self_att`,
   //    `other_att`, `offer` only — the three routes covering every
-  //    incident in the archive. Everything else still runs the old
-  //    prompt."
+  //    incident in the archive."
   //
-  // This runs BEFORE `analyzeBatch` because the route has to know which
-  // ids to leave OUT of it. Two deciders for one message would mean two
-  // replies for one message, and "MatchTime replies once or not at all"
-  // is the invariant the whole tail of this function protects.
+  // FOUR routes since step 8: `unsure` joined them, because the thing
+  // it used to fall back to no longer exists. See the essay on
+  // `ENGINE_ROUTES` in `pipeline/gate.ts` — it also makes `router.ts`'s
+  // router-failure comment true, which is the whole of §11.4's
+  // containment.
   //
-  // It owns nothing unless the flag is on, and it fails open on every
-  // other axis — no match, attendance off, an unroutable id, a bench
-  // prompt open for the sender, a state load that threw. See
-  // `lib/attendance-engine-batch.ts`.
+  // It still runs FIRST, and the reason is unchanged even though what it
+  // runs ahead of has changed: two deciders for one message would mean
+  // two replies for one message, and "MatchTime replies once or not at
+  // all" is the invariant the whole tail of this function protects.
   //
-  // REVERT: unset ATTENDANCE_ENGINE_ENABLED (or set it to 0).
-  // `engineBatch.ownedIds` is then empty, every branch below that
-  // mentions it is inert, and each of the three routes goes back to the
-  // 18,315-token prompt and `executeVerdict`, exactly as on `b03d96b`.
-  // The router gate is untouched by that flip, in both directions.
-  const engineAdminIds = engineEnabled
-    ? new Set(
-        (
-          await db.membership.findMany({
-            where: { orgId: org.id, role: { in: ["OWNER", "ADMIN"] }, leftAt: null },
-            select: { userId: true },
-          })
-        ).map((m) => m.userId),
-      )
-    : new Set<string>();
+  // It fails open on every axis it always did — no match, attendance off
+  // for the org, an unroutable id, a bench prompt open for the sender, a
+  // pasted roster, a state load that threw. What "fails open" MEANS has
+  // changed and that is step 8's whole risk: those messages used to go
+  // to the analyzer and now go to silence plus an operator note. Each
+  // one is enumerated in `lib/attendance-engine-batch.ts`'s header, and
+  // the two that carried real traffic got deterministic owners of their
+  // own rather than being left to the note — a bench-prompt answer
+  // (`lib/bench-prompt-answer.ts`) and a pasted roster
+  // (`lib/pasted-roster-registration.ts`), both peeled before the router
+  // runs.
+  //
+  // REVERT: `git revert`. The flag that used to sit here is gone — see
+  // the essay above the router gate for why a switch whose off position
+  // is "nobody handles attendance" is not a revert.
+  const engineAdminIds = new Set(
+    (
+      await db.membership.findMany({
+        where: { orgId: org.id, role: { in: ["OWNER", "ADMIN"] }, leftAt: null },
+        select: { userId: true },
+      })
+    ).map((m) => m.userId),
+  );
   const engineBatch =
-    fresh.length > 0 && engineEnabled
+    fresh.length > 0
       ? await runAttendanceEngineBatch({
           orgId: org.id,
           now: new Date(),
           expectedMatchId: activeMatchForReply?.id ?? null,
-          enabled: engineEnabled,
+          enabled: true,
           history: history.map((h) => ({ author: h.authorName, body: h.body })),
           messages: fresh.map((m) => {
             const s = senderById.get(m.waMessageId)!;
@@ -838,274 +1257,290 @@ async function handleAnalyzeRequest(request: Request) {
     if (report.info) console.log(report.info);
   }
 
-  // ── THE ANALYZER STILL SEES THE WHOLE WINDOW (§10 step 6) ──────────
+  // ── §10 STEP 8 — THE LAST FOUR OWNERS, AND THE END OF THE PROMPT ───
   //
-  //   Measured on real production history, 3 runs out of 3, and it is
-  //   the sharpest thing the replay sweep found:
+  //   "Migrate the rest — `question`, `balancer`, `score`, `admin_ops`,
+  //    one per week. RETIRE THE MEGA-PROMPT WHEN THE LAST ROUTE LEAVES."
   //
-  //     2026-06-11, Ehtisham Ul Haq, two messages in one batch — a
-  //     forwarded vCard, then "Add these 2 boys pl". With the WHOLE
-  //     batch in front of it the analyzer says noise, twice, which is
-  //     what production recorded. With "Add these 2 boys pl" removed
-  //     because the engine owned it, the analyzer reads the vCard ALONE
-  //     and registers a member called "Salman Shelly Ftbl".
+  // They have left. What stood between this comment and the loop below
+  // — the `BatchInputMessage[]`, the single `analyzeBatch` call, the
+  // re-expansion into one `AnalysisVerdict` per message, and the
+  // partial-response net that prefix-matched six strings against
+  // `verdict.reasoning` — is deleted in this change, along with
+  // `analyzeBatch` and the 19,850-token `SYSTEM_PROMPT` themselves.
   //
-  //   Nothing was wrong with either decider. Taking one message OUT of
-  //   the batch changed what the mega-prompt concluded about the
-  //   message NEXT to it — the sentence that made the card actionable
-  //   was the sentence that had been removed. A message's meaning can
-  //   depend on its neighbour, and an 18,315-token prompt reasons over
-  //   the window as a whole.
+  // ─────────────────────────────────────────────────────────────────
+  // WHAT REPLACED THE PARTIAL-RESPONSE NET
+  // ─────────────────────────────────────────────────────────────────
+  // §9 lists it among the twenty-two seatbelts that SURVIVE, with one
+  // instruction: "Keep, but fix the mechanism: today it prefix-matches
+  // free-text `reasoning`; under the new design it matches a typed
+  // error, which is what it always wanted to be."
   //
-  //   So the engine's messages stay in the analyzer's INPUT and only
-  //   its VERDICTS for them are discarded: the loop short-circuits on
-  //   `engineOwnedIds` long before `executeVerdict`, so there is still
-  //   exactly one decider and one reply per message. What changes is
-  //   that the prompt sees the same window it sees today.
+  // This is that fix, and the typed fact is ownership. A message that
+  // reached the end of the batch with no owner is exactly the event the
+  // old net was reaching for — "understood by a human, silently not
+  // acted on by the bot" — stated as a property of the request rather
+  // than reconstructed from a sentence the model wrote. It is composed
+  // after the loop by `lib/operator-note.ts`, sent to the same admins,
+  // on the same one-hour dedupe.
   //
-  //   The cost is honest and bounded: a batch the engine owns ENTIRELY
-  //   makes no analyzer call at all (the common case, and where step
-  //   6's saving lives), while a MIXED batch pays the full call it pays
-  //   today. Paying for context on mixed batches is the right trade on
-  //   the one step that can put a player at a pitch with no slot.
+  // ─────────────────────────────────────────────────────────────────
+  // WHY THEY RUN HERE, AND IN SEQUENCE
+  // ─────────────────────────────────────────────────────────────────
+  // Before anything speaks, for the reason step 6 gives above: "two
+  // deciders for one message would mean two replies for one message,
+  // and 'MatchTime replies once or not at all' is the invariant the
+  // whole tail of this function protects."
   //
-  //   Step 5's gate is deliberately NOT changed here: a `none`-routed
-  //   message is banter, and its removal is that step's entire saving.
+  // In SEQUENCE rather than `Promise.all`, because `score`, `admin_ops`
+  // and `balancer`-generate all write, and three write paths racing
+  // against the same match is a hazard bought for nothing: each runner
+  // makes ZERO model calls for a batch carrying none of its routes
+  // (every one of them filters candidates by route before loading state
+  // — `answer-batch.ts:388`, `score-engine-batch.ts:198`,
+  // `admin-ops-engine-batch.ts:198`), so the ordering costs latency only
+  // on the rare batch that genuinely carries two of them.
   //
-  //   The filter below is therefore EXACTLY the line that shipped on
-  //   `448d5a2` — gated ids only. No `engineOwnedIds` term, deliberately,
-  //   and no cleverness about skipping the call when the engine owns
-  //   everything: an "optimisation" on this line is an optimisation that
-  //   changes what the prompt sees, which is the bug this comment is
-  //   about. Step 6 buys correctness here, not tokens; step 5 is where
-  //   the saving lives.
-  const batchInputs: BatchInputMessage[] = fresh
-    .filter((m) => !gatedIds.has(m.waMessageId))
-    .map((m) => {
-      const s = senderById.get(m.waMessageId)!;
-      return {
-        waMessageId: m.waMessageId,
-        body: m.body,
-        authorPhone: m.authorPhone,
-        authorName: m.authorName,
-        authorUserId: s.userId,
-        timestamp: new Date(m.timestamp),
-      };
-    });
-
-  const analysedVerdicts = batchInputs.length
-    ? await analyzeBatch({ groupId: body.groupId, history, messages: batchInputs })
-    : [];
-
-  // Re-expand to one verdict per message in `fresh`, in `fresh` order.
-  // `analyzeBatch` already returns one verdict per input id (see
-  // `normaliseBatch`), so keying by id is equivalent to the positional
-  // pairing this replaced — and it stays correct now that the two arrays
-  // can differ in length.
-  const verdictById = new Map(analysedVerdicts.map((v) => [v.waMessageId, v]));
-  const verdicts: AnalysisVerdict[] = fresh.map((m) => {
-    if (gatedIds.has(m.waMessageId)) {
-      return gatedVerdict(m.waMessageId, gateRouteById.get(m.waMessageId));
-    }
-    if (engineOwnedIds.has(m.waMessageId)) {
-      // The engine decided this one. It has no verdict and must never
-      // get an invented one: the per-message loop short-circuits on
-      // `engineOwnedIds` before the first branch that could read this,
-      // and this placeholder exists only so `verdicts` stays index-
-      // aligned with `fresh` for the passes that scan the whole batch.
-      // `intent: "noise"`, every action field null — the same shape the
-      // gate uses, so nothing downstream can act on it by accident.
-      //
-      // The one field that carries real information is `reasoning`: an
-      // extractor that FAILED must reach the partial-response admin DM
-      // below, which selects on reasoning prefixes. Carrying the
-      // engine's typed marker here is what puts it there without that
-      // net growing a second selector.
-      return {
-        ...gatedVerdict(m.waMessageId, gateRouteById.get(m.waMessageId)),
-        reasoning:
-          engineBatch?.outcomes.get(m.waMessageId)?.reasoning ??
-          `${ENGINE_APPLY_DEGRADED_PREFIX} owned by the engine but it produced no outcome`,
-      };
-    }
-    const v = verdictById.get(m.waMessageId);
-    if (v) return v;
-    // Unreachable today — `normaliseBatch` emits one verdict per input
-    // id. Written explicitly anyway: a message that WAS sent to the
-    // analyzer and came back with nothing must land on the
-    // partial-response admin DM (2026-05-25, the Ibrahim+Baki
-    // incident), never on a silent noise verdict. The gate must not be
-    // able to turn a dropped verdict into a shrug.
+  // ─────────────────────────────────────────────────────────────────
+  // OWNERSHIP IS DISJOINT, AND IT IS ASSERTED
+  // ─────────────────────────────────────────────────────────────────
+  // Each runner claims a fixed, non-overlapping set of routes
+  // (`ANSWER_ENGINE_ROUTES`, `SCORE_ENGINE_ROUTES`,
+  // `ADMIN_OPS_ENGINE_ROUTES`, plus step 6's `ENGINE_ROUTES`), so two
+  // owners cannot claim one id. `assertOneOwnerPerMessage` says so out
+  // loud anyway: a double claim is the one defect whose symptom is the
+  // bot replying twice in a customer's group, and it must not be
+  // something only a code reading can rule out.
+  const ownerBase = fresh.map((m) => {
+    const s = senderById.get(m.waMessageId)!;
     return {
-      ...gatedVerdict(m.waMessageId, undefined),
-      intent: "unclear" as const,
-      confidence: 0,
-      reasoning: "Claude emitted no verdict for this id",
+      waMessageId: m.waMessageId,
+      body: m.body,
+      authorName: m.authorName,
+      senderUserId: s.userId,
+      senderName: s.name,
+      tagged: messageTagsBot(m),
+      route: gateRouteById.get(m.waMessageId),
+      gated: gatedIds.has(m.waMessageId),
     };
   });
+  const ownerHistory = history.map((h) => ({ author: h.authorName, body: h.body }));
+  const now = new Date();
 
-  // ── Partial-response safety net (added 2026-05-25, Ibrahim+Baki incident) ──
-  // If Claude omits verdicts for some IDs (token-cap, JSON malformation,
-  // or just dropping IDs), `analyzeBatch` substitutes an offline placeholder
-  // with reasoning="Claude emitted no verdict for this id". The bot silently
-  // no-ops those messages. For obvious noise that's fine; for a player drop
-  // it's a disaster (the LLM's verdict + reply never happen, the player
-  // thinks the bot is broken). We can't tell which from the placeholder
-  // alone, so we DM the org's admins with the dropped message bodies and
-  // let a human decide. Idempotent — one DM per admin per 1h window.
-  {
-    // Detect ALL offline-fallback verdicts, not just the
-    // "Claude emitted no verdict for this id" placeholder. The
-    // analyzeBatch function falls back via `offlineVerdict` for several
-    // reasons (model error, SDK rejection, JSON parse failure, missing
-    // API key) — all of those should reach the admin so they can act
-    // manually. We were narrowly checking ONE reasoning string and
-    // missed the "Streaming is required" SDK rejection 2026-05-26,
-    // wiping the analyzer for ~30 min before discovery.
-    const OFFLINE_REASON_PREFIXES = [
-      "Claude emitted no verdict for this id",
-      "Claude API error:",
-      "No text in Claude response",
-      "ANTHROPIC_API_KEY not set",
-      "Unknown group",
-      // §10 step 6. §9 keeps this net and says to "fix the mechanism:
-      // under the new design it matches a typed error, which is what it
-      // always wanted to be". An extractor that FAILED (as opposed to
-      // one that found nothing) is exactly the same operator event as a
-      // dropped verdict — a message understood by a human, silently not
-      // acted on by the bot — so it reaches the same admin DM instead
-      // of a log line nobody reads.
-      ENGINE_APPLY_DEGRADED_PREFIX,
-    ];
-    const dropped = verdicts
-      .map((v, i) => ({ v, msg: fresh[i] }))
-      .filter(({ v }) =>
-        OFFLINE_REASON_PREFIXES.some((p) => (v.reasoning ?? "").startsWith(p)),
-      );
-    if (dropped.length > 0) {
-      try {
-        const admins = await db.membership.findMany({
-          where: { orgId: org.id, role: { in: ["ADMIN", "OWNER"] }, leftAt: null },
-          include: { user: { select: { id: true, phoneNumber: true, name: true } } },
-        });
-        const since = new Date(Date.now() - 60 * 60 * 1000); // 1h dedupe window
-        const summary = dropped
-          .map(
-            ({ msg }) =>
-              `• "${(msg.body || "").slice(0, 80)}${(msg.body || "").length > 80 ? "…" : ""}" by ${msg.authorName ?? "?"}`,
-          )
-          .join("\n");
-        const dmText =
-          `⚠️ MatchTime: LLM dropped ${dropped.length} message${dropped.length === 1 ? "" : "s"} from the latest analyzer batch for *${org.name}*:\n\n` +
-          summary +
-          `\n\nThe bot didn't respond to ${dropped.length === 1 ? "it" : "them"} automatically. Check the group and act manually if any were attendance changes.`;
-        for (const m of admins) {
-          if (!m.user.phoneNumber) continue;
-          const phone = m.user.phoneNumber.replace(/^\+/, "");
-          const recentlySent = await db.botJob.findFirst({
-            where: {
-              orgId: org.id,
-              kind: "dm",
-              phone,
-              text: { contains: "LLM dropped" },
-              createdAt: { gte: since },
-            },
-            select: { id: true },
-          });
-          if (recentlySent) continue; // already DM'd this admin in the last hour
-          await db.botJob.create({
-            data: { orgId: org.id, kind: "dm", phone, text: dmText },
-          });
-          console.warn(
-            `[analyze] partial-response — DM'd admin ${m.user.name ?? phone} re ${dropped.length} dropped verdict(s) in org ${org.id}`,
-          );
-        }
-      } catch (err) {
-        console.error("[analyze] failed to dispatch partial-response admin DM:", err);
+  // The step-7 routes live for this request. The test-only per-request
+  // header still works (it is inert unless MT_TEST_MODE is "1"), which
+  // is what lets a live A/B move one route at a time without a deploy.
+  const stepSevenEnabled = enabledStepSevenRoutes(
+    process.env,
+    routesHeaderOverride(request.headers.get(STEP_SEVEN_HEADER)),
+  );
+
+  const answerBatch =
+    fresh.length > 0
+      ? await runAnswerBatch({
+          orgId: org.id,
+          now,
+          messages: ownerBase,
+          history: ownerHistory,
+          // Same contract as step 6: if the route's registration match
+          // and the owner's state load ever disagree, the owner takes
+          // nothing rather than answer about a different match.
+          expectedMatchId: activeMatchForReply?.id ?? null,
+          enabled: stepSevenEnabled,
+          deps: {},
+        })
+      : null;
+
+  const scoreBatch =
+    fresh.length > 0
+      ? await runScoreBatch({
+          orgId: org.id,
+          now,
+          messages: ownerBase,
+          history: ownerHistory,
+          enabled: stepSevenEnabled,
+          deps: buildScoreApplyDeps(),
+        })
+      : null;
+
+  const adminOpsBatch =
+    fresh.length > 0
+      ? await runAdminOpsBatch({
+          orgId: org.id,
+          now,
+          messages: ownerBase,
+          history: ownerHistory,
+          enabled: stepSevenEnabled,
+          deps: {
+            ...buildAdminOpsApplyDeps({ orgId: org.id }),
+            // The per-category opt-out (`Membership.subReminderDm`), which
+            // `route.ts:3959` read one row at a time. Loaded once per
+            // batch here; the engine does the rest.
+            reminderMutedUserIds: async () =>
+              (
+                await db.membership.findMany({
+                  where: { orgId: org.id, leftAt: null, subReminderDm: false },
+                  select: { userId: true },
+                })
+              ).map((r) => r.userId),
+          },
+        })
+      : null;
+
+  // `balancer`, action `generate`. The other half of the route
+  // `runAnswerBatch` owns: that one answers `show` and has no apply
+  // layer at all, this one runs the balancer and writes every
+  // `TeamAssignment`. Split on a FACT the extractor returns
+  // (`facts.action`) rather than on a flag, so ONE route keeps ONE flag
+  // and the two handlers cannot both claim a message —
+  // `route-flags.test.ts` asserts the predicates are disjoint.
+  //
+  // It is not optional in the way the others are: 23 of the last 120
+  // days' tagged commands to MatchTime were "generate the teams", more
+  // than every question shape combined. Silence here would not be a
+  // conservative default, it would be the feature going dark.
+  const teamOpsBatch =
+    fresh.length > 0
+      ? await runTeamOpsBatch({
+          orgId: org.id,
+          now,
+          messages: ownerBase,
+          history: ownerHistory,
+          enabled: stepSevenEnabled,
+          deps: buildTeamOpsApplyDeps({ orgId: org.id }),
+        })
+      : null;
+
+  const ownerDegradations = [
+    ...(answerBatch?.degradations ?? []),
+    ...(scoreBatch?.degradations ?? []),
+    ...(adminOpsBatch?.degradations ?? []),
+    ...(teamOpsBatch?.degradations ?? []),
+    ...(engineBatch?.degradations ?? []),
+  ];
+  for (const d of ownerDegradations) console.warn(`[analyze] ${d}`);
+
+  // ── ONE OWNER PER MESSAGE, ASSERTED ────────────────────────────────
+  //   The invariant that used to be bought by there being exactly one
+  //   decider. There are five now, so it is checked. A double claim is
+  //   logged as an error and the LATER claim is dropped, in the same
+  //   shape as the duplicate-result backstop at the end of this
+  //   function: a violated invariant must degrade to "reply once",
+  //   never to "throw and lose the batch".
+  const ownerOf = new Map<string, string>();
+  const claim = (label: string, ids: Iterable<string>) => {
+    for (const id of ids) {
+      const prior = ownerOf.get(id);
+      if (prior) {
+        console.error(
+          `[analyze] INVARIANT VIOLATION: ${id} claimed by BOTH ${prior} and ${label} — ` +
+            `keeping ${prior} so MatchTime replies once`,
+        );
+        continue;
       }
+      ownerOf.set(id, label);
     }
-  }
+  };
+  // Two things about these five lines.
+  //
+  // The labels are each module's OWN `*_HANDLED_BY` constant, not a
+  // string typed here. They are written to `AnalyzedMessage.handledBy`
+  // below, so a hand-typed copy would mean the admin log said
+  // "answer-batch" while the module that decided it called itself
+  // "answer-engine" — which is exactly what the first draft of this line
+  // did.
+  //
+  // And the ORDER is the same order the loop below resolves an outcome
+  // in. `claim()` keeps the FIRST claimant and the loop's `??` chain
+  // takes the FIRST hit, so under a double claim — which cannot happen,
+  // the route sets are disjoint — the two would still agree about who
+  // decided the message. The first draft had `admin_ops` third here and
+  // fourth there, which would have made the audit row name one owner
+  // while another one's words went to the group. That is a smaller bug
+  // than the one this assertion exists for, and it is exactly the kind
+  // that survives because nobody looks at the impossible branch.
+  claim(ENGINE_HANDLED_BY, engineOwnedIds);
+  claim(ANSWER_HANDLED_BY, answerBatch?.ownedIds ?? []);
+  claim(SCORE_HANDLED_BY, scoreBatch?.ownedIds ?? []);
+  claim(TEAM_OPS_HANDLED_BY, teamOpsBatch?.ownedIds ?? []);
+  claim(ADMIN_OPS_HANDLED_BY, adminOpsBatch?.ownedIds ?? []);
 
-  // 3. Execute verdicts sequentially (attendance writes are cheap and
-  //    order matters for state-collapse correctness).
-  // Dedupe `generate_teams_request` within a batch — only the LAST one
-  // actually fires. If two players in the same batch both ask to
-  // generate teams, running both would emit two team posts that each
-  // ignore the other's pin requests. Better to honour the most recent
-  // request (which has fresher context) and silently drop the
-  // earlier ones to "noise" so they don't fire a second post.
-  let lastTeamsRequestIdx = -1;
-  for (let i = 0; i < verdicts.length; i++) {
-    if (verdicts[i].intent === "generate_teams_request") lastTeamsRequestIdx = i;
-  }
-
-  // Pre-compute "latest message index per author" for state-collapse-safe
-  // IN backfill below. When the LLM emits intent:"in" but registerAttendance:null
-  // (a known failure mode — see Najib 2026-05-08), we force registerAttendance
-  // back to "IN" UNLESS the same author has a later message in the batch that
-  // legitimately supersedes this one. Without this safety net the player is
-  // silently dropped: the bot reacts 👍 but no attendance row is written.
-  const latestIdxByAuthor = new Map<string, number>();
-  for (let i = 0; i < fresh.length; i++) {
-    const uid = senderById.get(fresh[i].waMessageId)?.userId;
-    if (uid) latestIdxByAuthor.set(uid, i);
-  }
-
-  const attendanceOn = (await getOrgFeatures(org.id)).attendance;
+  // ── 3. TURN EACH OWNER'S OUTCOME INTO ONE REPLY AND ONE ROW ────────
+  //
+  //   This loop used to be 1,180 lines. Almost all of it was the model's
+  //   output being corrected: the hypothetical/past-tense seatbelt, the
+  //   third-party-subject seatbelt, the placeholder-guest strip, the
+  //   pasted-roster reconcile and clamp, the guest-name ask, the tag
+  //   gate, the attendance-off gate, the conditional-drop hold, the IN
+  //   net, the OUT net, the bench-demote net, the banter-drop guard, the
+  //   generate-teams dedupe, and `executeVerdict` itself.
+  //
+  //   Every one of them read `verdict.intent`, `verdict.reasoning`,
+  //   `verdict.reply`, `verdict.registerAttendance` or
+  //   `verdict.registerFor`. There is no verdict any more, so their
+  //   input does not exist — which is §9's "no longer possible: the
+  //   error class becomes unrepresentable, so the guard has nothing to
+  //   guard", spent rather than promised. The per-guard proofs live in
+  //   the commit that deleted them and in `MDs/`.
+  //
+  //   What survives is what §9 said would: the honest ack, the
+  //   unresolved-sender nudge, the react/status reconciliation, the one
+  //   composed squad post, the deferred recruit blast, and the
+  //   one-result-per-message backstop. Not one of those was ever about
+  //   the model.
+  //
+  //   So the loop now does exactly three things per message: find the
+  //   owner, render its outcome, or record that nobody owned it.
 
   // Sender-registration reacts to audit AFTER the whole batch has been
   // applied (see the reaction ↔ status reconciliation pass below). Only
-  // verdicts where the react describes the SENDER's own attendance row
-  // qualify — third-party registerFor reacts reflect the target's slot.
+  // outcomes where the react describes the SENDER's own attendance row
+  // qualify.
   const REGISTRATION_STATUS_REACTS = new Set(["✅", "🪑", "👋"]);
   const senderReactAudit: Array<{ idx: number; userId: string }> = [];
 
-  // ── VERDICT-DRIVEN RECRUIT (2026-09-01, replaces the deleted regex) ──
-  //   Messages whose verdict carries `recruitRequest` AND whose sender is
-  //   an org admin. Collected here and executed ONCE, after the whole
-  //   batch has been applied — see "RUN THE RECRUIT" below. Deferring is
-  //   the point: the incident's message drops Najib and asks for a
-  //   replacement in the same breath, and the blast must see 9/10, not
-  //   the 10/10 it saw when a regex ran it first.
-  const recruitRequests: Array<{ msg: InboundMessage; sender: ResolvedSender }> = [];
-  //   Messages an admin's recruit command has ADDRESSED to MatchTime, for
-  //   the tag gate below. See RECRUIT_COMMAND_IMPLIES_ADDRESSED.
-  const addressedByRecruit = new Set<string>();
+  // ── THE RECRUIT BLAST STILL RUNS LAST ───────────────────────────────
+  //   Collected here, fired once after every write in the batch has
+  //   landed — see "RUN THE RECRUIT" below. The deferral is the fix for
+  //   2026-09-01, where a blast ran BEFORE the batch's writes and told
+  //   the owner his squad was full one line after he said Najib was out.
+  //   Two owners can report one: step 6's engine (`sideRequests`
+  //   carrying "recruit" from an admin) and step 7's `admin_ops` (an
+  //   explicit "DM the lads from the last 5 games", with a clamped
+  //   lookback). They share this list so the "only the last one fires"
+  //   rule holds across both.
+  const recruitRequests: Array<{
+    msg: InboundMessage;
+    sender: ResolvedSender;
+    lookbackMatches: number | null;
+  }> = [];
 
-  for (let i = 0; i < fresh.length; i++) {
-    const msg = fresh[i];
-    let verdict = verdicts[i];
+  // ── EVERY MESSAGE NOBODY OWNED ─────────────────────────────────────
+  //   The input to `lib/operator-note.ts`, which is what replaces "fall
+  //   back to the analyzer". A `none`-routed message lands here too and
+  //   is filtered out there, deliberately: the decision about what is
+  //   worth a human's attention is made in ONE place, and it is made on
+  //   the route rather than on the message text.
+  const unowned: UnownedMessage[] = [];
+
+  for (const msg of fresh) {
     const sender = senderById.get(msg.waMessageId)!;
 
-    // ── §10 STEP 6 — THE ENGINE ALREADY DECIDED THIS MESSAGE ─────────
+    // ── §10 STEP 6 — THE ATTENDANCE ENGINE DECIDED THIS MESSAGE ──────
     //
     // The extractor read it, the engine decided it, `attendance.ts`
-    // wrote it and the composer said it — all before `analyzeBatch` was
-    // called, and with no verdict anywhere in the chain. Every branch
-    // below this point reads `verdict.intent`, `verdict.reasoning`,
-    // `verdict.reply` or `verdict.registerFor`, and none of those
-    // exists here. So the message takes the short path: honest ack,
-    // unresolved-sender nudge, one `AnalyzedMessage` row, one result.
-    //
-    // The three seatbelts §10 step 6 names — the IN net, the OUT net
-    // and the bench-demote net — are all BELOW this `continue`, and
-    // that is the whole of their deletion: their input is the model's
-    // `intent`, `reasoning` and `reply`, and on this path the model
-    // produces none of the three. See the essay above each of them.
+    // wrote it and the composer said it. Unchanged by step 8 except
+    // that there is no longer anything below it to skip.
     const engineOutcome = engineBatch?.outcomes.get(msg.waMessageId);
     if (engineOutcome) {
-      // A recruit ask alongside a drop runs LAST, on the same deferred
-      // path the analyzer's uses, so the blast counts the squad this
-      // message just changed (PR #33).
       if (engineOutcome.recruitRequest) {
-        recruitRequests.push({ msg, sender });
-        addressedByRecruit.add(msg.waMessageId);
+        recruitRequests.push({ msg, sender, lookbackMatches: null });
       }
       if (engineOutcome.recordTentativeForUserId && engineBatch?.matchId && nextMatchForReply) {
         // conditional_in flavour (b) — personal uncertainty. The engine
         // declines the write; the 24h chase is a shipped product
-        // behaviour (`executeVerdict`'s `recordTentative`) and step 6
-        // must not lose it. Best-effort, exactly as on the old path.
+        // behaviour and step 6 must not lose it. Best-effort.
         await recordTentative({
           matchId: engineBatch.matchId,
           userId: engineOutcome.recordTentativeForUserId,
@@ -1119,8 +1554,8 @@ async function handleAnalyzeRequest(request: Request) {
         }).catch((err) => console.error("[analyze] engine resolveTentative failed:", err));
       }
 
-      // The honest ack, unchanged and shared: a confirmation is NEVER
-      // sent for a write that did not land (9f19040).
+      // The honest ack: a confirmation is NEVER sent for a write that
+      // did not land (9f19040).
       const ack = resolveAttendanceAck({
         failures: engineOutcome.failures,
         react: engineOutcome.react,
@@ -1205,1051 +1640,211 @@ async function handleAnalyzeRequest(request: Request) {
       continue;
     }
 
-    // ── INTERACTION CONTRACT — hypothetical/past-tense self seatbelt ──
-    //    "LLM extracts, code decides." A hypothetical ("If I was in the
-    //    team it won't be ruined"), counterfactual ("I would've been
-    //    in") or past-tense ("I was in last week") self-statement must
-    //    NEVER become an attendance write, even if the LLM slips. Strip
-    //    any self attendance write the verdict carries (the third-party
-    //    registerFor is left alone — that's a different, gated path) and
-    //    fall through as noise so it's neither acted on nor replied to.
-    if (
-      looksLikeHypotheticalOrPast(msg.body) &&
-      (verdict.registerAttendance === "IN" ||
-        verdict.registerAttendance === "OUT" ||
-        verdict.registerAttendance === "BENCH" ||
-        verdict.intent === "in" ||
-        verdict.intent === "out" ||
-        verdict.intent === "replacement_request") &&
-      !(verdict.registerFor && verdict.registerFor.length > 0)
-    ) {
-      console.warn(
-        `[analyze] interaction-contract: hypothetical/past-tense self-statement "${(msg.body || "").slice(0, 60)}" ` +
-          `— suppressing attendance write (${msg.waMessageId}). Reasoning was: ${verdict.reasoning}`,
-      );
-      verdict = {
-        ...verdict,
-        intent: "noise",
-        registerAttendance: null,
-        react: null,
-        reply: null,
-      };
-      verdicts[i] = verdict;
-    }
-
-    // ── INTERACTION CONTRACT — third-party-subject self seatbelt ─────
-    //    Amir, 2026-08-30: "@Kemal Ediz my brother can play if needed".
-    //    The analyzer matched the STANDING-OFFER shape of conditional_in
-    //    ("if needed" = contingent on squad state) and benched AMIR, who
-    //    was never playing; "Bench (1): 1. Amir" then went out to the
-    //    whole club in the 17:00 roster. conditional_in is tag-free self
-    //    attendance, so nothing downstream questioned the write.
+    // ── §10 STEP 7 — question, balancer, score, admin_ops ────────────
     //
-    //    The prompt now makes the subject check explicit, but a wrong
-    //    self write here is silent and public, so it gets a deterministic
-    //    backstop too. Narrow on purpose — it only fires when a self
-    //    IN/BENCH write already exists AND the message OPENS with a
-    //    third-party person AND contains no first-person pronoun at all
-    //    (see offerIsAboutSomeoneElse). A third-party registerFor is left
-    //    untouched: naming a guest is a different, working path.
-    if (
-      (verdict.registerAttendance === "IN" ||
-        verdict.registerAttendance === "BENCH") &&
-      offerIsAboutSomeoneElse(msg.body)
-    ) {
-      const addsOthers = !!(verdict.registerFor && verdict.registerFor.length > 0);
-      console.warn(
-        `[analyze] interaction-contract: third-party-subject offer "${(msg.body || "").slice(0, 60)}" ` +
-          `— suppressing the SENDER's ${verdict.registerAttendance} write (${msg.waMessageId}). ` +
-          `Reasoning was: ${verdict.reasoning}`,
-      );
-      verdict = addsOthers
-        ? // The named-guest add stands; only the sender's own row goes.
-          { ...verdict, registerAttendance: null }
-        : // Nothing left to act on, and any reply the model wrote ("putting
-          // you on the bench") is now false. Stay silent.
-          { ...verdict, intent: "noise", registerAttendance: null, react: null, reply: null };
-      verdicts[i] = verdict;
-    }
-
-    // ── INTERACTION CONTRACT — UNNAMED-GUEST NAME ASK ────────────────
-    //    The other half of the Amir incident. #26 stopped MT registering
-    //    the SENDER for "@Kemal Ediz my brother can play if needed" —
-    //    correct — but the result was SILENCE: bring_guests_vague is in
-    //    ACTIONY_INTENTS, so an untagged one is forced to noise. Kemal
-    //    had to type "yes pls, can you share the name?" himself before
-    //    the guest could be added, and asked MT to do the asking.
+    // Three runners, one shape. They are looked up with `??` rather
+    // than in three branches because their route sets are disjoint
+    // (asserted by `claim()` above), so at most one can answer — and
+    // writing it once means the ack, the proximity pass and the
+    // `AnalyzedMessage` row cannot drift apart between them.
     //
-    //    This is a QUESTION, never a write. Nobody has been named, so
-    //    there is nothing to register; the copy is composed by CODE
-    //    (lib/guest-name-ask.ts) from DB facts, per the direction
-    //    lib/format-switch.ts set. The branch is TERMINAL on purpose:
-    //    every unnamed-guest verdict leaves here with a reply or with
-    //    silence, and neither can reach an apply path. That is also what
-    //    makes "at most one ask per player per match, whatever they say
-    //    afterwards" hold — a deduped repeat cannot fall through to the
-    //    model's own (asking) reply.
+    // WHAT THIS BRANCH DELIBERATELY DOES NOT DO, and each is covered:
     //
-    //    Compute vagueness BEFORE stripping placeholders, because the
-    //    ghost-user verdict IS the placeholder registerFor.
-    const vagueGuestOffer = isVagueGuestOfferVerdict(verdict);
-
-    //    Placeholder ADDs ("my brother", "Amir's brother", "someone")
-    //    can only ever provision a ghost member — the analyzer emitted
-    //    registerFor:[{name:"Amir's brother"}] on SIX of six runs against
-    //    the real pre-incident squad state (MDs/analyzer-redesign-
-    //    2026-08-31.md §4.1). Drop them wherever they appear, including
-    //    alongside a real name. Non-IN placeholders are left alone: this
-    //    must never eat a drop.
-    {
-      const entries = verdict.registerFor ?? [];
-      const kept = stripPlaceholderGuests(entries);
-      if (kept.length !== entries.length) {
-        const dropped = entries
-          .filter((e) => !kept.includes(e))
-          .map((e) => e.name)
-          .join(", ");
-        console.warn(
-          `[analyze] guest-name-ask: dropped placeholder registerFor add(s) [${dropped}] on ` +
-            `"${(msg.body || "").slice(0, 60)}" (${msg.waMessageId}) — a relationship is not a name ` +
-            `and would provision a ghost member.`,
-        );
-        verdict = { ...verdict, registerFor: kept.length > 0 ? kept : null };
-        verdicts[i] = verdict;
-      }
-    }
-
-    // ── PASTED ROSTER — CODE DECIDES, NOT THE MODEL ─────────────────
-    //    The shape the self-replay sweep (PR #35) proved the incumbent
-    //    cannot reproduce: a pasted numbered roster. Three of its four
-    //    write-level disagreements were this one shape — on 2026-06-07
-    //    one run registered Nabeel and the other registered Adam, Amir,
-    //    Ehtisham and Martin, from the same two messages against the
-    //    same empty squad. Production's own labels scatter these across
-    //    `noise`, `in` and `generate_teams_request`, which is why it
-    //    never read as one defect.
-    //
-    //    The prompt says nothing about a pasted list, so the model
-    //    improvises which of the fourteen lines are registrations, and
-    //    improvisation is not reproducible. Two deterministic rules
-    //    replace it, in this order:
-    //
-    //    1. RECONCILE. There is exactly one pasted shape a registration
-    //       can be read out of without guessing — the one S26
-    //       (`4cbdd05`) shipped: a forward of MatchTime's OWN roster
-    //       post, restating the confirmed squad in Match Context order
-    //       with the open slots filled in. "Which lines are new" is
-    //       then arithmetic, and `reconcilePastedRoster` does it.
-    //
-    //    2. CLAMP. Every other list — the group's own ritual order, a
-    //       list against an empty squad, a list shorter than the squad
-    //       — registers NOBODY, and the model's picks off it are
-    //       dropped. Reading those needs the PREVIOUS list to diff
-    //       against, which this route does not have.
-    //       `lib/squad-from-list.ts` does: it keeps the lists, diffs
-    //       them, attributes additions to the sender and learns
-    //       aliases, behind the `featureSquadFromList` org flag. A
-    //       group that maintains its squad by re-pasting should have
-    //       that switched on.
-    //
-    //    The clamp is MONOTONE by construction (see
-    //    lib/pasted-roster.ts): it only removes writes, and never
-    //    touches an OUT. A registerFor name that is NOT a slot in the
-    //    list survives whatever its direction — prose alongside a paste
-    //    ("also adding Kieran", "Trevell got injured, he's out") is a
-    //    real statement and the list says nothing about it.
-    const pastedRoster = parsePastedRoster(msg.body);
-    if (pastedRoster) {
-      //  The NEXT match's confirmed squad, in Match Context order —
-      //  the same list the group sees in MatchTime's roster post, which
-      //  is what an of-record paste is a forward of. If the message was
-      //  really about some other match the prefix simply will not
-      //  match, and the clamp takes over: the failure direction is
-      //  "register nobody", never "register the wrong squad".
-      const confirmedNames = nextMatchForReply
-        ? (
-            await db.attendance.findMany({
-              where: { matchId: nextMatchForReply.id, status: "CONFIRMED" },
-              include: { user: { select: { name: true } } },
-              orderBy: { position: "asc" },
-            })
-          ).map((a) => a.user.name ?? "")
-        : [];
-      const reconciled = reconcilePastedRoster(pastedRoster, confirmedNames);
-
-      if (reconciled.ofRecord) {
-        //  A forward of our own roster post with the open slots filled
-        //  in (S26). The additions are COMPUTED from the squad, so two
-        //  runs of the same message cannot produce two different
-        //  squads. The model's own picks off the list are discarded and
-        //  replaced; anything it named that is NOT in the list is kept
-        //  alongside them.
-        const offList = (verdict.registerFor ?? []).filter(
-          (e) => !rosterMentions(pastedRoster, e.name),
-        );
-        const senderAddition = reconciled.additions.find(
-          (n) => sameName(n, sender.name) || sameName(n, msg.authorName),
-        );
-        const rebuilt = [
-          ...offList,
-          ...reconciled.additions
-            .filter((n) => n !== senderAddition)
-            .map((name) => ({ name, action: "IN" as const })),
-        ];
-        if (reconciled.additions.length > 0) {
-          console.warn(
-            `[analyze] pasted-roster reconcile: "${(msg.body || "").slice(0, 60)}" ` +
-              `(${msg.waMessageId}) restates the confirmed squad in order, so the ` +
-              `${reconciled.additions.length} appended name(s) [${reconciled.additions.join(", ")}] ` +
-              `are new. Computed from the squad, not from the model's reading of the list.`,
-          );
-        }
-        verdict = {
-          ...verdict,
-          //  The sender appended their OWN name: that is self
-          //  attendance, which registerAttendance carries. The author
-          //  never belongs in registerFor.
-          ...(senderAddition && verdict.registerAttendance === null
-            ? { registerAttendance: "IN" as const }
-            : {}),
-          registerFor: rebuilt.length > 0 ? rebuilt : null,
-        };
-        verdicts[i] = verdict;
-      } else {
-        const clamp = clampRosterDerivedWrites({
-          body: msg.body,
-          senderNames: [sender.name, msg.authorName],
-          registerAttendance: verdict.registerAttendance,
-          registerFor: verdict.registerFor,
-        });
-        if (clamp.droppedSelf || clamp.droppedNames.length > 0) {
-          console.warn(
-            `[analyze] pasted-roster clamp: "${(msg.body || "").slice(0, 60)}" (${msg.waMessageId}) ` +
-              `is a pasted list that does not restate the squad (${reconciled.reason}) — dropped ` +
-              `${clamp.droppedSelf ? `self ${verdict.registerAttendance}` : ""}` +
-              `${clamp.droppedSelf && clamp.droppedNames.length > 0 ? " + " : ""}` +
-              `${clamp.droppedNames.length > 0 ? `registerFor [${clamp.droppedNames.join(", ")}]` : ""}. ` +
-              `A re-paste is a restatement, not a registration; org ${org.id} should use ` +
-              `featureSquadFromList if it maintains its squad this way.`,
-          );
-          verdict = {
-            ...verdict,
-            registerAttendance: clamp.registerAttendance,
-            registerFor: clamp.registerFor,
-          };
-          //  Nothing is left to do. Fall through as noise so the IN
-          //  safety net below cannot put the sender's registration
-          //  back, and so a reply announcing a write that will not
-          //  happen never reaches the group (the same shape as the
-          //  hypothetical/past-tense seatbelt above). An out-shaped
-          //  verdict keeps its intent: the OUT safety net owns that
-          //  direction, and this clamp must never eat a drop.
-          if (
-            clamp.silenced &&
-            verdict.intent !== "out" &&
-            verdict.intent !== "replacement_request"
-          ) {
-            verdict = { ...verdict, intent: "noise", react: null, reply: null };
-          }
-          verdicts[i] = verdict;
-        }
-      }
-    }
-
-    if (vagueGuestOffer) {
-      const matchId = nextMatchForReply?.id ?? null;
-      const askKey =
-        matchId && sender.userId ? guestNameAskKey(matchId, sender.userId) : null;
-      const alreadyAsked = askKey
-        ? !!(await db.sentNotification.findUnique({
-            where: { key: askKey },
-            select: { id: true },
-          }))
-        : false;
-      // Squad size read FRESH — earlier verdicts in this same batch may
-      // already have filled slots, and the ask must never be composed
-      // from the model's idea of the roster.
-      const confirmedCount = matchId
-        ? await db.attendance.count({ where: { matchId, status: "CONFIRMED" } })
-        : 0;
-      const decision = shouldAskForGuestName({
-        body: msg.body,
-        tagged: messageTagsBot(msg),
-        senderKnown: !!sender.userId,
-        attendanceOn,
-        hasActiveMatch: !!matchId,
-        confirmedCount,
-        maxPlayers: nextMatchForReply?.maxPlayers ?? 0,
-        alreadyAsked,
-      });
-
-      let askReply: string | null = null;
-      if (decision.ask && askKey && matchId && sender.userId) {
-        askReply = renderGuestNameAsk({
-          askerName: sender.name ?? msg.authorName ?? null,
-          body: msg.body,
-        });
-        // Claim the one-ask slot BEFORE handing the reply back. The
-        // unique key makes a concurrent batch lose the race and stay
-        // silent, which is the right way round: under-asking is a
-        // no-op, double-asking is the nagging Kemal hates.
-        try {
-          await db.sentNotification.create({
-            data: {
-              key: askKey,
-              kind: GUEST_NAME_ASK_KIND,
-              matchId,
-              targetUser: sender.userId,
-            },
-          });
-        } catch (err) {
-          console.warn(
-            `[analyze] guest-name-ask: lost the dedupe race for ${askKey} — staying silent.`,
-            err,
-          );
-          askReply = null;
-        }
-      }
-
-      await recordAnalysis({
-        orgId: org.id,
-        groupId: body.groupId,
-        msg,
-        handledBy: askReply ? "fast-path" : "ignored",
-        intent: "bring_guests_vague",
-        action: askReply ? "guest-name-ask" : "none",
-        confidence: verdict.confidence,
-        reasoning: `guest-name-ask: ${decision.reason}`,
-        authorUserId: sender.userId,
-        authorName: msg.authorName ?? null,
-      });
-      results.push({
-        waMessageId: msg.waMessageId,
-        handledBy: askReply ? "fast-path" : "ignored",
-        intent: askReply ? "bring_guests_vague" : "noise",
-        react: null,
-        reply: askReply,
-      });
-      continue; // TERMINAL — no attendance write is reachable from here
-    }
-
-    // ── RECRUIT REQUEST — extract now, ACT after the whole batch ─────
-    //   `recruitRequest` is a FLAG on the verdict, not an intent, so it
-    //   coexists with whatever attendance the same message carries. All
-    //   that happens here is the admin gate; the action itself runs after
-    //   every write in the batch has landed, so it sees the real squad.
-    //
-    //   Authorisation is unchanged from the deleted fast path: OWNER or
-    //   ADMIN only. A non-admin's recruit request is simply ignored —
-    //   note this DROPS the old 🔒 react, which was only ever reachable
-    //   because the fast path had already swallowed the message. The rest
-    //   of a non-admin's message now flows through the normal path
-    //   instead of being discarded with it.
-    if (verdict.recruitRequest) {
-      const { isOrgAdmin } = await import("@/lib/org");
-      const isAdmin = sender.userId ? await isOrgAdmin(sender.userId, org.id) : false;
-      if (isAdmin) {
-        recruitRequests.push({ msg, sender });
-        if (RECRUIT_COMMAND_IMPLIES_ADDRESSED) addressedByRecruit.add(msg.waMessageId);
-      } else {
-        console.log(
-          `[analyze] recruitRequest from non-admin ${sender.userId ?? msg.authorPhone} — ignored`,
-        );
-      }
-    }
-
-    // ── INTERACTION CONTRACT — @Match Time tag gate ──────────────────
-    //    ACT WITHOUT A TAG only for a player's OWN clear self-attendance.
-    //    Everything else MT could DO or ANSWER (questions, team ops,
-    //    moving/benching OTHER players, reminders, stats, payment, score)
-    //    requires an explicit @Match Time mention. Untagged → noise: no
-    //    action, no reply, no reaction, DB untouched. Keeps MT quiet on
-    //    banter and predictable about when it speaks. (The squad-from-
-    //    list admin pipeline stays tag-free — it never reaches here.)
-    //   `addressedByRecruit` is the ONE widening (2026-09-01): an admin's
-    //   recruit command is a direct instruction to MatchTime, so the rest
-    //   of that same message is addressed to it too. Narrow, admin-only,
-    //   and revertible by flipping RECRUIT_COMMAND_IMPLIES_ADDRESSED —
-    //   `actionRequiresTag` itself is untouched.
-    if (
-      actionRequiresTag(verdict) &&
-      !messageTagsBot(msg) &&
-      !addressedByRecruit.has(msg.waMessageId)
-    ) {
-      await recordAnalysis({
-        orgId: org.id,
-        groupId: body.groupId,
-        msg,
-        handledBy: "ignored",
-        intent: "noise",
-        action: null,
-        confidence: 1,
-        reasoning: `interaction-contract: "${verdict.intent}" needs @Match Time tag; message untagged — suppressed`,
-        authorUserId: sender.userId,
-        authorName: msg.authorName ?? null,
-      });
-      results.push({
-        waMessageId: msg.waMessageId,
-        handledBy: "ignored",
-        intent: "noise",
-        react: null,
-        reply: null,
-      });
-      continue;
-    }
-
-    // ── Attendance OFF (MoM/ratings-only org, e.g. Sutton Lads): never
-    //    track the squad. Drop attendance-class verdicts so the IN/OUT
-    //    backfills below can't force a registration, and the bot stays
-    //    silent on squad chatter. Stats/MoM/rating replies fall through
-    //    untouched. Pairs with ATTENDANCE_OFF_OVERRIDE in the analyzer
-    //    prompt (Kemal 2026-06-08: MT was posting "0/14 — need 14
-    //    players" to a group that doesn't track attendance).
-    if (
-      !attendanceOn &&
-      (verdict.intent === "in" ||
-        verdict.intent === "out" ||
-        verdict.intent === "replacement_request")
-    ) {
-      await recordAnalysis({
-        orgId: org.id,
-        groupId: body.groupId,
-        msg,
-        handledBy: "ignored",
-        intent: verdict.intent,
-        action: null,
-        confidence: 1,
-        reasoning: "attendance feature off — squad not tracked",
-        authorUserId: sender.userId,
-        authorName: msg.authorName ?? null,
-      });
-      results.push({
-        waMessageId: msg.waMessageId,
-        handledBy: "ignored",
-        intent: verdict.intent,
-        react: null,
-        reply: null,
-      });
-      continue;
-    }
-
-    // ── COLOUR SWAP: "swap/switch/flip the colours", "swap red and
-    //    yellow" — flip the team labels, keep the exact same player
-    //    groupings. Deterministic so it never hits the generate_teams
-    //    path (which would rebalance into different teams). Runs before
-    //    the player-swap seatbelt and before any LLM verdict is applied.
-    {
-      const colourResult = await handleColorSwapIfApplicable(org.id, msg.body);
-      if (colourResult) {
-        await recordAnalysis({
-          orgId: org.id,
-          groupId: body.groupId,
+    //   • No tag gate. `answer-batch.ts` requires `m.tagged`
+    //     unconditionally and `admin-ops-engine-batch.ts` applies the
+    //     contract per action; `score` is EXCLUDED from ACTIONY_INTENTS
+    //     by name (`interaction-contract.ts:125-129`), so a gate here
+    //     would refuse every real "we won 5-3". Re-applying it would be
+    //     a second copy of a policy that already ran.
+    //   • No feature gate. Each runner reads the org's features out of
+    //     its own `SquadState` load and owns nothing when its feature is
+    //     off, which is strictly better than this branch checking after
+    //     the write.
+    //   • No unresolved-sender nudge. That nudge exists for a lost
+    //     ATTENDANCE change ("message understood, action silently not
+    //     taken") and step 6's branch above still applies it. A question
+    //     or a score from an unresolved sender is answered on purpose —
+    //     `score-engine-batch.ts`'s header: "losing the score entirely
+    //     is a worse failure mode".
+    //   • No squad-post marker. Attached after the loop, once, to
+    //     whichever result speaks last.
+    // `admin_ops` is looked up into its OWN binding rather than being
+    // folded into the `??` chain, so the recruit fields keep their real
+    // types: a `"recruitRequest" in x` test over a three-way union
+    // narrows to "has the key", not to the member that declares it, and
+    // `recruitLookbackMatches` comes back as `{}`.
+    const adminOutcome = adminOpsBatch?.outcomes.get(msg.waMessageId);
+    const stepSeven =
+      answerBatch?.outcomes.get(msg.waMessageId) ??
+      scoreBatch?.outcomes.get(msg.waMessageId) ??
+      teamOpsBatch?.outcomes.get(msg.waMessageId) ??
+      adminOutcome;
+    if (stepSeven) {
+      // An admin's recruit ask, deferred to the batch-final pass with
+      // its clamped lookback. `recruitLookbackMatches` is null when the
+      // ask did not state a number, and `inviteRecentPlayers` then uses
+      // its own default of 5.
+      if (adminOutcome?.recruitRequest) {
+        recruitRequests.push({
           msg,
-          handledBy: "llm",
-          intent: "team_colour_swap",
-          action: "colour-swap",
-          confidence: 1,
-          reasoning: colourResult.logReason,
-          authorUserId: sender.userId,
-          authorName: msg.authorName ?? null,
+          sender,
+          lookbackMatches: adminOutcome.recruitLookbackMatches ?? null,
         });
-        results.push({
-          waMessageId: msg.waMessageId,
-          handledBy: "llm",
-          intent: "team_colour_swap",
-          react: "✅",
-          reply: colourResult.reply,
-        });
-        continue; // never reach the generate_teams path
       }
-    }
-
-    // ── SEATBELT: "swap A with B" between two CONFIRMED players is a
-    //    TEAM swap, never a drop. The LLM's prompt has a forceful
-    //    "swap X with Y = X OUT" rule (built for attendance
-    //    replacements) that wrongly dropped Elvin 2026-05-19.
-    //    Deterministic guard: if the message is a swap/switch of two
-    //    people who are BOTH currently confirmed, we swap their teams
-    //    (or note it for when teams are generated) and SKIP the LLM
-    //    verdict entirely — it cannot drop anyone. A swap where one
-    //    side isn't playing is a genuine replacement → fall through.
-    {
-      const swapResult = await handleTeamSwapIfApplicable(org.id, msg.body);
-      if (swapResult) {
-        await recordAnalysis({
-          orgId: org.id,
-          groupId: body.groupId,
-          msg,
-          handledBy: "llm",
-          intent: "team_swap",
-          action: "team-swap",
-          confidence: 1,
-          reasoning: swapResult.logReason,
-          authorUserId: sender.userId,
-          authorName: msg.authorName ?? null,
-        });
-        results.push({
-          waMessageId: msg.waMessageId,
-          handledBy: "llm",
-          intent: "team_swap",
-          react: "✅",
-          reply: swapResult.reply,
-        });
-        continue; // never reach executeVerdict — no drop possible
+      // A write that threw says nothing at all (§3.2 S7, the 2026-05-15
+      // Erdal incident). The runner has already blanked the reply; this
+      // only labels the row so the failure is one query away rather than
+      // one log line away.
+      const writeFailed = "writeFailed" in stepSeven && stepSeven.writeFailed;
+      let reply = stepSeven.reply;
+      if (reply && nextMatchForReply) {
+        reply = enforceProximity(reply, nextMatchForReply.date);
       }
-    }
-
-    // ── Conditional-drop HOLD ────────────────────────────────────────
-    //    The sender offers to leave ONLY IF a replacement materialises
-    //    ("happy to drop if you can find someone"). Never auto-drop them.
-    //    Deterministic backstop to the prompt rule — double-gated: only
-    //    when the verdict already treats this as a drop AND the text is
-    //    clearly conditional, and only on the sender's latest message.
-    //    (Kemal 2026-06-09: Erdal dropped on "If u can make happy to drop".)
-    if (
-      sender.userId &&
-      (verdict.registerAttendance === "OUT" ||
-        verdict.intent === "out" ||
-        verdict.intent === "replacement_request") &&
-      looksLikeConditionalDrop(msg.body) &&
-      latestIdxByAuthor.get(sender.userId) === i
-    ) {
-      const first = (sender.name ?? "").split(" ")[0] || "you";
-      const reply = `Thanks ${first} — noted 🙏 You're still in; if someone needs the spot I'll take you up on it.`;
       await recordAnalysis({
         orgId: org.id,
         groupId: body.groupId,
         msg,
-        handledBy: "llm",
-        intent: "conditional_out",
-        action: "hold",
+        handledBy: writeFailed ? "error" : ownerOf.get(msg.waMessageId) ?? "llm",
+        intent: stepSeven.intent,
+        action: stepSeven.action,
         confidence: 1,
-        reasoning: "conditional drop — held; no replacement confirmed yet",
+        reasoning: stepSeven.reasoning,
         authorUserId: sender.userId,
         authorName: msg.authorName ?? null,
       });
       results.push({
         waMessageId: msg.waMessageId,
-        handledBy: "llm",
-        intent: "conditional_out",
-        react: "🤝",
+        handledBy: writeFailed ? "error" : "llm",
+        intent: stepSeven.intent,
+        react: writeFailed ? null : stepSeven.react,
         reply,
+        reasoning: stepSeven.reasoning,
       });
-      continue; // never reach the drop path
+      continue;
     }
 
-    // ═════════════════════════════════════════════════════════════════
-    // §10 STEP 6 — THE THREE SEATBELTS THIS STEP DELETES
-    // ═════════════════════════════════════════════════════════════════
+    // ── NOBODY OWNED IT ─────────────────────────────────────────────
     //
-    // Step 6 says: "Delete the OUT net, the IN net, the bench-demote net,
-    // and both prose-parsing regexes." All three are below this line and
-    // ALL THREE ARE DEAD ON THE ENGINE PATH BY CONSTRUCTION: the
-    // `continue` at the top of this loop returns before any of them for
-    // every message `ATTENDANCE_ENGINE_ENABLED` owns, and each one's
-    // only input is a field the engine's schemas do not contain.
-    // `pipeline/__tests__/extractors.test.ts` asserts that absence
-    // route by route: no `intent`, no `registerAttendance`, no
-    // `registerFor`, no `react`, no `reply`, no `reasoning`, on any of
-    // the three routes step 6 owns. The error each net catches is not
-    // merely unlikely there; it is unrepresentable.
+    // This is where "fall back to the analyzer" used to point, and the
+    // whole of §10 step 8's risk lives in these six lines.
     //
-    // WHY THEY ARE STILL PHYSICALLY HERE, and this is a deliberate
-    // deviation from the step's wording:
+    // MatchTime says NOTHING to the group. That is §11.5's accepted
+    // loss, named in advance: "a router with nine routes and an engine
+    // with explicit rules will do nothing instead… the club will
+    // experience it as 'the bot got dumber' before they experience it
+    // as 'the bot stopped being wrong'." For a system writing to a paid
+    // squad, doing nothing is the right default.
     //
-    //   The flag ships DEFAULT OFF, and §10's revert for this step is
-    //   "flag flips the three routes back". With the flag off, the
-    //   analyzer decides every attendance message — so deleting these
-    //   would ship a regression in the DEFAULT configuration, and would
-    //   make the stated revert not a revert: it would restore the
-    //   analyzer without restoring the guards written for it. The
-    //   redundancy proof is real but CONDITIONAL, and the condition is
-    //   exactly what this flag controls.
-    //
-    //   §10 step 6's own instruction elsewhere is the tie-breaker: a
-    //   seatbelt that cannot be proven redundant is kept, and said so.
-    //   These cannot be proven redundant for the path that runs by
-    //   default. They become deletable the day the flag defaults ON and
-    //   the old attendance path is retired with step 7.
-    //
-    // Each net below carries its incident and its proof.
-    // ═════════════════════════════════════════════════════════════════
+    // But silence with no signal is §9's SIGNATURE failure, so the
+    // silence is recorded twice: once as an `AnalyzedMessage` row (so
+    // "did the pipeline eat an IN?" is a query, which is §11.1's third
+    // containment and §11.2's mitigation), and once — for the routes
+    // that were actually going somewhere — as an operator DM composed
+    // after the loop. `composeOperatorNote` drops `none` there; it is
+    // NOT dropped here, because the row is what makes the nightly
+    // `none`-bucket sweep possible.
+    unowned.push({
+      waMessageId: msg.waMessageId,
+      body: msg.body,
+      authorName: msg.authorName,
+      route: gateRouteById.get(msg.waMessageId),
+    });
+    await recordAnalysis({
+      orgId: org.id,
+      groupId: body.groupId,
+      msg,
+      handledBy: gatedIds.has(msg.waMessageId) ? GATED_HANDLED_BY : "ignored",
+      intent: "noise",
+      action: null,
+      confidence: 1,
+      reasoning:
+        `no owner: route=${gateRouteById.get(msg.waMessageId) ?? "(none returned)"}` +
+        (ownerDegradations.find((d) => d.includes(msg.waMessageId))
+          ? ` — ${ownerDegradations.find((d) => d.includes(msg.waMessageId))!.slice(0, 400)}`
+          : ""),
+      authorUserId: sender.userId,
+      authorName: msg.authorName ?? null,
+    });
+    results.push({
+      waMessageId: msg.waMessageId,
+      handledBy: "ignored",
+      intent: "noise",
+      react: null,
+      reply: null,
+    });
+  }
 
-    // ── IN intent safety net ─────────────────────────────────────────
-    //    §10 step 6: DIES on the engine path. Its incident is Najib,
-    //    2026-05-08 (`f61a897`): "In" at 22:27 with the squad 14/14, and
-    //    the model emitted `intent:"in"` with `registerAttendance:null`
-    //    and reasoning "this is odd". He lost his slot for a week.
-    //
-    //    PROOF OF REDUNDANCY. This net exists because `intent` and
-    //    `registerAttendance` are two separately-hallucinated fields
-    //    that can disagree. An `AttendanceFacts` claim has ONE
-    //    `polarity`, and no second field for it to contradict; there is
-    //    no `intent` in the schema at all. The engine's own answer to
-    //    "in at a full squad" is arithmetic it does itself — capacity
-    //    decides CONFIRMED vs BENCH — so the state the model found
-    //    "odd" is never something it is asked about. Corpus case
-    //    `S6-najib-in-at-full-squad`.
-    //
-    //    If the LLM classified this as "in" but emitted
-    //    registerAttendance:null with no state-collapse reason (i.e.
-    //    this IS the author's latest IN-shaped message in the batch),
-    //    force registerAttendance back to "IN". The prompt forbids
-    //    this combination but Haiku has been observed to skip it when
-    //    it finds the match state "odd" (e.g. squad full + bench
-    //    empty). Server is the source of truth — registerAttendance
-    //    is idempotent and capacity-aware, so this is always safe.
-    if (
-      verdict.intent === "in" &&
-      verdict.registerAttendance === null &&
-      sender.userId &&
-      // RELAY GUARD: a pure third-party ADD ("Add Rashad please", "my mate
-      // Kieran's in") carries intent:"in" + registerAttendance:null +
-      // registerFor[IN] — the author is relaying for OTHERS, not joining
-      // themselves. Do NOT force-register the SENDER here; the registerFor
-      // adds the named players below. (When the author IS also joining, the
-      // LLM sets registerAttendance:"IN" explicitly — "me and Ahmet both
-      // in" — so this guard never strips a genuine self-join.) Critical now
-      // that IN-adds are tag-free: a casual "add X" from a non-player must
-      // never silently register the SENDER on a paid match.
-      !(verdict.registerFor && verdict.registerFor.length > 0)
-    ) {
-      const latestIdx = latestIdxByAuthor.get(sender.userId);
-      if (latestIdx === i) {
-        console.warn(
-          `[analyze] LLM emitted intent:"in" with registerAttendance:null for ${sender.name} (${msg.waMessageId}). ` +
-            `Forcing registerAttendance to "IN" — reasoning was: ${verdict.reasoning}`,
-        );
-        verdict = { ...verdict, registerAttendance: "IN" };
-      }
-    }
-
-    // ── OUT intent safety net ────────────────────────────────────────
-    //    §10 step 6: DIES on the engine path, and this is the one the
-    //    doc calls out by name — "regex over `reasoning`", the first of
-    //    the two prose-parsing regexes (the patterns themselves live in
-    //    `lib/out-safety-net.ts` since `710e1fd`). Its incident is
-    //    Mojib/Habib, 2026-05-26 (`f35dfe6`): "anyone able to replace me
-    //    and habibi tonight?" dropped Habib and left Mojib in.
-    //
-    //    PROOF OF REDUNDANCY, in three parts, because this guard fails
-    //    in three distinct ways that all become impossible:
-    //
-    //    1. THE ASK NO LONGER CANNIBALISES THE DROP. The whole failure
-    //       is that `replacement_request` is ONE intent trying to carry
-    //       two facts, so the recruit half wins and the sender's own OUT
-    //       is never emitted. In the facts schema they are separate
-    //       fields — a `Claim{subject:"sender", polarity:"out"}` and
-    //       `sideRequests:["recruit"]` — and the extractor prompt says
-    //       so explicitly ("Asking for cover is NOT a condition …
-    //       report the out with contingent FALSE, plus the 'recruit'
-    //       side request"). One cannot consume the other.
-    //    2. THERE IS NO PROSE TO PARSE. `forceOut` is
-    //       `strongDrop && !notDropping` over `verdict.reasoning`. The
-    //       extractor emits no `reasoning` field, so the regexes have
-    //       no input; the same fact is now `polarity` and `contingent`.
-    //    3. PER-PLAYER ATTRIBUTION, WHICH NO REGEX COULD EVER HAVE.
-    //       §3.2's 2026-09-01 note is explicit: `outSafetyNetSignals`
-    //       reads ONE free-text blob for a message about TWO players,
-    //       and in a real failing run `strongDrop` matched on Habib's
-    //       clause while `notDropping` matched on Mojib's, so the veto
-    //       won and the sender it existed to protect stayed in. "The
-    //       guard cannot tell which player a phrase is about, and no
-    //       amount of regex work gives it that. Step 6 deleting this
-    //       class of guard is the fix." The engine has one claim PER
-    //       PERSON, each with its own polarity and its own contingency.
-    //       Corpus case `S12-mojib-replacement-request-drops-sender`,
-    //       and PR #33's `PR33-recruit-ask-must-not-swallow-the-drop`.
-    //
-    //    Mirror of the IN safety net above, for the Mojib/Habib 2026-05-26
-    //    failure: LLM classified "replace me and Habib" as
-    //    intent:"replacement_request" with reasoning saying "both are
-    //    definite drops" — but only emitted registerFor for Habib and
-    //    NO registerAttendance for the sender (Mojib). Result: Habib
-    //    dropped, Mojib silently stayed in the squad. Same shape as the
-    //    Najib IN-skip from 2026-05-08, opposite direction. When intent is
-    //    replacement_request and registerAttendance isn't "OUT" (null or
-    //    anything else), force OUT for the sender — UNLESS reasoning
-    //    explicitly says they're staying in / just running late (the
-    //    "type b" cover-request flavour). Server-side, deterministic,
-    //    only on the sender's latest message in the batch. Safe because
-    //    cancelAttendance is idempotent.
-    if (
-      verdict.intent === "replacement_request" &&
-      verdict.registerAttendance !== "OUT" &&
-      sender.userId
-    ) {
-      const latestIdx = latestIdxByAuthor.get(sender.userId);
-      if (latestIdx === i) {
-        // OLD rule (Mojib fix 2026-05-26): force OUT unless reasoning
-        // hedged with "still in / running late". That fired on Kemal
-        // 2026-05-28 — "@all we need more players pls" → LLM correctly
-        // emitted null with reasoning "tentative/group-level rather than
-        // a personal drop, so registerAttendance stays null" → didn't
-        // match my regex → wrongly dropped him.
-        //
-        // NEW rule: only override when reasoning shows a STRONG signal
-        // that the sender themselves is dropping. If reasoning shows
-        // ANY "I deliberately left this null" signal (hedging, type-b,
-        // "stays null", "tentative", "group-level"), respect it. Kemal's
-        // case doesn't fire because "tentative/group-level" matches
-        // notDropping.
-        //
-        // The signals live in lib/out-safety-net.ts, pinned against the
-        // real production reasoning strings. They have to: this guard was
-        // DEAD from the day it shipped until 2026-09-01. Mojib's actual
-        // reasoning was "Both are definite drops" — `drop\b` never
-        // matched the plural — and, independently, "chase nudge" in the
-        // same sentence (describing the REPLY, not his attendance) hit
-        // notDropping and would have vetoed it anyway. The comment that
-        // used to sit here claimed the opposite, which is how it survived
-        // three months unnoticed.
-        if (shouldForceSenderOut(verdict.reasoning)) {
-          console.warn(
-            `[analyze] LLM emitted intent:"replacement_request" with registerAttendance:${JSON.stringify(verdict.registerAttendance)} for ${sender.name} (${msg.waMessageId}). ` +
-              `Reasoning has strong-drop signal AND no opt-out → forcing OUT. Reasoning: ${verdict.reasoning}`,
-          );
-          verdict = { ...verdict, registerAttendance: "OUT" };
-        }
-      }
-    }
-
-    // ── BENCH-DEMOTE safety net (2026-06-11, Salman Shelly incident) ──
-    //    §10 step 6: DIES on the engine path. This is the SECOND
-    //    prose-parsing regex — it reads `verdict.reply`, the model's
-    //    English, and SYNTHESISES an attendance write from it. §1 of the
-    //    redesign doc: "That is not an interface. It is a hope."
-    //
-    //    PROOF OF REDUNDANCY. The net reverse-engineers a write from a
-    //    sentence the model wrote. On the engine path the model writes
-    //    no sentences: `compose.ts` renders every utterance from the
-    //    PROJECTED state, after the engine has decided, so a bench move
-    //    can only be ANNOUNCED if a write was PROPOSED. The direction
-    //    of causation is reversed, which makes "the reply says it and
-    //    the database does not" — the whole S7/S8 failure class —
-    //    unrepresentable rather than merely rare (§6.4, closing
-    //    cold-audit 1.1 by construction).
-    //
-    //    And the underlying misread is separately gone: the incident is
-    //    the model reading an admin's demote as the SENDER's own
-    //    `intent:"in"`. `subject` is a schema field, not an inference,
-    //    and `engine.ts` requires `senderIsAdmin` before any third-party
-    //    BENCH. Corpus case `S8-salman-admin-demote-to-bench`.
-    //
-    //    Admin "move X to the bench" must demote a CONFIRMED player to
-    //    BENCH and free their slot. The LLM reasons this correctly but has
-    //    been seen to misclassify it as the sender's own intent:"in" and
-    //    leave registerFor empty — so the move is announced in the reply
-    //    ("Salman has moved to the bench") but never written: the player
-    //    stays CONFIRMED and the count reads the contradictory "14/14 with
-    //    1 slot open". When the reply asserts a named player moved to the
-    //    bench but no registerFor BENCH entry exists for them, synthesise
-    //    one from the confirmed roster so the demote actually happens.
-    //    Conservative: only fires on assertive "<Name> … moved to/benched"
-    //    phrasing AND when the name resolves to exactly one CONFIRMED
-    //    player (someone already benched/dropped won't match → no-op).
-    if (
-      verdict.reply &&
-      !(verdict.registerFor ?? []).some((e) => e.action === "BENCH")
-    ) {
-      const m = verdict.reply.match(
-        /\b(\p{Lu}[\p{L}'’.-]*(?:\s+\p{Lu}[\p{L}'’.-]*){0,2})\s+(?:has\s+|have\s+|is\s+|are\s+|’s\s+|'s\s+)?(?:now\s+)?(?:(?:moved|been\s+moved|dropped\s+to|sat)\s*(?:to\s+|on\s+|down\s+to\s+)?(?:the\s+)?bench|benched)\b/u,
-      );
-      if (m) {
-        const matchForOrg = await findRegistrationMatch(org.id);
-        if (matchForOrg) {
-          const confirmedNow = await db.attendance.findMany({
-            where: { matchId: matchForOrg.id, status: "CONFIRMED" },
-            include: { user: { select: { id: true, name: true } } },
-          });
-          const want = normaliseName(m[1]);
-          const hits = confirmedNow.filter((a) => {
-            const n = normaliseName(a.user.name ?? "");
-            if (!n) return false;
-            return (
-              n === want ||
-              n.startsWith(want + " ") ||
-              want.startsWith(n + " ") ||
-              n.split(" ")[0] === want
-            );
-          });
-          if (hits.length === 1) {
-            console.warn(
-              `[analyze] bench-demote safety net: reply claims "${m[1]}" → bench but no registerFor BENCH was emitted. ` +
-                `Forcing BENCH for ${hits[0].user.name} (${msg.waMessageId}). Reasoning: ${verdict.reasoning}`,
-            );
-            verdict = {
-              ...verdict,
-              registerFor: [
-                ...(verdict.registerFor ?? []),
-                { name: hits[0].user.name ?? m[1], action: "BENCH" },
-              ],
-            };
-          }
-        }
-      }
-    }
-
-    // ── BANTER-DROP guard (2026-06-12, Zeeshan/Sutton Lads incident) ──
-    //    A third-party "X is out" must not drop X when X is right there
-    //    in the same batch talking — banter, wind-ups and mock votes
-    //    ("Zeeshan is out 😂") were misread as real drops while the
-    //    target was still protesting. Deterministic rule: a registerFor
-    //    OUT for a player who AUTHORED a message in this very batch is
-    //    only honoured when (a) the sender is an org admin (real roster
-    //    surgery), or (b) the target's own verdict in the batch
-    //    corroborates the drop (they said they're out themselves).
-    //    Otherwise strip the OUT entry — the player can speak for
-    //    themselves — and silence the reply so the bot never announces
-    //    a drop it refused to make.
-    if (verdict.registerFor?.some((e) => e.action === "OUT")) {
-      let senderIsAdmin = false;
-      if (sender.userId) {
-        const mem = await db.membership.findUnique({
-          where: { userId_orgId: { userId: sender.userId, orgId: org.id } },
-          select: { role: true },
-        });
-        senderIsAdmin = mem?.role === "OWNER" || mem?.role === "ADMIN";
-      }
-      if (!senderIsAdmin) {
-        const sameName = (a: string, b: string): boolean => {
-          const na = normaliseName(a);
-          const nb = normaliseName(b);
-          if (!na || !nb) return false;
-          return (
-            na === nb ||
-            na.startsWith(nb + " ") ||
-            nb.startsWith(na + " ") ||
-            na.split(" ")[0] === nb.split(" ")[0]
-          );
-        };
-        const kept: NonNullable<AnalysisVerdict["registerFor"]> = [];
-        const strippedNames: string[] = [];
-        for (const entry of verdict.registerFor) {
-          if (entry.action !== "OUT") {
-            kept.push(entry);
-            continue;
-          }
-          let targetSpokeInBatch = false;
-          let targetCorroboratesOut = false;
-          for (let j = 0; j < fresh.length; j++) {
-            if (j === i) continue;
-            const other = senderById.get(fresh[j].waMessageId);
-            const otherName = other?.name ?? fresh[j].authorName ?? "";
-            if (!otherName || !sameName(otherName, entry.name)) continue;
-            targetSpokeInBatch = true;
-            // §10 step 6: the target's own message may have been decided
-            // by the ENGINE, in which case `verdicts[j]` is the
-            // all-nulls placeholder and reading it alone would report
-            // "the target spoke and did not corroborate" for someone who
-            // had just dropped themselves — stripping a drop that the
-            // database has already made. Ask the decider that actually
-            // handled message j.
-            const engineJ = engineBatch?.outcomes.get(fresh[j].waMessageId);
-            if (engineJ) {
-              if (engineJ.intent === "out") targetCorroboratesOut = true;
-              continue;
-            }
-            const vj = verdicts[j];
-            if (vj && (vj.intent === "out" || vj.registerAttendance === "OUT")) {
-              targetCorroboratesOut = true;
-            }
-          }
-          if (targetSpokeInBatch && !targetCorroboratesOut) {
-            strippedNames.push(entry.name);
-          } else {
-            kept.push(entry);
-          }
-        }
-        if (strippedNames.length > 0) {
-          console.warn(
-            `[analyze] banter-drop guard: stripped registerFor OUT for ${strippedNames.join(", ")} — ` +
-              `target is active in this batch, sender isn't admin, no self-drop corroboration (${msg.waMessageId}). ` +
-              `Reasoning was: ${verdict.reasoning}`,
-          );
-          verdict = {
-            ...verdict,
-            registerFor: kept.length > 0 ? kept : null,
-            // The reply almost certainly narrates the drop we just
-            // refused — posting it would be a lie. Stay silent; if other
-            // squad-state replies exist in the batch the consolidated
-            // status post below shows the truth anyway.
-            reply: null,
-            react: verdict.react === "👋" ? null : verdict.react,
-          };
-        }
-      }
-    }
-
-    if (
-      verdict.intent === "generate_teams_request" &&
-      i !== lastTeamsRequestIdx
-    ) {
-      // Earlier duplicate generate-teams request — react ⚽ but don't
-      // fire a second post. The last one in the batch handles team
-      // generation for everyone.
-      verdict = {
-        ...verdict,
-        intent: "noise",
-        reply: null,
-        react: "⚽",
-        teamOverrides: null,
-        includeNames: null,
-        teamNames: null,
-      };
-    }
+  // ── THE OPERATOR NOTE — §9's PARTIAL-RESPONSE NET, TYPED ───────────
+  //
+  //   The successor to the "LLM dropped N messages" DM that stood before
+  //   the loop until this change. §9 keeps that seatbelt and says how to
+  //   fix it: "today it prefix-matches free-text `reasoning`; under the
+  //   new design it matches a typed error, which is what it always
+  //   wanted to be." The typed fact is that an id reached the end of the
+  //   batch with no owner.
+  //
+  //   Same audience, same 1-hour dedupe, same "act manually if any were
+  //   attendance changes" close. Two things changed and both are
+  //   improvements: it can no longer be defeated by the model phrasing
+  //   its failure differently, and it no longer fires for banter,
+  //   because `composeOperatorNote` drops every `none` route (69.3% of
+  //   real traffic — a DM per banter message is an ignored surface,
+  //   which is the same silence with extra steps).
+  //
+  //   Best-effort by construction: the note is the last thing that
+  //   happens to a batch that already replied, so a failure here must
+  //   never cost the group its reply.
+  if (unowned.length > 0) {
     try {
-      const executed = await executeVerdict({
-        verdict,
-        user: sender.userId ? { id: sender.userId, name: sender.name } : null,
-        orgId: org.id,
+      const note = composeOperatorNote({
+        orgName: org.name,
+        messages: unowned,
+        degradations: ownerDegradations,
+        // A club that switched attendance off must not be paged about
+        // attendance. `attendance-engine-batch.ts` DISOWNS those
+        // messages when the feature is off (it returns `empty()`), so
+        // without this they would arrive here looking like a failure.
+        // This IS an extra `findUnique` — `getOrgFeatures` does no
+        // caching, and I checked rather than assumed, having just spent
+        // a whole pass deleting comments that asserted things nobody
+        // had verified. It is affordable precisely here: the block only
+        // runs when `unowned.length > 0`, and it already does a
+        // `membership.findMany` plus one `botJob.findFirst` per admin.
+        // See `operator-note.ts`'s header — the claim that the caller
+        // filtered these out was false until 2026-09-06.
+        features: { attendance: (await getOrgFeatures(org.id)).attendance },
       });
-      // ── Honest ack ────────────────────────────────────────────────
-      //   A confirmation is NEVER sent for a write that did not land.
-      //   Only a write that actually THREW counts as a failure here: an
-      //   OUT from a player with no row returns before any write, and a
-      //   repeat IN is idempotent — both are legitimate no-ops and must
-      //   not get an apology. Same rule as the DM path (9f19040) and
-      //   lib/out-of-band-self-attendance.ts.
-      const ack = resolveAttendanceAck({
-        failures: executed.attendanceFailures,
-        react: executed.react,
-        reply: executed.reply,
-        senderName: sender.name ?? msg.authorName ?? null,
-      });
-      if (ack.failed) {
-        // Operator-visible: this is an incident, not a warning.
-        console.error(attendanceFailureLog(executed.attendanceFailures), "for", msg.waMessageId);
-        // Store what HAPPENED, not what was intended — an "IN" row for a
-        // write that threw is exactly what made this invisible in the
-        // data as well as in the chat.
-        await recordAnalysis({
-          orgId: org.id,
-          groupId: body.groupId,
-          msg,
-          handledBy: "error",
-          intent: verdict.intent,
-          action: attendanceFailureAction(executed.attendanceFailures),
-          confidence: verdict.confidence,
-          reasoning: attendanceFailureLog(executed.attendanceFailures).slice(0, 2000),
-          authorUserId: sender.userId,
-          authorName: msg.authorName ?? null,
+      if (note.text) {
+        console.warn(
+          `[analyze] ${note.noteIds.length} message(s) reached the end of the batch with no owner: ` +
+            note.noteIds.join(", "),
+        );
+        const admins = await db.membership.findMany({
+          where: { orgId: org.id, role: { in: ["ADMIN", "OWNER"] }, leftAt: null },
+          include: { user: { select: { id: true, phoneNumber: true, name: true } } },
         });
-        results.push({
-          waMessageId: msg.waMessageId,
-          handledBy: "error",
-          intent: verdict.intent,
-          react: null,
-          reply: ack.reply,
-          reasoning: verdict.reasoning,
-        });
-        continue;
+        const since = new Date(Date.now() - 60 * 60 * 1000); // 1h dedupe window
+        for (const m of admins) {
+          if (!m.user.phoneNumber) continue;
+          const phone = m.user.phoneNumber.replace(/^\+/, "");
+          const recentlySent = await db.botJob.findFirst({
+            where: {
+              orgId: org.id,
+              kind: "dm",
+              phone,
+              text: { contains: OPERATOR_NOTE_MARKER },
+              createdAt: { gte: since },
+            },
+            select: { id: true },
+          });
+          if (recentlySent) continue; // already told this admin in the last hour
+          await db.botJob.create({
+            data: { orgId: org.id, kind: "dm", phone, text: note.text },
+          });
+        }
       }
-      const { react, reply } = ack;
-      // Apply the same proximity post-processor the chase composer uses
-      // so reactive replies also rewrite "tonight" → "Tue 28 Apr" and
-      // any 20:30/21:30-style UTC-vs-BST mistakes.
-      //
-      // NOTHING ELSE HAPPENS TO THE TEXT HERE ANY MORE (§10 step 4,
-      // 2026-09-01). Everything this reply says about the SQUAD —
-      // roster, count, bench, who moved where — is composed from the
-      // database in the batch-final pass below, after every write in
-      // the batch has landed. The four regex post-processors that used
-      // to run here (`enforceCanonicalRoster`,
-      // `rewriteOverconfidentPromotion` behind an open BenchSlotOffer,
-      // the offer-independent promotion strip, and the per-message
-      // fresh-attendance query the three of them needed) all patched
-      // the model's words after it had already written the wrong ones.
-      // Composition means it does not write them.
-      let cleanReply = reply;
-      if (cleanReply && nextMatchForReply) {
-        cleanReply = enforceProximity(cleanReply, nextMatchForReply.date);
-      }
-      // ── #1: never silently drop an unresolved attendance message ──
-      //   The whole Najib/Erdal/Baki failure class is "message
-      //   understood, action silently not taken". The worst variant:
-      //   the SENDER themselves couldn't be resolved (ambiguous short
-      //   pushname like "ba" → Baki AND Başar), so an IN / OUT / drop
-      //   vanished with zero signal for 13 days. When that happens we
-      //   now (a) leave a breadcrumb the admin queue surfaces
-      //   (authorName is persisted by recordAnalysis), and (b) post a
-      //   single, deduped, plain-English clarification to the group so
-      //   it's caught in minutes, not when someone eventually notices.
-      const attendanceRelevant =
-        verdict.registerAttendance === "IN" ||
-        verdict.registerAttendance === "OUT" ||
-        verdict.registerAttendance === "BENCH" ||
-        verdict.intent === "replacement_request";
-      const nudge = await unresolvedSenderNudge({
-        senderResolved: !!sender.userId,
-        attendanceRelevant,
-        matchId: nextMatchForReply?.id ?? null,
-        authorName: msg.authorName,
-        dropping:
-          verdict.registerAttendance === "OUT" || verdict.intent === "replacement_request",
-      });
-      if (nudge.applies) cleanReply = nudge.reply;
-
-      await recordAnalysis({
-        orgId: org.id,
-        groupId: body.groupId,
-        msg,
-        // The AUDIT field, not the wire field. A gated message is
-        // labelled for what actually happened to it, so the nightly
-        // `none`-bucket sweep and the admin log can find it. The HTTP
-        // response below still says `llm`: `whatsapp-bot/src/api.ts:325`
-        // types that as a closed union, the Pi only special-cases
-        // `deduped` and `error`, and that file is out of scope for this
-        // step.
-        handledBy: gatedIds.has(msg.waMessageId) ? GATED_HANDLED_BY : "llm",
-        intent: verdict.intent,
-        action:
-          verdict.registerAttendance ??
-          (react || cleanReply ? (react ? "react" : "reply") : "none"),
-        confidence: verdict.confidence,
-        reasoning: verdict.reasoning,
-        authorUserId: sender.userId,
-        authorName: msg.authorName ?? null,
-      });
-      // Queue this result for the post-batch reaction ↔ status audit
-      // when the react claims something about the SENDER's own row.
-      if (
-        sender.userId &&
-        nextMatchForReply &&
-        react !== null &&
-        REGISTRATION_STATUS_REACTS.has(react) &&
-        !(verdict.registerFor && verdict.registerFor.length > 0) &&
-        !verdict.benchConfirmation
-      ) {
-        senderReactAudit.push({ idx: results.length, userId: sender.userId });
-      }
-      results.push({
-        waMessageId: msg.waMessageId,
-        handledBy: "llm",
-        intent: verdict.intent,
-        react,
-        reply: cleanReply,
-        reasoning: verdict.reasoning,
-      });
     } catch (err) {
-      console.error("[analyze] verdict execution failed:", err, "for", msg.waMessageId);
-      await recordAnalysis({
-        orgId: org.id,
-        groupId: body.groupId,
-        msg,
-        handledBy: "error",
-        intent: verdict.intent,
-        action: null,
-        confidence: verdict.confidence,
-        reasoning: err instanceof Error ? err.message : String(err),
-      });
-      results.push({
-        waMessageId: msg.waMessageId,
-        handledBy: "error",
-        intent: verdict.intent,
-        react: null,
-        reply: null,
-      });
+      console.error("[analyze] failed to dispatch the operator note:", err);
     }
   }
 
@@ -2361,7 +1956,26 @@ async function handleAnalyzeRequest(request: Request) {
       const candidates: number[] = [];
       for (let i = 0; i < results.length; i++) {
         const r = results[i];
-        if (!r.reply || r.handledBy !== "llm") continue;
+        // `fast-path` is admitted for EXACTLY ONE intent, and narrowly.
+        //
+        // §10 step 8 moved the pasted-roster registration to a
+        // deterministic peel that runs before the router
+        // (`pasted-roster-registration.ts`), and its ack is the
+        // `[SQUAD]` marker — the same "put the real post here" signal
+        // every other squad-changing path uses. Without this clause the
+        // filter below dropped it, the last-line-of-defence strip then
+        // turned the marker into `null`, and a paste that had just
+        // registered four players said NOTHING. Found by asking what
+        // renders the marker rather than by assuming the composer sees
+        // every reply.
+        //
+        // Widening the filter to all of `fast-path` would have been the
+        // shorter fix and the wrong one: the help reply, the stats-blast
+        // ack and the guest-name ask are also `fast-path`, and none of
+        // them should be re-composed into a roster.
+        const pastedRosterAck = r.handledBy === "fast-path" && r.intent === "pasted_roster";
+        if (!r.reply) continue;
+        if (r.handledBy !== "llm" && !pastedRosterAck) continue;
         if (r.intent === "generate_teams_request" || r.intent === "show_teams_request") continue;
         candidates.push(i);
       }
@@ -2437,7 +2051,8 @@ async function handleAnalyzeRequest(request: Request) {
     // Only the LAST request fires, mirroring the generate_teams_request
     // dedupe above. Two admins asking in one batch must not produce two
     // DM blasts to the same people.
-    const { msg: recruitMsg } = recruitRequests[recruitRequests.length - 1];
+    const { msg: recruitMsg, lookbackMatches } =
+      recruitRequests[recruitRequests.length - 1];
     if (recruitRequests.length > 1) {
       console.log(
         `[analyze] ${recruitRequests.length} recruit requests in one batch — firing the last only`,
@@ -2445,7 +2060,15 @@ async function handleAnalyzeRequest(request: Request) {
     }
     try {
       const { inviteRecentPlayers } = await import("@/lib/recruit");
-      const r = await inviteRecentPlayers(org.id);
+      // §10 step 8: the lookback the ADMIN asked for, already clamped to
+      // `[1, 12]` by `admin-ops-engine.ts` against `recruit.ts`'s own
+      // ceiling. Null when the ask did not name a number (and always,
+      // for step 6's `sideRequests: ["recruit"]` shape, which carries no
+      // number), in which case `inviteRecentPlayers` uses its default of
+      // 5 — exactly what the shipped call did. A mass DM is how the
+      // WhatsApp account gets banned, so the clamp is applied where the
+      // number is read and re-applied by `resolveLookbackMatches` here.
+      const r = await inviteRecentPlayers(org.id, lookbackMatches ?? undefined);
       const recruitReply = !r.ok
         ? r.reason ?? "Couldn't do that right now."
         : r.invited && r.invited > 0
@@ -2565,34 +2188,37 @@ async function handleAnalyzeRequest(request: Request) {
     select: { date: true },
   });
 
-  // ── Shadow window-analyzer ────────────────────────────────────────
-  //   Runs AFTER the response is sent — zero added Pi latency.
-  //   Persists a WindowVerdict row with a single-diff verdict for the
-  //   whole batch so we can compare against the live per-message
-  //   verdicts on /admin/shadow. Never writes to attendance; errors
-  //   logged and swallowed. Daily cost-capped via SHADOW_DAILY_USD_CAP
-  //   (default $5/day). See src/lib/window-analyzer.ts for context.
+  // ── THE SHADOW WINDOW-ANALYZER IS RETIRED (§10 step 7) ─────────────
   //
-  //   OFF unless SHADOW_ANALYZER_ENABLED=1. runShadowAnalysis enforces
-  //   that itself (it is the authority); the same check is repeated
-  //   here so a disabled shadow doesn't even schedule an after() task.
-  //   Nothing above this line depends on the shadow, so the response
-  //   and every verdict are identical either way.
-  if (fresh.length > 0 && isShadowAnalysisEnabled()) {
-    const shadowBatch = batchInputs;
-    const shadowHistory = history;
-    const orgId = org.id;
-    const groupId = body.groupId;
-    after(() =>
-      runShadowAnalysis({
-        orgId,
-        groupId,
-        messages: shadowBatch,
-        history: shadowHistory,
-        currentVerdictIds: shadowBatch.map((m) => m.waMessageId),
-      }),
-    );
-  }
+  //   "Migrate the rest… Retire the mega-prompt when the last route
+  //    leaves. RETIRE THE SHADOW."
+  //
+  //   `runShadowAnalysis` fired here via `after()` on every batch: a
+  //   second, entirely uncached `claude-sonnet-4-5` call over the same
+  //   window, writing a `WindowVerdict` row for `/admin/shadow` to diff
+  //   against the live per-message verdicts. §8.1 measured it at ~30% of
+  //   the whole analyzer bill.
+  //
+  //   It was a COMPARISON, and it compared against the mega-prompt. With
+  //   the mega-prompt deleted there is nothing on the other side of the
+  //   diff: it would spend a Sonnet call per batch to produce a verdict
+  //   no live path reads and no dashboard can contrast with anything.
+  //   §7.1 is fair to it — "its infrastructure is exactly right and is
+  //   the migration harness… building it was not wasted work; it was the
+  //   previous step of this same journey" — and this is the journey
+  //   arriving.
+  //
+  //   WHAT IS KEPT, deliberately:
+  //     • the `WindowVerdict` TABLE and every historical row in it. Three
+  //       months of shadow runs are a record of how this decision was
+  //       reached and are not ours to delete.
+  //     • `/admin/shadow`, which renders them.
+  //     • `api/cron/none-bucket-shadow`, which writes NEW `WindowVerdict`
+  //       rows and is a different mechanism entirely — §11.1's fourth
+  //       containment, "shadow the `none` bucket forever… the regression
+  //       detector the current architecture has never had". That one
+  //       matters MORE after this change, not less: it is now the only
+  //       thing watching for a real IN routed `none`.
 
   return NextResponse.json({
     ok: true,
@@ -3016,26 +2642,11 @@ async function createProvisionalByName(
   }
 }
 
-/**
- * Slot → emoji map for the bot's attendance reactions. Confirmed slots
- * 1-10 get the corresponding keycap. 11+ get ✅ — Unicode doesn't have
- * single-grapheme keycaps for 11+ and "1️⃣3️⃣" is two emojis (WhatsApp
- * reactions are one grapheme), so ⚽ used to be the fallback but it
- * camouflaged with player-emoji reactions. ✅ reads as "you're in" without
- * looking like a generic football react. Bench slots get 🪑. OUT gets 👋.
- */
-const KEYCAP: Record<number, string> = {
-  1: "1️⃣",
-  2: "2️⃣",
-  3: "3️⃣",
-  4: "4️⃣",
-  5: "5️⃣",
-  6: "6️⃣",
-  7: "7️⃣",
-  8: "8️⃣",
-  9: "9️⃣",
-  10: "🔟",
-};
+// `KEYCAP` is deleted with `executeVerdict` (§10 step 8). The
+// slot-number reactions it rendered are composed by
+// `pipeline/compose.ts` from the projected position, so the emoji and
+// the row it claims to describe are produced by the same pass and
+// cannot disagree.
 
 /**
  * Pick the right match for an attendance/bench mutation.
@@ -3083,927 +2694,48 @@ async function findRegistrationMatch(orgId: string) {
   return picked ?? null;
 }
 
-async function executeVerdict(args: {
-  verdict: AnalysisVerdict;
-  user: { id: string; name: string | null } | null;
-  orgId: string;
-}): Promise<{
-  react: string | null;
-  reply: string | null;
-  /** Every attendance write that THREW in this verdict. Empty means
-   *  everything either landed or was never attempted — the caller uses
-   *  this to decide whether the ack is honest (see
-   *  lib/attendance-write-outcome.ts). */
-  attendanceFailures: AttendanceWriteFailure[];
-}> {
-  const { verdict, user, orgId } = args;
-  let finalReact = verdict.react;
-  let finalReply = verdict.reply;
-  const attendanceFailures: AttendanceWriteFailure[] = [];
-
-  // ── Per-org feature gate ─────────────────────────────────────────
-  //   Map the verdict to the module it would exercise; if that module
-  //   is OFF for this org, do nothing (no react, no reply) — the bot
-  //   stays completely silent on that capability. This is how Amir's
-  //   Thursday group runs MoM + ratings only: attendance / bench /
-  //   team-balancing / reminders verdicts are no-ops there. Score
-  //   stays ungated — it's infrastructure that feeds MoM + ratings,
-  //   not a user-facing toggle.
-  {
-    const f = await getOrgFeatures(orgId);
-    const needs: FeatureKey | null = verdict.benchConfirmation
-      ? "bench"
-      : verdict.intent === "generate_teams_request" ||
-          verdict.intent === "show_teams_request"
-        ? "teamBalancing"
-        : verdict.intent === "reminder_request"
-          ? "reminders"
-          : verdict.registerAttendance ||
-              (verdict.registerFor && verdict.registerFor.length > 0) ||
-              verdict.intent === "in" ||
-              verdict.intent === "out" ||
-              verdict.intent === "replacement_request" ||
-              verdict.intent === "conditional_in"
-            ? "attendance"
-            : null;
-    if (needs && !f[needs]) {
-      return { react: null, reply: null, attendanceFailures };
-    }
-  }
-
-  // ── Tentative availability (conditional_in, flavour b) ───────────
-  //    PERSONAL-UNCERTAINTY conditionals ("maybe, I'll confirm later",
-  //    "in if my back holds up") classify as conditional_in with NO
-  //    attendance write (registerAttendance:null). Instead of leaving
-  //    the admin to chase manually, record the player as a MAYBE for
-  //    the active match and schedule a follow-up DM ~24h before kickoff
-  //    (TENTATIVE_FOLLOWUP_LEAD_MS — see lib/tentative-followup.ts).
-  //    Idempotent: one unresolved row per (match,user). Flavour (a)
-  //    standing-offer conditionals carry registerAttendance:"BENCH" and
-  //    fall through to the registerAttendance branch below — they get a
-  //    real bench slot, NOT a follow-up, so they're excluded here.
-  if (
-    verdict.intent === "conditional_in" &&
-    !verdict.registerAttendance &&
-    user
-  ) {
-    const matchForOrg = await findRegistrationMatch(orgId);
-    if (matchForOrg) {
-      // Best-effort: never let a recording hiccup change the bot's reply.
-      await recordTentative({
-        matchId: matchForOrg.id,
-        userId: user.id,
-        kickoff: matchForOrg.date,
-      }).catch((err) =>
-        console.error("[analyze] recordTentative failed:", err),
-      );
-    }
-    return { react: finalReact, reply: finalReply, attendanceFailures };
-  }
-
-  // ── Last-mile react rewrite for IN intent ────────────────────────
-  //    When a player says IN but they're already CONFIRMED/BENCH for
-  //    the match, the LLM correctly leaves registerAttendance null
-  //    (idempotent, no double-register). Without this block, the
-  //    LLM's literal 👍 would slip through and the player would see
-  //    a thumbs-up instead of the ✅/🪑 we use for registration. Run
-  //    BEFORE the registerAttendance/registerFor branches so they can
-  //    overwrite finalReact with their own (slot-aware) value.
-  if (verdict.intent === "in" && user && finalReact === "👍") {
-    const matchForOrg = await findRegistrationMatch(orgId);
-    if (matchForOrg) {
-      const att = await db.attendance.findUnique({
-        where: { matchId_userId: { matchId: matchForOrg.id, userId: user.id } },
-        select: { status: true },
-      });
-      if (att?.status === "CONFIRMED") finalReact = "✅";
-      else if (att?.status === "BENCH") finalReact = "🪑";
-    }
-  }
-
-  // ── Bench-confirmation reply ─────────────────────────────────────
-  //    When the LLM detects an answer to an open bench-prompt (the
-  //    bench user replied 👍/yes/no in the GROUP instead of reacting
-  //    to the DM), route to the same flow the reaction handler uses.
-  //    This supersedes any registerAttendance the LLM may have also
-  //    set — bench-confirmation outranks generic IN/OUT for users on
-  //    the open-prompt list.
-  if (verdict.benchConfirmation && user) {
-    const matchForOrg = await findRegistrationMatch(orgId);
-    if (matchForOrg) {
-      const result = await resolveBenchConfirmation({
-        matchId: matchForOrg.id,
-        userId: user.id,
-        decision: verdict.benchConfirmation === "yes",
-      });
-      // Server posts its own group announcement; suppress the LLM's
-      // reply for this verdict so we don't double-post. Simple
-      // semantic react: ✅ when confirmed, 👋 when declined.
-      if (result.kind === "confirmed") {
-        finalReact = "✅";
-        finalReply = null;
-      } else if (result.kind === "declined") {
-        finalReact = "👋";
-        finalReply = null;
-      }
-      // "ignored" (no open PBC found at execution time — race) falls
-      // through; nothing to do.
-      return { react: finalReact, reply: finalReply, attendanceFailures };
-    }
-  }
-
-  // ── Attendance IN/OUT ────────────────────────────────────────────
-  //    When the verdict says to register, update attendance and then
-  //    compute the real slot emoji so the bot reacts with the correct
-  //    1️⃣–🔟 / 🪑 / 👋 instead of the generic 👍/👋 Claude emits.
-  if (verdict.registerAttendance && user) {
-    const matchForOrg = await findRegistrationMatch(orgId);
-    if (matchForOrg) {
-      // Pre-check OUT requests: if the sender doesn't actually have a
-      // CONFIRMED/BENCH attendance row for this match, there's nothing
-      // to drop — but Claude's reply (composed before this server-side
-      // check) typically reads "Squad is now (N-1)/M — we need one
-      // more". Posting that when no drop happened is misleading: the
-      // squad post the composer appends would state the UNCHANGED
-      // count, so the group reads a drop that did not happen next to a
-      // count that did not move. Suppress the reply + react and let
-      // the bot stay silent on these.
-      if (verdict.registerAttendance === "OUT") {
-        const existingAtt = await db.attendance.findFirst({
-          where: {
-            userId: user.id,
-            matchId: matchForOrg.id,
-            status: { in: ["CONFIRMED", "BENCH"] },
-          },
-          select: { id: true },
-        });
-        if (!existingAtt) {
-          finalReact = null;
-          finalReply = null;
-          return { react: finalReact, reply: finalReply, attendanceFailures };
-        }
-      }
-      try {
-        if (
-          verdict.registerAttendance === "IN" ||
-          verdict.registerAttendance === "BENCH"
-        ) {
-          const result = await registerAttendance(user.id, matchForOrg.id, {
-            // registerAttendance:"BENCH" reaches us from TWO different
-            // rules and they are not the same thing (2026-08-31):
-            //   • intent "in"            → the sender EXPLICITLY asked
-            //     for the bench ("put me on bench", "I'll bench
-            //     tonight"). A human named it; honour it at any capacity.
-            //   • intent "conditional_in" → a STANDING OFFER ("I'll be
-            //     the 14th if you're short") that the classifier decided
-            //     is functionally a bench commitment. Nobody said
-            //     "bench" — it's INFERRED, and it's only sound when the
-            //     squad is full. registerAttendance downgrades it to an
-            //     ordinary capacity decision when slots are open.
-            benchIntent:
-              verdict.registerAttendance === "BENCH"
-                ? verdict.intent === "conditional_in"
-                  ? "inferred"
-                  : "explicit"
-                : undefined,
-            // The sender's OWN "IN" — a benched player claiming a free
-            // slot must be promoted (Kemal 2026-05-19: Enayem said IN
-            // while 13/14, must move to the squad). Third-party
-            // registerFor below does NOT pass this.
-            promoteFromBench: verdict.registerAttendance === "IN",
-            // The sender's OWN claim, in the group.
-            event: {
-              cause: "self-attendance",
-              actorKind: "player",
-              actorUserId: user.id,
-              sourceRef: verdict.waMessageId,
-            },
-          });
-          // Simple semantic react: ✅ if they made the squad, 🪑 if
-          // they landed on the bench. We used to react with a slot-
-          // number keycap (1️⃣–🔟) showing the player's position, but
-          // it confused everyone — people read it as a "2 reactions"
-          // counter — and the keycaps went stale every time someone
-          // dropped/added. Kemal flagged this on 2026-05-05.
-          finalReact = result.status === "CONFIRMED" ? "✅" : "🪑";
-          // The LLM composed its reply from the verdict, so a "BENCH"
-          // verdict that the server confirmed instead (slots were open —
-          // see BenchIntent in lib/attendance.ts) is now carrying text
-          // that says the opposite of what landed: "putting you on the
-          // bench, if we drop below 14 you're first up". Replace it with
-          // the truth rather than announce a bench that doesn't exist.
-          if (
-            verdict.registerAttendance === "BENCH" &&
-            result.status === "CONFIRMED"
-          ) {
-            finalReply = buildBenchUpgradeReply({
-              name: user.name,
-              confirmedCount: result.confirmedCount,
-              maxPlayers: result.maxPlayers,
-            });
-          }
-          // squad-full announcement is fired inside registerAttendance
-          // now (covers every confirm path, with the full line-up).
-        } else {
-          await cancelAttendance(user.id, matchForOrg.id, {
-            cause: "self-attendance",
-            actorKind: "player",
-            actorUserId: user.id,
-            sourceRef: verdict.waMessageId,
-          });
-          finalReact = "👋";
-        }
-        // A firm IN/OUT resolves any pending tentative follow-up for
-        // this player on this match — no point DMing "in or out?" once
-        // they've answered. Idempotent + best-effort.
-        await resolveTentative({ matchId: matchForOrg.id, userId: user.id }).catch(
-          (err) => console.error("[analyze] resolveTentative failed:", err),
-        );
-      } catch (err) {
-        // NEVER swallow this. A thrown write means no squad row exists,
-        // so the LLM's cheerful "you're in!" would be a lie. Record it
-        // and let the caller replace the ack with the truth (the same
-        // rule the DM path got in 9f19040).
-        attendanceFailures.push({
-          action: verdict.registerAttendance,
-          who: null,
-          error: err instanceof Error ? err.message : String(err),
-        });
-        console.error("[analyze] attendance update failed:", err);
-      }
-    }
-  }
-
-  // ── Third-party attendance registrations ────────────────────────
-  //    "my dad Najib is in" / "Ibrahim can't make it" — the message
-  //    signs up/drops someone OTHER than the sender. Fuzzy-match the
-  //    named person against the org's roster; create a provisional
-  //    member if no match. The react on the SENDER's message reflects
-  //    the slot of the last newly-added player, so the group can see
-  //    the registration landed.
-  if (verdict.registerFor && verdict.registerFor.length > 0) {
-    const matchForOrg = await findRegistrationMatch(orgId);
-    if (matchForOrg) {
-      // Resolve the SENDER's org role once — only an OWNER/ADMIN may
-      // promote a bench player into the squad via a third-party IN
-      // (mirrors the demote gate). Same membership lookup pattern as the
-      // OUT banter-guard above.
-      let senderIsAdmin = false;
-      if (user?.id) {
-        const mem = await db.membership.findUnique({
-          where: { userId_orgId: { userId: user.id, orgId } },
-          select: { role: true },
-        });
-        senderIsAdmin = mem?.role === "OWNER" || mem?.role === "ADMIN";
-      }
-      // Pre-resolve every entry's name to a userId up front so the
-      // promote-from-bench gate can see the WHOLE pair before we act on
-      // any single entry. This is what lets a SELF-REPLACE work: when a
-      // non-admin player drops THEMSELVES (OUT) to bring a bench player
-      // up (IN) — "replace me with Aydın" — the IN must promote directly
-      // (no 👍 step), exactly like an admin's. The gate below treats the
-      // sender being one of the OUT targets as authorisation. An
-      // UNRELATED non-admin nominating someone else's drop stays
-      // unauthorised (no promotion) — that's the third-party guard.
-      const resolved = await Promise.all(
-        verdict.registerFor.map(async (entry) => ({
-          entry,
-          target: await resolveOrProvisionByName(orgId, entry.name),
-        })),
-      );
-      const promoteAuthorized = isPromoteFromBenchAuthorized({
-        senderUserId: user?.id ?? null,
-        senderIsAdmin,
-        entries: resolved.map(({ entry, target }) => ({
-          action: entry.action,
-          userId: target?.userId ?? null,
-        })),
-      });
-      // Every write in this loop is SOMEONE ELSE acting on a player's
-      // squad place. The subject is `target.userId`; the actor is the
-      // sender. An admin directing roster surgery and a member relaying
-      // a mate's message are different facts, so they get different
-      // causes — a replay reading "third-party-attendance" must not have
-      // to guess whether authority was involved.
-      const thirdPartyEvent = {
-        cause: promoteAuthorized ? ("admin-message" as const) : ("third-party-attendance" as const),
-        actorKind: promoteAuthorized ? ("admin" as const) : ("member" as const),
-        actorUserId: user?.id ?? null,
-        sourceRef: verdict.waMessageId,
-      };
-      for (const { entry, target } of resolved) {
-        try {
-          if (!target) continue;
-          // Don't double-register the sender if the LLM mistakenly
-          // put them in registerFor with an IN/BENCH for themselves.
-          // A SELF-REPLACE OUT for the sender is the one case where the
-          // sender's own entry IS the action — let it fall through so
-          // they actually get dropped (the IN below then fills the slot).
-          if (user && target.userId === user.id && entry.action !== "OUT") {
-            continue;
-          }
-          if (entry.action === "IN") {
-            // Promotes a bench player straight into the squad when the
-            // sender is authorised — either an ADMIN directing roster
-            // surgery, OR a player self-replacing (the sender is one of
-            // the OUT targets in this same pair). A non-admin promoting
-            // an UNRELATED player cannot promote (no options → default
-            // idempotent behaviour preserved).
-            const result = await registerAttendance(
-              target.userId,
-              matchForOrg.id,
-              promoteAuthorized
-                ? { promoteFromBench: true, event: thirdPartyEvent }
-                : { event: thirdPartyEvent },
-            );
-            // Same semantic react rule as for the sender — ✅ for a
-            // confirmed slot, 🪑 for bench. No more keycap numbers.
-            finalReact = result.status === "CONFIRMED" ? "✅" : "🪑";
-            // squad-full announcement fired inside registerAttendance.
-          } else if (entry.action === "BENCH") {
-            // Admin demote (2026-06-11): "move X to the bench". An
-            // EXPLICIT bench intent — a human typed the instruction, so
-            // it is honoured whatever the capacity. It downgrades a
-            // CONFIRMED player to BENCH, keeps their position and frees
-            // their slot (squad N→N-1, slot opens). Unlike a drop it does
-            // NOT open a BenchSlotOffer, so the player we just benched
-            // isn't immediately re-offered the slot they vacated — it just
-            // sits open for the admin to fill. Also handles adding a
-            // not-yet-registered player straight to the bench.
-            await registerAttendance(target.userId, matchForOrg.id, {
-              benchIntent: "explicit",
-              event: thirdPartyEvent,
-            });
-            finalReact = "🪑";
-          } else {
-            await cancelAttendance(target.userId, matchForOrg.id, thirdPartyEvent);
-            finalReact = "👋";
-          }
-        } catch (err) {
-          // Same rule for someone else's registration: "Najib's in 👍"
-          // must not go out when Najib's row never landed.
-          attendanceFailures.push({
-            action: entry.action,
-            who: entry.name,
-            error: err instanceof Error ? err.message : String(err),
-          });
-          console.error(`[analyze] third-party registration failed for "${entry.name}":`, err);
-        }
-      }
-    }
-  }
-
-  // ── Score submission ─────────────────────────────────────────────
-  //    LLM extracted scoreRed / scoreYellow. We record the score as
-  //    long as we can identify an unscored match that has actually
-  //    ended. If we can resolve the sender to a known org admin or
-  //    confirmed participant → write the score. If we CAN'T resolve
-  //    them (e.g. WhatsApp hid the phone via @lid and the pushname
-  //    didn't match any player) → still write the score, because the
-  //    message came from the monitored org's group chat and losing
-  //    the score entirely is a worse failure mode than occasionally
-  //    trusting a wrong number. Admin can correct via the dashboard.
-  if (
-    verdict.intent === "score" &&
-    typeof verdict.scoreRed === "number" &&
-    typeof verdict.scoreYellow === "number"
-  ) {
-    try {
-      const now = new Date();
-      const candidates = await db.match.findMany({
-        where: {
-          activity: { orgId },
-          redScore: null,
-          yellowScore: null,
-          status: { in: ["TEAMS_PUBLISHED", "COMPLETED", "TEAMS_GENERATED"] },
-        },
-        include: {
-          activity: true,
-          teamAssignments: {
-            include: { user: { select: { matchRating: true } } },
-          },
-        },
-        orderBy: { date: "desc" },
-        take: 10,
-      });
-      const target = candidates.find((m) => {
-        const endedAt = new Date(m.date.getTime() + m.activity.matchDurationMins * 60 * 1000);
-        return endedAt <= now;
-      });
-      if (target) {
-        // Authorisation check only blocks if we resolved a user AND they
-        // are neither admin nor confirmed. If user is null (unresolvable
-        // @lid), we permit.
-        let allowed = true;
-        if (user) {
-          const attendance = await db.attendance.findUnique({
-            where: { matchId_userId: { matchId: target.id, userId: user.id } },
-          });
-          const membership = await db.membership.findUnique({
-            where: { userId_orgId: { userId: user.id, orgId } },
-          });
-          const isAdmin =
-            membership && (membership.role === "OWNER" || membership.role === "ADMIN");
-          const wasPlaying = attendance?.status === "CONFIRMED";
-          allowed = !!(isAdmin || wasPlaying);
-        }
-        if (allowed) {
-          await db.match.update({
-            where: { id: target.id },
-            data: {
-              redScore: verdict.scoreRed,
-              yellowScore: verdict.scoreYellow,
-              status: "COMPLETED",
-            },
-          });
-          try {
-            const eloInputs = target.teamAssignments.map((t) => ({
-              userId: t.userId,
-              team: t.team,
-              matchRating: t.user.matchRating,
-            }));
-            const deltas = computeEloDeltas(eloInputs, verdict.scoreRed, verdict.scoreYellow);
-            await db.$transaction(
-              deltas.map((d) =>
-                db.user.update({ where: { id: d.userId }, data: { matchRating: d.after } }),
-              ),
-            );
-          } catch (err) {
-            console.error("[analyze] Elo update after LLM score failed:", err);
-          }
-          finalReact = finalReact ?? "👍";
-        } else {
-          // Resolved sender who is neither admin nor confirmed tried to
-          // record — silent. Don't even react.
-          finalReact = null;
-        }
-      }
-    } catch (err) {
-      console.error("[analyze] score processing failed:", err);
-    }
-  }
-
-  // ── Generate-teams request ───────────────────────────────────────
-  //    Someone asked the bot to balance + post the teams. Optionally
-  //    with "consider Ibrahim + Ehtisham as IN" overrides, which we
-  //    honour by flipping those players from DROPPED/BENCH to
-  //    CONFIRMED before calling the balancer. Server generates the
-  //    reply text from the actual balancer output — Claude's `reply`
-  //    field (if any) is overridden.
-  if (verdict.intent === "generate_teams_request") {
-    try {
-      const match = await db.match.findFirst({
-        where: {
-          activity: { orgId },
-          status: { in: ["UPCOMING", "TEAMS_GENERATED", "TEAMS_PUBLISHED"] },
-          attendanceDeadline: { gt: new Date(Date.now() - 24 * 60 * 60 * 1000) },
-        },
-        orderBy: { date: "asc" },
-      });
-      if (!match) {
-        finalReply = "No match lined up to build teams for.";
-        finalReact = "🤔";
-      } else {
-        // Force-include players named in the message.
-        const includedLog: string[] = [];
-        const unmatchedLog: string[] = [];
-        if (verdict.includeNames && verdict.includeNames.length > 0) {
-          const roster = await db.attendance.findMany({
-            where: { matchId: match.id },
-            include: { user: { select: { id: true, name: true } } },
-          });
-          const norm = (s: string) =>
-            s.trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-          for (const rawName of verdict.includeNames) {
-            const target = roster.find((a) => {
-              if (!a.user.name) return false;
-              const u = norm(a.user.name);
-              const q = norm(rawName);
-              return u === q || u.startsWith(`${q} `) || u.split(" ")[0] === q;
-            });
-            if (!target) {
-              unmatchedLog.push(rawName);
-              continue;
-            }
-            if (target.status !== "CONFIRMED") {
-              // "generate teams including X" pulls a bench/dropped
-              // player back into the squad. Same transaction as the
-              // event that records it — see lib/attendance-events.ts.
-              await db.$transaction(async (tx) => {
-                await tx.attendance.update({
-                  where: { id: target.id },
-                  data: { status: "CONFIRMED" },
-                });
-                await recordAttendanceEvent(
-                  tx,
-                  {
-                    matchId: match.id,
-                    userId: target.userId,
-                    orgId,
-                    fromStatus: target.status,
-                    toStatus: "CONFIRMED",
-                    fromPosition: target.position,
-                    toPosition: target.position,
-                  },
-                  {
-                    cause: "admin-message",
-                    actorKind: "admin",
-                    actorUserId: user?.id ?? null,
-                    sourceRef: verdict.waMessageId,
-                    note: `force-included in a team-generation request as "${rawName}"`,
-                  },
-                );
-              });
-            }
-            includedLog.push(target.user.name ?? rawName);
-          }
-        }
-
-        // Resolve per-team pin requests ("put me on Red"). Fuzzy-match
-        // each name against the (now possibly updated) roster; ignore
-        // unmatched. The author refers to themselves as "me/myself/I"
-        // — Claude is supposed to substitute their first name in the
-        // verdict, but if any literal "me"-style placeholder slips
-        // through we rebind it here using the resolved sender.
-        const pinnedToTeam: Record<string, "RED" | "YELLOW"> = {};
-        const pinnedLog: string[] = [];
-        const pinnedUnmatched: string[] = [];
-        if (verdict.teamOverrides && verdict.teamOverrides.length > 0) {
-          const roster = await db.attendance.findMany({
-            where: { matchId: match.id, status: "CONFIRMED" },
-            include: { user: { select: { id: true, name: true } } },
-          });
-          const norm = (s: string) =>
-            s.trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-          const SELF = new Set(["me", "myself", "i"]);
-          const senderFirst =
-            user?.name?.trim().split(/\s+/)[0]?.toLowerCase() ?? null;
-          for (const o of verdict.teamOverrides) {
-            const cleaned = o.name.trim();
-            const lookup = SELF.has(cleaned.toLowerCase()) && senderFirst
-              ? senderFirst
-              : cleaned;
-            const target = roster.find((a) => {
-              if (!a.user.name) return false;
-              const u = norm(a.user.name);
-              const q = norm(lookup);
-              return u === q || u.startsWith(`${q} `) || u.split(" ")[0] === q;
-            });
-            if (!target) {
-              pinnedUnmatched.push(cleaned);
-              continue;
-            }
-            pinnedToTeam[target.user.id] = o.team;
-            pinnedLog.push(`${target.user.name ?? cleaned} → ${o.team}`);
-          }
-        }
-
-        const result = await generateTeamsForMatch(match.id, {
-          pinnedToTeam:
-            Object.keys(pinnedToTeam).length > 0 ? pinnedToTeam : undefined,
-          teamNames: verdict.teamNames ?? undefined,
-        });
-        if (result.ok) {
-          let text = result.groupPost;
-          if (includedLog.length > 0) {
-            text = `_Including ${includedLog.join(", ")} as CONFIRMED per the request._\n\n${text}`;
-          }
-          if (pinnedLog.length > 0) {
-            text = `_Pinned per the request: ${pinnedLog.join(", ")}._\n\n${text}`;
-          }
-          if (unmatchedLog.length > 0) {
-            text += `\n\n_(couldn't find ${unmatchedLog.join(", ")} in the roster — ignored)_`;
-          }
-          if (pinnedUnmatched.length > 0) {
-            text += `\n\n_(couldn't find ${pinnedUnmatched.join(", ")} for team pinning — ignored)_`;
-          }
-          finalReply = text;
-          finalReact = "⚽";
-        } else {
-          finalReply = `Can't build teams right now — ${result.reason}.`;
-          finalReact = "🤔";
-        }
-      }
-    } catch (err) {
-      console.error("[analyze] generate_teams_request failed:", err);
-      finalReply = null;
-    }
-  }
-
-  // ── Show-teams request ───────────────────────────────────────────
-  //    Someone asked to SEE / re-post the CURRENT teams ("show the
-  //    teams again", "what are the teams"). We re-post the EXISTING
-  //    TeamAssignment rows verbatim — NO balancer, NO reshuffle, NO
-  //    mutation of Match.teamLabels / status / assignments. This is the
-  //    fix for the bug where "show the teams" used to regenerate from
-  //    scratch (the only team intent was generate_teams_request).
-  if (verdict.intent === "show_teams_request") {
-    try {
-      const match = await db.match.findFirst({
-        where: {
-          activity: { orgId },
-          status: { in: ["UPCOMING", "TEAMS_GENERATED", "TEAMS_PUBLISHED"] },
-          attendanceDeadline: { gt: new Date(Date.now() - 24 * 60 * 60 * 1000) },
-        },
-        orderBy: { date: "asc" },
-        include: { activity: { include: { sport: true, org: true } } },
-      });
-      if (!match) {
-        finalReply =
-          "No teams generated yet — say 'generate the teams' and I'll sort them.";
-        finalReact = "🤔";
-      } else {
-        // Read existing assignments in INSERTION order (id asc) so the
-        // re-post renders the same players in the same order generate
-        // wrote them (createMany writes red then yellow).
-        const assignments = await db.teamAssignment.findMany({
-          where: { matchId: match.id },
-          include: { user: { select: { name: true } } },
-          orderBy: { id: "asc" },
-        });
-        const red = assignments
-          .filter((a) => a.team === "RED")
-          .map((a) => ({ name: a.user.name ?? "Unknown" }));
-        const yellow = assignments
-          .filter((a) => a.team === "YELLOW")
-          .map((a) => ({ name: a.user.name ?? "Unknown" }));
-
-        if (red.length === 0 && yellow.length === 0) {
-          // No teams exist yet — do NOT auto-generate.
-          finalReply =
-            "No teams generated yet — say 'generate the teams' and I'll sort them.";
-          finalReact = "🤔";
-        } else {
-          // Re-post verbatim. `match` carries its own teamLabels so any
-          // per-match fun-name override is honoured.
-          const [redLabel, yellowLabel] = resolveTeamLabels(
-            match,
-            match.activity.org,
-            match.activity.sport,
-          );
-          finalReply = formatTeamsPost({
-            redLabel,
-            yellowLabel,
-            red,
-            yellow,
-            kickoff: formatLondon(match.date, "HH:mm"),
-            venue: match.activity.venue,
-          });
-          finalReact = "👀";
-        }
-      }
-    } catch (err) {
-      console.error("[analyze] show_teams_request failed:", err);
-      finalReply = null;
-    }
-  }
-
-  // ── Bulk payment credit ─────────────────────────────────────────
-  //    Admin-only feature: when an OWNER/ADMIN of the org says
-  //    "Amir paid for 4 players" or "Amir paid for Faris and Adam",
-  //    credit the payment(s) against the most recent completed
-  //    match's unpaid count. Random group members triggering this
-  //    intent are silently ignored — saves the chase math from
-  //    being broken by a stray message.
-  //
-  //    Two paths depending on what the LLM extracted:
-  //      (a) coveredNames[] given → resolve each to an Attendance
-  //          row, mark paidAt + paidViaUserId per row. No
-  //          PaymentCredit row (avoids double-count).
-  //      (b) just count given → create a single PaymentCredit row
-  //          with the count.
-  if (verdict.intent === "bulk_payment_credit" && verdict.bulkPayment) {
-    try {
-      // Org-level kill switch: when payment tracking is off for this
-      // org, silently ignore the credit attempt. Bot stays silent —
-      // the admin's message gets a noise-classification trail in
-      // AnalyzedMessage and that's it.
-      const orgFlag = await db.organisation.findUnique({
-        where: { id: orgId },
-        select: { paymentTrackingEnabled: true },
-      });
-      if (!orgFlag?.paymentTrackingEnabled) {
-        finalReply = null;
-        finalReact = null;
-      } else {
-      // Authorise: only OWNER/ADMIN of THIS org.
-      const role = user
-        ? (
-            await db.membership.findUnique({
-              where: { userId_orgId: { userId: user.id, orgId } },
-              select: { role: true, leftAt: true },
-            })
-          )
-        : null;
-      const isAdmin = role && role.leftAt === null && (role.role === "OWNER" || role.role === "ADMIN");
-      if (!isAdmin) {
-        // Silent — random group members can't credit payments.
-        finalReply = null;
-        finalReact = null;
-      } else {
-        const target = await db.match.findFirst({
-          where: { activity: { orgId }, status: "COMPLETED", isHistorical: false },
-          orderBy: { date: "desc" },
-          include: {
-            activity: { select: { name: true } },
-            attendances: {
-              where: { status: "CONFIRMED" },
-              include: { user: { select: { id: true, name: true } } },
-            },
-          },
-        });
-        if (!target) {
-          finalReply = "No recent completed match to credit payments against.";
-          finalReact = "🤔";
-        } else {
-          const norm = (s: string) =>
-            s.trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-          // Resolve payer to a member of the org. Match by name.
-          const orgMembers = await db.membership.findMany({
-            where: { orgId, leftAt: null },
-            include: { user: { select: { id: true, name: true } } },
-          });
-          const payerKey = norm(verdict.bulkPayment.payerName);
-          const payerCandidates = orgMembers.filter((m) => {
-            if (!m.user.name) return false;
-            const u = norm(m.user.name);
-            return (
-              u === payerKey ||
-              u.split(" ")[0] === payerKey.split(" ")[0] ||
-              u.startsWith(payerKey + " ") ||
-              payerKey.startsWith(u + " ")
-            );
-          });
-          if (payerCandidates.length !== 1) {
-            finalReply = `Couldn't tell who *${verdict.bulkPayment.payerName}* is for the payment credit. Try again with a clearer name.`;
-            finalReact = "🤔";
-          } else {
-            const payer = payerCandidates[0].user;
-
-            const coveredNames = verdict.bulkPayment.coveredNames ?? [];
-            const matchedNames: string[] = [];
-            const unmatchedNames: string[] = [];
-            if (coveredNames.length > 0) {
-              for (const rawName of coveredNames) {
-                const key = norm(rawName);
-                const SELF = new Set(["me", "myself", "i"]);
-                const lookupKey =
-                  SELF.has(key) && user?.name
-                    ? norm(user.name).split(" ")[0]
-                    : key;
-                const att = target.attendances.find((a) => {
-                  if (!a.user.name) return false;
-                  const u = norm(a.user.name);
-                  return (
-                    u === lookupKey ||
-                    u.split(" ")[0] === lookupKey ||
-                    u.startsWith(lookupKey + " ")
-                  );
-                });
-                if (!att) {
-                  unmatchedNames.push(rawName);
-                  continue;
-                }
-                if (!att.paidAt) {
-                  await db.attendance.update({
-                    where: { id: att.id },
-                    data: { paidAt: new Date(), paidViaUserId: payer.id },
-                  });
-                }
-                matchedNames.push(att.user.name ?? rawName);
-              }
-            } else {
-              // Aggregate credit, no specific names.
-              await db.paymentCredit.create({
-                data: {
-                  matchId: target.id,
-                  payerUserId: payer.id,
-                  count: verdict.bulkPayment.count,
-                  recordedById: user!.id,
-                  note: `Recorded via WhatsApp by ${user?.name ?? "admin"}`,
-                },
-              });
-            }
-
-            // Recompute unpaid for the confirmation reply.
-            const refreshed = await db.match.findUnique({
-              where: { id: target.id },
-              include: {
-                attendances: { where: { status: "CONFIRMED" } },
-                paymentCredits: true,
-              },
-            });
-            const confirmedCount = refreshed?.attendances.length ?? 0;
-            const pollPaid =
-              refreshed?.attendances.filter((a) => a.paidAt != null).length ?? 0;
-            const creditCount =
-              refreshed?.paymentCredits.reduce((s, c) => s + c.count, 0) ?? 0;
-            const unpaid = Math.max(0, confirmedCount - pollPaid - creditCount);
-
-            const creditedDescription =
-              matchedNames.length > 0
-                ? `${matchedNames.join(", ")}`
-                : `${verdict.bulkPayment.count} payment${verdict.bulkPayment.count === 1 ? "" : "s"}`;
-            const tail = unmatchedNames.length > 0
-              ? `\n\n_(couldn't find ${unmatchedNames.join(", ")} on the squad — those names ignored)_`
-              : "";
-            finalReply =
-              `💳 Got it — credited *${payer.name ?? verdict.bulkPayment.payerName}* with ${creditedDescription} for *${target.activity.name}*. ` +
-              `Unpaid: ${unpaid}/${confirmedCount}.${tail}`;
-            finalReact = "👍";
-          }
-        }
-      }
-      } // end paymentTrackingEnabled gate
-    } catch (err) {
-      console.error("[analyze] bulk_payment_credit failed:", err);
-      finalReply = null;
-    }
-  }
-
-  // ── Personal reminder request ────────────────────────────────────
-  //    "@MatchTime remind me on Monday" — queue a future-dated kind="dm"
-  //    BotJob. The analyzer resolved the natural-language time to an
-  //    explicit London date(+time); we convert London→UTC, clamp to a
-  //    sane window, look up the sender's phone, and enqueue. The
-  //    scheduler's BotJob block only emits rows whose sendAfter has
-  //    passed, so this naturally fires on the right day. We compose the
-  //    confirmation reply here (the analyzer can't reliably format the
-  //    resolved time) and override Claude's react/reply.
-  if (verdict.intent === "reminder_request" && verdict.reminder && user) {
-    try {
-      const { date, time, note } = verdict.reminder;
-      const when = londonDateTimeToUtc(date, time ?? "09:00");
-      const now = Date.now();
-      const SIXTY_DAYS_MS = 60 * 24 * 60 * 60 * 1000;
-      // Must be in the future (with a 60s grace so "remind me in a
-      // minute" edge cases don't get silently dropped) and within 60
-      // days — anything outside that is almost certainly a parse error,
-      // not a real request. Stay silent rather than fire a wrong-day DM.
-      if (when.getTime() <= now - 60_000 || when.getTime() > now + SIXTY_DAYS_MS) {
-        console.warn(
-          `[analyze] reminder out of window for ${user.name}: ${when.toISOString()} (note: ${note})`,
-        );
-        finalReact = null;
-        finalReply = null;
-      } else {
-        const dbUser = await db.user.findUnique({
-          where: { id: user.id },
-          select: { phoneNumber: true },
-        });
-        const phone = dbUser?.phoneNumber?.replace(/^\+/, "") ?? null;
-        // Per-category opt-out: if the player unsubscribed from reminder
-        // DMs (subReminderDm=false, e.g. via a broad "only payment"
-        // request), honour it — don't queue the reminder. Be honest about
-        // why rather than silently swallow a request they made out loud.
-        const remindOptedOut = await db.membership.findFirst({
-          where: { userId: user.id, leftAt: null, subReminderDm: false },
-          select: { id: true },
-        });
-        if (remindOptedOut) {
-          finalReact = "🔕";
-          finalReply =
-            'You\'ve muted my messages, so I can\'t DM you a reminder. Text me "start messages" and I\'ll be able to nudge you.';
-        } else if (!phone) {
-          // No phone on file → can't DM. Tell them in-group rather than
-          // silently swallow the request.
-          finalReact = "🤔";
-          finalReply =
-            "I'd love to remind you but I don't have your number on file yet — drop the bot a quick DM first and I'll be able to.";
-        } else {
-          const first = (user.name ?? "").split(/\s+/)[0] || "there";
-          const reminderText =
-            `⏰ Reminder, ${first} — you asked me to nudge you:\n\n` +
-            `_${note}_\n\n` +
-            `(reply in the group when you're ready 👍)`;
-          await db.botJob.create({
-            data: {
-              orgId,
-              kind: "dm",
-              phone,
-              text: reminderText,
-              sendAfter: when,
-            },
-          });
-          const whenLabel = formatLondon(
-            when,
-            time ? "EEE d MMM 'at' HH:mm" : "EEE d MMM",
-          );
-          finalReact = "⏰";
-          finalReply = `👍 Got it ${first} — I'll DM you ${whenLabel}.`;
-        }
-      }
-    } catch (err) {
-      console.error("[analyze] reminder_request failed:", err);
-      // Bad date/time from the LLM, or DB error — stay silent rather
-      // than post a misleading confirmation.
-      finalReact = null;
-      finalReply = null;
-    }
-  }
-
-  return { react: finalReact, reply: finalReply, attendanceFailures };
-}
+// ── `executeVerdict` IS DELETED (§10 step 8) ─────────────────────────
+//
+//   921 lines, and the last thing in this file that took an
+//   `AnalysisVerdict`. It was the model's output turned into database
+//   writes and English, and §5 counted sixteen distinct overrides inside
+//   it correcting that output on the way through.
+//
+//   Every branch it carried now has an owner that decides from FACTS and
+//   composes from the DATABASE, and none of the moves is a
+//   reimplementation from memory — each apply layer cites the lines it
+//   was lifted from:
+//
+//     attendance IN/OUT/BENCH   → `lib/attendance-engine.ts` (step 6)
+//     bench confirmation        → `lib/bench-prompt-answer.ts` +
+//                                 `resolveBenchConfirmation`, peeled
+//                                 deterministically before the router
+//     conditional_in / tentative→ `pipeline/engine.ts`, from `contingent`
+//                                 and `conditionOn` rather than a regex
+//                                 that needed a literal "if" and so let
+//                                 "happy to drop WHEN you find someone"
+//                                 straight through (§9)
+//     score + Elo               → `lib/score-engine.ts`, deps in
+//                                 `lib/owner-deps.ts`
+//     generate / show teams     → `lib/team-ops-engine.ts` and
+//                                 `pipeline/answer-batch.ts`
+//     bulk payment credit       → `lib/admin-ops-engine.ts`, deps in
+//                                 `lib/owner-deps.ts`
+//     reminder request          → `lib/admin-ops-engine.ts`, with the
+//                                 calendar arithmetic in the pure
+//                                 `lib/reminder-time.ts` instead of the
+//                                 model's head (§3.2 S22)
+//     the per-org feature gate  → each owner reads the org's features
+//                                 out of its own `SquadState` load and
+//                                 owns nothing when its feature is off,
+//                                 which refuses BEFORE the write rather
+//                                 than suppressing the reply after it
+//
+//   `KEYCAP` went with it: the slot-number reactions it rendered are
+//   composed by `pipeline/compose.ts` from the projected position now,
+//   and §3.2's category-E note records that the prompt rule forbidding
+//   them was itself "an instruction whose entire content is the history
+//   of a removed feature".
 
 async function recordAnalysis(args: {
   orgId: string;
@@ -4221,24 +2953,21 @@ async function handleOnboardingIfApplicable(
  *                           legit attendance swap).
  */
 /**
- * Deterministic backstop for conditional drops ("happy to drop if you can
- * find someone", "step aside if Enayem can play"). Returns true only when
- * the text has a drop/step-aside cue AND a conditional clause — an
- * unconditional drop ("I'm out", "can't make it") has no `if` and returns
- * false. Used to HOLD a drop the LLM would otherwise execute, so a player
- * offering to leave only IF replaced is never auto-dropped (Kemal
- * 2026-06-09: Erdal dropped on "If u can make happy to drop"). Pairs with
- * the prompt rule; double-gated in the caller (only fires when the verdict
- * already treats the message as a drop).
+ * ── `looksLikeConditionalDrop` IS DELETED (§10 step 8) ───────────────
+ *
+ * The deterministic HOLD for "happy to drop if you can find someone"
+ * (Kemal, 2026-06-09: Erdal was dropped on "If u can make happy to
+ * drop"). It fired only when the model had already read the message as
+ * a drop, and it decided contingency by looking for a literal `if`.
+ *
+ * §9 files it under "becomes a schema field", and names the hole the
+ * regex had in its own words: it "requires a literal `if`, so 'happy to
+ * drop WHEN you find someone' bypasses the hold entirely". The
+ * extractor now returns `contingent` and `conditionOn` as FACTS about
+ * the sentence, and `engine.ts` refuses to write a contingent claim
+ * whatever conjunction it was phrased with. Corpus case
+ * `S11-erdal-conditional-drop`.
  */
-function looksLikeConditionalDrop(body: string): boolean {
-  const t = (body || "").toLowerCase();
-  const dropCue =
-    /\b(drop|step aside|stand aside|give (up )?(my )?(spot|place|slot)|make way|pull me|sit (this )?out)\b/.test(t) ||
-    /\bhappy to (drop|step|sit|give)/.test(t);
-  if (!dropCue) return false;
-  return /\bif\b/.test(t); // contingent → not a definite drop
-}
 
 async function handleTeamSwapIfApplicable(
   orgId: string,

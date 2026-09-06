@@ -1329,7 +1329,7 @@ describe("S19 · 'show the teams again' never re-runs the balancer (2026-06-18, 
           body: "@Match Time show the teams again",
           route: "balancer",
           tagged: true,
-          facts: { kind: "teams", action: "show", includeRefs: [], teamNames: null, swaps: [] },
+          facts: { kind: "teams", action: "show", includeRefs: [], teamNames: null, swaps: [], pairings: [] },
         }),
       ],
     });
@@ -2435,7 +2435,7 @@ describe("S19 · showing teams that were never generated", () => {
           body: "@Match Time show the teams",
           route: "balancer",
           tagged: true,
-          facts: { kind: "teams", action: "show", includeRefs: [], teamNames: null, swaps: [] },
+          facts: { kind: "teams", action: "show", includeRefs: [], teamNames: null, swaps: [], pairings: [] },
         }),
       ],
     });

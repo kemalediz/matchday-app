@@ -1,10 +1,12 @@
 /**
  * Pipeline #2 — router → extractors → engine → composer, IN DRY RUN.
  *
- * §10 step 2. The same 46 cases that judge the shipped analyzer judge
+ * §10 step 2. The same 46 cases that judged the shipped analyzer judge
  * this one, through the same adapter, against a world built by the same
  * builder. That is the whole point of `pipeline.ts` deliberately
- * containing no `AnalysisVerdict`, no intents and no `reasoning`.
+ * carrying only rows, speech, DMs and reacts — no verdicts, no intents,
+ * no `reasoning`. §10 step 8 deleted the analyzer and the adapter did
+ * not have to change.
  *
  * ZERO WRITES. This pipeline never calls `/api/whatsapp/analyze`, never
  * touches `registerAttendance`, and issues no INSERT or UPDATE of its
@@ -236,8 +238,10 @@ export async function loadStateViaSql(grp: SimGroup): Promise<SquadState> {
     featureAttendance: boolean;
     paymentTrackingEnabled: boolean;
     featureStatsQa: boolean;
+    featureReminders: boolean;
   }>(
-    `SELECT "teamLabels", "featureAttendance", "paymentTrackingEnabled", "featureStatsQa"
+    `SELECT "teamLabels", "featureAttendance", "paymentTrackingEnabled", "featureStatsQa",
+            "featureReminders"
        FROM "Organisation" WHERE id = $1`,
     [grp.orgId],
   );
@@ -284,14 +288,24 @@ export async function loadStateViaSql(grp: SimGroup): Promise<SquadState> {
       )
     : [];
 
+  // The three statuses and the "kickoff + duration has passed" test
+  // mirror `load-state.ts` exactly — see `SquadState.completedMatch` for
+  // why COMPLETED alone would refuse the first score of every match.
+  // The two loaders MUST agree here: they are the same decision read
+  // through two different drivers.
   const completed = await grp.db.all<{
     id: string;
+    status: string;
+    isHistorical: boolean;
     redScore: number | null;
     yellowScore: number | null;
   }>(
-    `SELECT m.id, m."redScore", m."yellowScore"
-       FROM "Match" m JOIN "Activity" a ON a.id = m."activityId"
-      WHERE a."orgId" = $1 AND m.status = 'COMPLETED' AND m.date <= $2
+    `SELECT m.id, m.status, m."isHistorical", m."redScore", m."yellowScore"
+       FROM "Match" m
+       JOIN "Activity" a ON a.id = m."activityId"
+      WHERE a."orgId" = $1
+        AND m.status IN ('TEAMS_GENERATED', 'TEAMS_PUBLISHED', 'COMPLETED')
+        AND m.date + (a."matchDurationMins" * INTERVAL '1 minute') <= $2
       ORDER BY m.date DESC LIMIT 1`,
     [grp.orgId, now],
   );
@@ -346,6 +360,8 @@ export async function loadStateViaSql(grp: SimGroup): Promise<SquadState> {
     completedMatch: completed[0]
       ? {
           id: completed[0].id,
+          status: completed[0].status as "TEAMS_GENERATED" | "TEAMS_PUBLISHED" | "COMPLETED",
+          isHistorical: completed[0].isHistorical,
           redScore: completed[0].redScore,
           yellowScore: completed[0].yellowScore,
           participantUserIds: participants.map((p) => p.userId),
@@ -360,6 +376,7 @@ export async function loadStateViaSql(grp: SimGroup): Promise<SquadState> {
       // returns ALL_OFF for an org it cannot read. An inverted default
       // here would let the corpus exercise a feature production has off.
       statsQa: org?.featureStatsQa ?? false,
+      reminders: org?.featureReminders ?? false,
     },
     smallerFormats: formats
       .map((f) => ({ sportName: f.name, totalPlayers: totalPlayersFor(f.playersPerTeam) }))

@@ -7,20 +7,29 @@
  *   writes NOTHING.
  *
  * ── ZERO WRITES, structurally ────────────────────────────────────────
- * Not a promise, a property. The only database call in this file is
+ * Not a promise, a property. The database calls in this file are
  * `loadSquadState`, whose module header says it is "THE ONLY I/O IN THIS
  * DIRECTORY … READ-ONLY BY CONSTRUCTION: every statement here is a
- * `findMany` / `findFirst` / `count`". `runPipeline` is dry-run by
- * design — "nothing in this module writes to the database, sends a
- * message, queues a notification or touches the live analyze route. It
- * returns a PROPOSAL and a PROJECTION". Everything printed under
- * `writes :` below is what the engine WOULD do, on a projected state
- * that lives in memory and is thrown away when the process exits.
+ * `findMany` / `findFirst` / `count`"; `getOrgFeatures`; and (in
+ * `TEAMS=1` only) the shipped team-match selector, a single
+ * `db.match.findFirst`. `runPipeline` is dry-run by design — "nothing in
+ * this module writes to the database, sends a message, queues a
+ * notification or touches the live analyze route. It returns a PROPOSAL
+ * and a PROJECTION". Everything printed under `writes :` below is what
+ * the engine WOULD do, on a projected state that lives in memory and is
+ * thrown away when the process exits.
  *
- * There is no Prisma client in this file other than the one
- * `loadSquadState` uses, and no code path here calls `create`, `update`,
- * `upsert` or `delete`. Keep it that way: this script is pointed at a
- * customer's live squad eight days before a real match.
+ * ⚠️ `TEAMS=1` IS THE ONE MODE WHOSE REAL OWNER CAN WRITE. `runTeamOpsBatch`
+ * ends in `applyGenerateTeams`, which force-confirms attendance rows and
+ * rewrites every `TeamAssignment` on the match. It is safe here because
+ * that apply layer's ENTIRE I/O surface is three injected functions and
+ * this file replaces the two writing ones with recorders. The argument
+ * is spelled out in full at `runTeams` — read it before touching that
+ * mode, and never hand it `buildTeamOpsApplyDeps(...)` wholesale.
+ *
+ * No code path in this file calls `create`, `update`, `upsert` or
+ * `delete`. Keep it that way: this script is pointed at a customer's
+ * live squad days before a real match.
  *
  * ── IT COSTS REAL MONEY ──────────────────────────────────────────────
  * Every run is real router + extractor calls billed to the live
@@ -46,17 +55,30 @@
  *   QUESTIONS=1    run the TAGGED-QUESTION table (Q*) through §10 step
  *                  7's owner instead, and score every phrasing as
  *                  ANSWERED / HANDED BACK / SILENT. See `runQuestions`.
+ *   TEAMS=1        run the GENERATE-TEAMS table (T*) through §10 step
+ *                  8's owner (`runTeamOpsBatch`), with the apply layer's
+ *                  three deps replaced by recorders. See `runTeams` —
+ *                  read its header before touching it, it is the one
+ *                  mode whose real owner has a write path.
  *   ORG_GROUP=…    a different WhatsApp group id (defaults to Sutton FC)
  *
  * Examples:
  *   ONLY=P1 REPEAT=15 FACTS=1 …   settle one ambiguous phrasing
  *   ONLY=K1,K2,K3 …               replay the 1 Sept incident three ways
  *   CHASES=1 …                    read the five scheduled posts
+ *   TEAMS=1 …                     the seven real generate-teams phrasings
+ *   TEAMS=1 ONLY=T2 REPEAT=10 …   settle whether a pairing is stable
  *
  * ── WHAT THE CASES ARE ───────────────────────────────────────────────
  * They are not synthetic. C1–C15 / D1–D3 / K1–K3 are real messages from
  * the group or real incidents; P1–P4 are the four probes that settle the
- * availability / standing-offer boundary. Each carries an `expect`
+ * availability / standing-offer boundary. S1–S3 / A1–A5 / R1–R5 are §10
+ * step 7 part 2's two writing routes — the score report, the payment
+ * credit, the reminder and the recruit blast Kemal asked about on
+ * 2026-09-06. Q1–Q24 (`QUESTIONS=1`) are tagged questions; T1–T7
+ * (`TEAMS=1`) are the generate-teams phrasings measured over 120 days of
+ * the live group, where `generate_teams_request` is the single most
+ * common tagged command. Each carries an `expect`
  * string: what a human decided the right answer is. The harness does NOT
  * grade against it — it prints it next to what happened so you can. (The
  * graded, CI-runnable version of this idea is `e2e/corpus/`.)
@@ -65,6 +87,8 @@
 import { loadSquadState } from "../src/lib/pipeline/load-state.ts";
 import { runPipeline } from "../src/lib/pipeline/run.ts";
 import { runAnswerBatch } from "../src/lib/pipeline/answer-batch.ts";
+import { runTeamOpsBatch } from "../src/lib/team-ops-engine-batch.ts";
+import { buildTeamOpsApplyDeps } from "../src/lib/owner-deps.ts";
 import { routeBatch } from "../src/lib/pipeline/router.ts";
 import { anthropicModel } from "../src/lib/pipeline/llm.ts";
 import { getOrgFeatures } from "../src/lib/org-features.ts";
@@ -144,6 +168,53 @@ const CASES: Case[] = [
   { id: "P2", who: "Ilkay", body: "I'm around if you're short", expect: "NO write — availability + politeness" },
   { id: "P3", who: "Ilkay", body: "put me down if you're short", expect: "WRITE — 'put me down' asks for the place (standing offer, S15a)" },
   { id: "P4", who: "Ilkay", body: "count me as the 14th if you need one", expect: "WRITE — claims the place (standing offer, S15a)" },
+
+  // ── S: the score route (§10 step 7 part 2) ────────────────────────
+  //
+  // Untagged on purpose: `score` is deliberately EXCLUDED from
+  // `ACTIONY_INTENTS` (interaction-contract.ts:125-129), so every real
+  // "we won 5-3" in a group is untagged and a tag gate here would refuse
+  // all of them.
+  { id: "S1", who: "Kemal", body: "Red won 5-3 last night", expect: "route=score, WRITE score 5-3 against the last match PLAYED (any of TEAMS_PUBLISHED | TEAMS_GENERATED | COMPLETED)" },
+  { id: "S2", who: "Zair", body: "we lost 2-6 lads, shocking", expect: "route=score. Zair must be a participant or an admin, or NO write — the §9 authorisation seatbelt" },
+  { id: "S3", who: "Kemal", body: "good game that", expect: "NOT a score. Must produce no score write" },
+
+  // ── A: the admin_ops route (§10 step 7 part 2) ────────────────────
+  //
+  // Payment and reminder both require the tag; the recruit blast does
+  // not, because PR #33's RECRUIT_COMMAND_IMPLIES_ADDRESSED makes an
+  // admin's recruit command a direct instruction to MatchTime.
+  { id: "A1", who: "Kemal", body: "@Match Time Amir paid for 4 players", tagged: true, expect: "route=admin_ops, action=bulk_payment, WRITE payment_credit (aggregate, namedCovered false)" },
+  { id: "A2", who: "Kemal", body: "@Match Time Amir paid for Faris and Adam", tagged: true, expect: "route=admin_ops, action=bulk_payment, namedCovered TRUE — a different write from A1" },
+  { id: "A3", who: "Zair", body: "@Match Time Amir paid for 4 players", tagged: true, expect: "NO write — only an admin may credit a payment (real money, live club)" },
+  { id: "A4", who: "Kemal", body: "@Match Time remind me tomorrow at 6 to bring the bibs", tagged: true, expect: "route=admin_ops, action=reminder, WRITE reminder with a RESOLVED sendAt — not the words" },
+  { id: "A5", who: "Kemal", body: "@Match Time remind me before the match", tagged: true, expect: "NO write — the resolver refuses a phrase it cannot read rather than guessing a day" },
+
+  // ── R: the recruit blast, the phrasing Kemal asked about ──────────
+  //
+  // Before this change every one of these routed `admin_ops` and came
+  // back as `admin action \"other\" has no deterministic handler`, so the
+  // ONLY thing that recognised them was the mega-prompt's
+  // `verdict.recruitRequest`.
+  { id: "R1", who: "Kemal", body: "@Match Time message all players who played in the last 5 matches to DM and invite them", tagged: true, expect: "route=admin_ops, action=recruit, lookbackMatches 5, WRITE recruit_blast. NO DM is sent from here — the route fires it after the batch" },
+  // MEASURED 2026-09-06: the model reads "the last few games" as 3, not
+  // as "unstated". That is a reading of the text and it is inside the
+  // clamp, so it is safe either way — but the expectation says what
+  // actually happens rather than what would have been tidier.
+  { id: "R2", who: "Kemal", body: "@Match Time can you DM the lads from the last few games and ask them to play", tagged: true, expect: "same. 'the last few' comes back as a small number (measured: 3), which the clamp accepts; an unstated lookback would be null -> the default of 5" },
+  // MEASURED 2026-09-06: the ROUTER needs the "invite them" half to call
+  // this `admin_ops`; "message everyone from the last 50 games" alone
+  // routes `question` 5/5. Phrased the way a real admin would, so the
+  // clamp is exercised on a live route rather than only in a unit test.
+  { id: "R3", who: "Kemal", body: "@Match Time DM everyone who played in the last 50 games and invite them", tagged: true, expect: "50 must be CLAMPED to 12 — a mass DM is how the WhatsApp account gets banned" },
+  // MEASURED 2026-09-06: untagged, the ROUTER calls this `question`, not
+  // `admin_ops`, so PR #33's tag-free path is not reached and the
+  // interaction contract refuses it. Recorded rather than asserted: it
+  // is a router property, not this step's, and the tagged R3 is what
+  // exercises the clamp.
+  { id: "R3b", who: "Kemal", body: "message everyone from the last 50 games", tagged: false, expect: "measured: routes `question`, so the contract's tag gate refuses it. The admin recruit path is reached only when the router says admin_ops" },
+  { id: "R4", who: "Zair", body: "@Match Time message all players who played in the last 5 matches and invite them", tagged: true, expect: "NO recruit_blast — only an admin may send one" },
+  { id: "R5", who: "Kemal", body: "@Match Time who played in the last 5 matches?", tagged: true, expect: "NOT recruit — asking to LIST the recent players is not asking to message them" },
 ];
 
 /**
@@ -165,11 +236,22 @@ const CASES: Case[] = [
  * working. Here they are scored apart:
  *
  *   ANSWERED     step 7 owns it and composed a reply
- *   HANDED BACK  step 7 declined it AND SAID WHY — in production the
- *                mega-prompt then answers it, so this is not a silence
+ *   HANDED BACK  step 7 declined it AND SAID WHY
  *   SILENT       neither. This column must read 0. Anything in it is
  *                §9's signature failure: "message understood, action
  *                silently not taken".
+ *
+ * ⚠️ WHAT "HANDED BACK" IS WORTH CHANGED WITH §10 STEP 8 (2026-09-06).
+ * This block used to say "in production the mega-prompt then answers it,
+ * so this is not a silence". It is deleted. A hand-back now goes to
+ * `route.ts`'s catch-all: NOTHING is said in the group, and one deduped
+ * operator DM is sent (`lib/operator-note.ts`). So the HANDED BACK column
+ * is no longer free — it is the number of tagged questions a real group
+ * would ask and get no answer to. Q12 (money), Q20 (an unresolvable
+ * person), Q22 (stats) and Q23 (options) are in it BY DESIGN and each
+ * says why on its own line; anything else appearing there is a
+ * regression, and the two columns should be read together rather than
+ * only checking that SILENT is 0.
  *
  * `expect` is what a human decided the right column is. The harness
  * prints both and marks a mismatch; it does not fail the process, for
@@ -198,7 +280,7 @@ const QUESTION_CASES: QuestionCase[] = [
   { id: "Q9", who: "Ali", body: "@Match Time do we have enough?", expect: "ANSWERED", wants: /\d+\/\d+/, why: "count" },
   { id: "Q10", who: "Ali", body: "@Match Time show me the squad", expect: "ANSWERED", wants: /Playing:/, why: "roster — NOT the team line-ups" },
   { id: "Q11", who: "Ali", body: "@Match Time is the game still on", expect: "ANSWERED", wants: /\d{1,2}:\d{2}/, why: "fixture" },
-  { id: "Q12", who: "Ali", body: "@Match Time who hasn't paid", expect: "HANDED BACK", why: "no payment data in SquadState; the analyzer keeps money questions" },
+  { id: "Q12", who: "Ali", body: "@Match Time who hasn't paid", expect: "HANDED BACK", why: "no payment data in SquadState — and since §10 step 8 nobody answers it at all" },
 
   // ── More of the same shapes, phrased as the group phrases them ────
   { id: "Q13", who: "Zair", body: "@Match Time whos playing tonight", expect: "ANSWERED", wants: /Playing:/, why: "roster" },
@@ -213,6 +295,117 @@ const QUESTION_CASES: QuestionCase[] = [
   { id: "Q22", who: "Amir", body: "@Match Time who's been most consistent this season?", expect: "HANDED BACK", why: "stats — the composed leaderboard trips displaysSquadState (2026-05-14)" },
   { id: "Q23", who: "Amir", body: "@Match Time we're short, what are our options?", expect: "HANDED BACK", why: "options — the lead carries a count and would be replaced by the roster" },
   { id: "Q24", who: "Elvin", body: "@Match Time show me the teams", expect: "ANSWERED", why: "balancer/show — a real post if teams exist, the shipped 'no teams generated yet' if not" },
+];
+
+/**
+ * ── THE GENERATE-TEAMS TABLE (`TEAMS=1`) ──────────────────────────────
+ *
+ * §10 step 8's own route, and the only one in this file whose owner has
+ * an APPLY LAYER THAT WRITES. Read `runTeams` before changing anything
+ * here.
+ *
+ * The bodies are not invented. `team-ops-engine-batch.ts`'s header
+ * records the measurement: over 120 days of production `AnalyzedMessage`
+ * rows on Sutton FC, `generate_teams_request` occurred **23 times** —
+ * the single most common tagged command to MatchTime, more common than
+ * every question shape put together. These are the shapes that traffic
+ * takes, including the three that are NOT owned, because "the club's
+ * most-used command sometimes does nothing" is the finding this table
+ * exists to surface.
+ *
+ * `expect` is what a human decided the right answer is. As with the
+ * C/D/K/P table the harness prints it beside what happened and marks a
+ * mismatch; it does not grade and it does not fail the process.
+ */
+type TeamCase = {
+  id: string;
+  who: string;
+  body: string;
+  /** Default true. `false` is a real case: the tag is REQUIRED. */
+  tagged?: boolean;
+  expect: "GENERATES" | "HANDED BACK" | "NOT OWNED";
+  why: string;
+};
+
+const TEAM_CASES: TeamCase[] = [
+  // ── The plain form, ×8 in the measured corpus ─────────────────────
+  {
+    id: "T1",
+    who: "Kemal",
+    body: "@Match Time generate the teams",
+    expect: "GENERATES",
+    why: "the most common tagged command in the group, verbatim",
+  },
+  // ── A pairing. `TeamFacts.pairings`, added 2026-09-06 ─────────────
+  {
+    id: "T2",
+    who: "Kemal",
+    body: "@Match Time generate the teams, put me and Ehtisham to the same team",
+    expect: "GENERATES",
+    why:
+      "pairing, not a colour: `pairings` must carry [me, Ehtisham] and `swaps` must be " +
+      "empty. Before that field existed the only way to express this was to make the " +
+      "model invent a colour",
+  },
+  // ── Fun names: OWNED, but the names are LOST. Stated, not hidden. ─
+  {
+    id: "T3",
+    who: "Kemal",
+    body: "@Match Time generate the teams now, come up with fun team names",
+    expect: "GENERATES",
+    why:
+      "the line-ups have to be worked out again so this extracts `generate` and IS owned " +
+      "— but the teams come out Red/Yellow. `team-ops-engine-batch.ts`'s \"what did not " +
+      "come across\" section: the extractor is told it never picks a name, so a request to " +
+      "INVENT names is silently answered without them. The one real loss on this route",
+  },
+  // ── Absolute pins, plus the word `regenerate` ─────────────────────
+  {
+    id: "T4",
+    who: "Kemal",
+    body: "@Match Time regenerate the teams, put David and Kemal together in Red team",
+    expect: "GENERATES",
+    why:
+      "`regenerate` must still extract as `generate`, and \"in Red team\" is an ABSOLUTE " +
+      "pin — `swaps`, not `pairings`",
+  },
+  // ── `show`: owned by the OTHER owner, handed back by this one ─────
+  {
+    id: "T5",
+    who: "Kemal",
+    body: "@Match Time show us the teams again without regenerating replacing Ehtisham with Najib",
+    expect: "HANDED BACK",
+    why:
+      "the 2026-06-18 incident (c408649) as one sentence: `show` belongs to " +
+      "`answer-batch.ts` and re-running the balancer over hand-swapped line-ups is the " +
+      "exact thing that split `show` from `generate`. If this ever extracts `generate`, " +
+      "that incident is back",
+  },
+  // ── `swap`: already has a deterministic owner upstream ────────────
+  {
+    id: "T6",
+    who: "Kemal",
+    body: "@Match Time swap the colors and keep the same squad",
+    expect: "HANDED BACK",
+    why:
+      "`route.ts`'s `handleColorSwapIfApplicable` owns this on the RAW BODY before any " +
+      "model runs, so this path must decline it. Two deciders on one message is the " +
+      "failure being avoided; in production the pre-peel answers it and the group sees a " +
+      "reply this harness does not model",
+  },
+  // ── UNTAGGED. The tag is required, unconditionally. ───────────────
+  {
+    id: "T7",
+    who: "Kemal",
+    body: "Make the teams",
+    tagged: false,
+    expect: "NOT OWNED",
+    why:
+      "measured in the corpus and deliberately not owned: `generate_teams_request` is in " +
+      "ACTIONY_INTENTS, so the shipped interaction contract already refuses an untagged " +
+      "one. Since §10 step 8 that refusal means SILENCE plus an operator note rather than " +
+      "the mega-prompt answering — which is why it is in this table rather than assumed",
+  },
 ];
 
 /** The two lines above every case, so the model sees a group mid-chase. */
@@ -460,8 +653,12 @@ async function runQuestions(orgId: string, state: SquadState, now: Date): Promis
       const outcome = res.outcomes.get(id);
       const reply = outcome?.reply ?? null;
       // The three columns. A message the ROUTER sent somewhere step 7
-      // does not own is a hand-back too — the analyzer decides it — and
-      // saying so is why the route is printed beside every verdict.
+      // does not own is counted as a hand-back too, because step 7
+      // declining a route it never claimed is a decision rather than a
+      // fault — that is why the route is printed beside every verdict.
+      // What happens NEXT is no longer "the analyzer decides it": since
+      // §10 step 8 it is either another owner or silence, so read this
+      // column with the header's warning in mind.
       const routeIsOurs = route === "question" || route === "balancer";
       const gaveAReason = res.degradations.some((d) => d.includes(id)) || !routeIsOurs;
       const verdict = reply ? "ANSWERED" : gaveAReason ? "HANDED BACK" : "SILENT";
@@ -488,11 +685,228 @@ async function runQuestions(orgId: string, state: SquadState, now: Date): Promis
     `\n${"═".repeat(72)}\n` +
       `${selected.length} question(s) × ${repeat} = ${runs} run(s).\n` +
       `  ANSWERED    ${answered} of ${runs}\n` +
-      `  HANDED BACK ${handedBack} of ${runs}  (the analyzer answers these in production)\n` +
+      `  HANDED BACK ${handedBack} of ${runs}  (⚠️ since §10 step 8 nobody answers these — ` +
+      `the group hears nothing and an operator is DM'd)\n` +
       `  SILENT      ${silent} of ${runs}${silent === 0 ? "  ✅" : "  ❌ this must be 0"}\n` +
       `  answers not matching their wants-pattern: ${wrongAnswer}\n` +
       `  verdicts differing from expect:           ${mismatched}\n` +
       `Total cost: $${totalUsd.toFixed(4)}. Writes performed: 0 (this harness cannot write).`,
+  );
+}
+
+/**
+ * ═══════════════════════════════════════════════════════════════════════
+ * Run the generate-teams table through §10 step 8's REAL owner.
+ *
+ * ── WHY THIS ONE NEEDED AN ARGUMENT, AND THE OTHER MODES DID NOT ─────
+ *
+ * Every other mode in this file is read-only for free. `runPipeline` is
+ * dry-run by design and `runAnswerBatch` has no apply layer at all
+ * (`__tests__/zero-writes.test.ts` scans its whole directory on every
+ * build). `runTeamOpsBatch` is different: it is the first thing this
+ * script touches that ends in `applyGenerateTeams`, which force-confirms
+ * attendance rows, rewrites every `TeamAssignment` on the match and
+ * moves `Match.status`. On a customer's live squad. So the read-only
+ * property has to be ARGUED rather than inherited.
+ *
+ * ── THE ARGUMENT: THE APPLY LAYER'S ONLY I/O IS THREE INJECTED FNS ───
+ *
+ * `TeamOpsApplyDeps` is the entire surface through which the apply layer
+ * can touch the world — `selectTeamsMatch`, `forceConfirm`,
+ * `generateTeams` — and `runTeamOpsBatch` takes it as an argument.
+ * Two of the three are replaced here by recorders that perform no I/O
+ * and return; nothing else in `team-ops-engine.ts` or
+ * `team-ops-engine-batch.ts` opens a Prisma client of its own.
+ *
+ *   selectTeamsMatch  THE REAL ONE, from `buildTeamOpsApplyDeps`. It is
+ *                     a single `db.match.findFirst` — a READ, and the
+ *                     shipped selector (`route.ts:3553-3560`). Using the
+ *                     real one matters: substituting `SquadState.matchId`
+ *                     would make the run pick a different match from
+ *                     production, and `team-ops-engine.ts`'s header says
+ *                     in terms that the two must never be swapped.
+ *   forceConfirm      RECORDER. Never writes. Production would flip an
+ *                     `Attendance` row to CONFIRMED inside a transaction
+ *                     with an `AttendanceEvent`; here the call is logged
+ *                     and the proposal printed.
+ *   generateTeams     RECORDER. Never writes, and NEVER RUNS THE
+ *                     BALANCER. Production would rewrite every
+ *                     `TeamAssignment` and return the group post; here
+ *                     the call is logged and a clearly-marked synthetic
+ *                     post is returned so the shipped reply-shaping
+ *                     around it still executes.
+ *
+ * WHY IT STOPS AT THE DEPS RATHER THAN BEFORE `runTeamOpsBatch`: the
+ * interesting half of this route is the OWNERSHIP decision — tagged or
+ * not, `generate` or `show` or `swap`, one generate per batch and it is
+ * the last one, the write assertion that refuses a foreign write kind.
+ * Reimplementing that here to "stop earlier" would mean grading a copy
+ * of the rule instead of the rule. Injecting the deps runs the real one
+ * and cuts the wire at the only place I/O can happen.
+ *
+ * A CONSEQUENCE, STATED: because `generateTeams` never runs, the reply
+ * printed under `says :` is NOT the group post production would send —
+ * only its wrapper. This mode grades the DECISION and the PROPOSED
+ * WRITE. Whether the balancer picks good teams is `teams-post.test.ts`'s
+ * question, not this file's.
+ *
+ * If you ever need the real post, that is a different script and it
+ * needs a test org, not `ORG_GROUP` pointed at a customer.
+ * ═══════════════════════════════════════════════════════════════════════
+ */
+async function runTeams(orgId: string, state: SquadState, now: Date): Promise<void> {
+  const repeat = Math.max(1, Number(process.env.REPEAT ?? 1));
+  const only = process.env.ONLY?.split(",").map((s) => s.trim());
+  const selected = TEAM_CASES.filter((c) => !only || only.includes(c.id));
+  if (only) {
+    const unknown = only.filter((id) => !TEAM_CASES.some((c) => c.id === id));
+    if (unknown.length) throw new Error(`ONLY names no such team case: ${unknown.join(", ")}`);
+  }
+  const features = await getOrgFeatures(orgId);
+  const model = anthropicModel();
+  const senders = new Map(selected.map((c) => [c.id, memberByName(state.roster, c.who)]));
+  // The real, READ-ONLY match selector. Only `selectTeamsMatch` is taken
+  // from it; the two writing deps are replaced below.
+  const realDeps = buildTeamOpsApplyDeps({ orgId });
+
+  const DRY_RUN_POST =
+    "[DRY RUN — the balancer was NOT run and no TeamAssignment row was written. " +
+    "In production this is where the real team post would be.]";
+
+  let generated = 0;
+  let handedBack = 0;
+  let notOwned = 0;
+  let mismatched = 0;
+  let runs = 0;
+  let totalUsd = 0;
+
+  for (const c of selected) {
+    const sender = senders.get(c.id)!;
+    const tagged = c.tagged ?? true;
+    console.log(
+      `\n${"─".repeat(72)}\n${c.id}  ${sender.name}${tagged ? " [@tagged]" : " [UNTAGGED]"}: ` +
+        `${JSON.stringify(c.body)}\n  expect : ${c.expect} (${c.why})`,
+    );
+
+    for (let n = 0; n < repeat; n++) {
+      const id = `${c.id}-${n}`;
+      const routed = await routeBatch(model, [{ id, authorName: sender.name, body: c.body }]);
+      const route: Route = routed.routes[0]?.route ?? "unsure";
+      totalUsd += routed.usage?.costUsd ?? 0;
+
+      // Fresh per run: a recorder that accumulated across runs would
+      // make run 3 look like it proposed run 1's writes too.
+      const forced: Array<{ userId: string; ref: string }> = [];
+      const balancerCalls: Array<{
+        matchId: string;
+        pinnedToTeam: Record<string, "RED" | "YELLOW">;
+        teamNames: [string, string] | null;
+      }> = [];
+
+      const res = await runTeamOpsBatch({
+        orgId,
+        now,
+        messages: [
+          {
+            waMessageId: id,
+            body: c.body,
+            authorName: sender.name,
+            senderUserId: sender.userId,
+            senderName: sender.name,
+            tagged,
+            route,
+            gated: false,
+          },
+        ],
+        history: HISTORY,
+        enabled: new Set<Route>(["balancer"]),
+        deps: {
+          model,
+          // Injected so the whole sweep decides against ONE state read.
+          loadState: async () => state,
+          loadFeatures: async () => features,
+          // READ. The shipped selector, unmodified.
+          selectTeamsMatch: realDeps.selectTeamsMatch,
+          // RECORDERS. No I/O. See this function's header.
+          forceConfirm: async ({ userId, ref }) => {
+            forced.push({ userId, ref });
+          },
+          generateTeams: async (matchId, opts) => {
+            balancerCalls.push({
+              matchId,
+              pinnedToTeam: opts.pinnedToTeam ?? {},
+              teamNames: opts.teamNames ?? null,
+            });
+            return { ok: true, groupPost: DRY_RUN_POST };
+          },
+        },
+      });
+      totalUsd += res.cost.usd;
+      runs++;
+
+      const outcome = res.outcomes.get(id);
+      // The three columns.
+      //   GENERATES   owned AND the balancer would have been called
+      //   HANDED BACK owned by nobody here, WITH a reason — `show`,
+      //               `rename` and `swap` all land here on purpose and
+      //               each has another owner or a stated refusal
+      //   NOT OWNED   no reason either. Untagged is the designed case;
+      //               anything else in this column since §10 step 8 is
+      //               a message the group sent and nobody answered.
+      const verdict =
+        balancerCalls.length > 0
+          ? "GENERATES"
+          : res.degradations.length > 0 || outcome
+            ? "HANDED BACK"
+            : "NOT OWNED";
+      if (verdict === "GENERATES") generated++;
+      else if (verdict === "HANDED BACK") handedBack++;
+      else notOwned++;
+      if (verdict !== c.expect) mismatched++;
+
+      console.log(
+        `  ${repeat > 1 ? `run ${n + 1}/${repeat}  ` : ""}route=${route.padEnd(9)} ` +
+          `${verdict}${verdict !== c.expect ? `  ⚠️ expected ${c.expect}` : ""}`,
+      );
+      if (outcome) {
+        console.log(
+          `  owned  : intent=${outcome.intent} action=${outcome.action} ` +
+            `match=${outcome.matchId ?? "(none)"} generated=${outcome.teamsGenerated} ` +
+            `writeFailed=${outcome.writeFailed}`,
+        );
+        console.log(`  reasons: ${outcome.reasoning}`);
+        console.log(`  react  : ${outcome.react ?? "(none)"}`);
+      }
+      for (const w of balancerCalls) {
+        console.log(
+          `  WOULD WRITE: generateTeamsForMatch(${w.matchId}, ` +
+            `pinned=${JSON.stringify(w.pinnedToTeam)} names=${JSON.stringify(w.teamNames)})`,
+        );
+      }
+      for (const f of forced) {
+        console.log(
+          `  WOULD WRITE: force-confirm ${nameOf(state, f.userId)} (as "${f.ref}") + AttendanceEvent`,
+        );
+      }
+      if (res.degradations.length) console.log(`  reason : ${res.degradations.join(" | ")}`);
+      if (outcome?.reply) {
+        console.log(
+          `  says   : ${JSON.stringify(outcome.reply.replace(DRY_RUN_POST, "<the real team post>").slice(0, 200))}`,
+        );
+      }
+    }
+  }
+
+  console.log(
+    `\n${"═".repeat(72)}\n` +
+      `${selected.length} team case(s) × ${repeat} = ${runs} run(s).\n` +
+      `  GENERATES   ${generated} of ${runs}\n` +
+      `  HANDED BACK ${handedBack} of ${runs}  (another owner, or a stated refusal)\n` +
+      `  NOT OWNED   ${notOwned} of ${runs}  (silence + one operator note in production)\n` +
+      `  verdicts differing from expect: ${mismatched}\n` +
+      `Total cost: $${totalUsd.toFixed(4)}. ` +
+      `Writes performed: 0 — the apply layer's two writing deps are recorders ` +
+      `(see runTeams' header); every "WOULD WRITE" line above is a projection.`,
   );
 }
 
@@ -520,6 +934,12 @@ async function main(): Promise<void> {
 
   if (process.env.QUESTIONS === "1") {
     await runQuestions(org.id, base, now);
+    await db.$disconnect();
+    return;
+  }
+
+  if (process.env.TEAMS === "1") {
+    await runTeams(org.id, base, now);
     await db.$disconnect();
     return;
   }

@@ -92,9 +92,40 @@ coordination and no ritual.
 
 | Seam | File | Activation |
 |---|---|---|
-| LLM stub — `analyzeBatch` reads verdicts from a JSON file instead of calling Anthropic | `src/lib/message-analyzer.ts` | `MT_TEST_LLM_STUB_FILE` |
+| **Router stub** — `gateBatch` reads the route (and the step-5/6/7 flags) out of a JSON file instead of calling Haiku | `src/lib/pipeline/gate.ts`, `src/lib/pipeline/route-flags.ts` | `MT_TEST_ROUTER_STUB_FILE` |
+| **Extractor stub** — every extractor returns canned RAW JSON (so `parseFacts` still runs for real), or throws a real 529 | `src/lib/pipeline/extractor-stub.ts` | `MT_TEST_EXTRACTOR_STUB_FILE` |
+| Per-request flag overrides for a LIVE A/B — `x-mt-attendance-engine`, `x-mt-engine-routes` | `src/lib/pipeline/gate.ts`, `src/lib/pipeline/route-flags.ts` | `MT_TEST_MODE=1` |
 | Clock override for scheduler windows — `x-test-now` header on `/api/whatsapp/due-posts` | `src/app/api/whatsapp/due-posts/route.ts` → `computeDuePosts(groupId, nowOverride?)` | `MT_TEST_MODE=1` |
 | DM-Q&A stub — `answerScopedQuestion` returns the SCOPED CONTEXT itself instead of calling Anthropic, so specs assert the no-leak guarantee structurally (no raw phone digits ever enter the model's context; 📵 flags admin-only) | `src/lib/dm-qa.ts` | `MT_TEST_LLM_STUB_FILE` |
+| ~~LLM stub — `analyzeBatch` reads verdicts from a JSON file~~ | ~~`src/lib/message-analyzer.ts`~~ | **GONE (§10 step 8)** |
+
+**The verdict seam is dead and the env var is not.** §10 step 8 (2026-09-06)
+deleted `analyzeBatch`, `SYSTEM_PROMPT` and `AnalysisVerdict`, so nothing reads
+the contents of `MT_TEST_LLM_STUB_FILE` any more — but `dm-qa.ts` still keys its
+own stub off the variable *being set*, so the harness keeps setting it.
+
+**`npm run test:e2e` is red, on purpose.** Measured on 2026-09-06:
+
+```
+40 failed · 150 passed · 80 skipped · 82 did not run   (1.5m)
+```
+
+Every failure is a spec addressing the server through `verdict:` / `setLlmStub`
+and therefore driving a decider that no longer exists: it compiles, it runs, and
+every assertion that something was written fails because the server routes
+nothing it was told about, owns nothing and stays silent. (The 82 that "did not
+run" are the rest of the serial files those failures aborted, so the real number
+is larger.) They are **left failing rather than deleted or re-baselined** — each
+pins a shipped behaviour of the apply path — and the full list, the measured
+numbers and the shape of the port are in `e2e/helpers/stub.ts`'s header.
+`e2e/sim/attendance-engine.spec.ts` is the worked example: 25/25 green against
+the router and extractor seams.
+
+Two of the forty need an **inversion** rather than a port, because what they
+assert is genuinely gone: `sim/attendance-engine-overload.spec.ts` ("the analyzer
+takes the whole batch" — it does not exist, the messages are lost) and
+`sim/router-gate.spec.ts` ("with the gate OFF…" — `ROUTER_GATE_ENABLED` was
+deleted with the analyzer it reverted to).
 
 ### Architecture notes
 

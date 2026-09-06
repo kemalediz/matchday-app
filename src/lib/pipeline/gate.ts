@@ -1,43 +1,75 @@
 /**
- * §10 STEP 5 — ROUTER IN FRONT, MEGA-CALL BEHIND.
+ * §10 STEP 5 — THE ROUTER. IT USED TO BE A GATE IN FRONT OF SOMETHING.
  *
- *   "`none`-routed messages skip the analyzer; everything else hits the
- *    existing prompt unchanged. Captures the 44x banter saving with no
- *    change to how decisions are made."
+ * What stood here until 2026-09-06, and it was accurate for as long as
+ * there was something behind it:
  *
- * This module is a GATE, not a pipeline. It decides ONE thing: which
- * messages the unchanged 18,315-token analyzer sees. It does not
- * extract, does not decide, does not compose, and never writes. Steps 6
- * and 7 are what replace the analyzer; this step only stops paying it to
- * conclude that a laughing emoji is a laughing emoji.
+ *   "ROUTER IN FRONT, MEGA-CALL BEHIND. … This module is a GATE, not a
+ *    pipeline. It decides ONE thing: which messages the unchanged
+ *    18,315-token analyzer sees."
+ *
+ * §10 step 8 deleted `analyzeBatch`, the 19,850-token `SYSTEM_PROMPT`
+ * and `executeVerdict`. There is nothing behind the router any more —
+ * there is a set of DETERMINISTIC OWNERS beside it, one per route, and
+ * this module's job narrowed accordingly. It now decides ONE thing:
+ * which messages nobody is going to spend anything on, because the
+ * router called them banter.
+ *
+ *   `none`                                        → this file, skipped
+ *   `self_att` / `other_att` / `offer` / `unsure` → `attendance-engine-batch.ts`
+ *   `question`, `balancer` (show)                 → `pipeline/answer-batch.ts`
+ *   `balancer` (generate)                         → `team-ops-engine-batch.ts`
+ *   `score`                                       → `score-engine-batch.ts`
+ *   `admin_ops`                                   → `admin-ops-engine-batch.ts`
+ *   anything nobody owned                         → silence in the group
+ *                                                   plus one deduped
+ *                                                   operator DM
+ *                                                   (`lib/operator-note.ts`)
  *
  * 69.3% of real traffic is `noise`, measured over 1,723 production
- * messages (PR #35). An 8-message banter batch costs $0.0389 and
- * 14-19 s today (§8.2); through the router it was measured at $0.00137
- * and 1.1 s (PR #37).
+ * messages (PR #35). An 8-message banter batch cost $0.0389 and 14-19 s
+ * under the mega-prompt (§8.2); through the router it was measured at
+ * $0.00137 and 1.1 s (PR #37). That saving is now the whole of what
+ * skipping buys, and it is still worth having.
  *
  * ─────────────────────────────────────────────────────────────────────
- * THE ONLY WAY THIS GOES WRONG IS A REAL `IN` ROUTED `none`.
+ * THE ONLY WAY THIS GOES WRONG IS A REAL `IN` ROUTED `none`, AND IT IS
+ * WORSE THAN IT WAS
  * ─────────────────────────────────────────────────────────────────────
  *
- * §11.1 calls that the biggest risk in the whole redesign and a genuine
- * regression: today a misread message still gets a verdict and 54
- * seatbelts look at it; here it disappears. Every trade-off below is
+ * §11.1 called that the biggest risk in the whole redesign and a genuine
+ * regression, on these grounds: "today a misread message still gets a
+ * verdict and 54 seatbelts look at it; here it disappears." The first
+ * half of that sentence stopped being true on 2026-09-06. A message the
+ * router calls `none` is not read by a second decider that might
+ * disagree, because there is no second decider. Every trade-off below is
  * made against that, not against cost. Missing a saving costs pennies.
  * Missing a player's IN costs them their place.
  *
- * Four containments, all shipping with this step:
+ * Four containments. Three of them survive step 8 unchanged; the fourth
+ * is the one that now carries the weight:
  *
  *   1. BIAS TOWARD ACTION — in the router prompt, in the router parser
  *      (a missing id becomes `unsure`, never `none`), and again here
  *      (`partition` skips ONLY an explicit `none`; an id the router
- *      never mentioned is analysed).
+ *      never mentioned is handed on). `unsure` is an OWNED route since
+ *      step 8, so that bias now buys a real handler rather than a
+ *      fallback — see the essay on `ENGINE_ROUTES` below.
  *   2. THE FLOOR — `floorForcesAnalysis`, behind its own flag, default
- *      OFF. See the essay below.
- *   3. FAIL OPEN — a router error routes the whole batch to the
- *      analyzer (`routeBatch` already does this), and `gateBatch`
- *      catches anything it did not.
- *   4. SHADOW THE `none` BUCKET FOREVER — `none-shadow.ts`.
+ *      OFF. See the essay below; it is unchanged and it is still the
+ *      only regex in this file.
+ *   3. FAIL OPEN — `routeBatch` routes a FAILED ROUTER CALL to `unsure`
+ *      for the whole batch, and since step 8 that route has an owner.
+ *      `gateBatch`'s own catch is weaker and this is stated rather than
+ *      hidden: see "WHAT FAIL-OPEN MEANS NOW" on `gateBatch`.
+ *   4. SHADOW THE `none` BUCKET FOREVER — `none-shadow.ts`, driven by
+ *      `NONE_BUCKET_SHADOW_ENABLED` below. THIS ONE MATTERS MORE NOW
+ *      THAN IT DID WHEN IT WAS WRITTEN. It re-examines the messages this
+ *      file skipped and shouts when one of them turns out to have been
+ *      an attendance claim, and it is the ONLY remaining thing watching
+ *      for a real IN the router called banter. Before step 8 a `none`
+ *      that was wrong could still be caught by the analyzer looking at
+ *      the same window; now nothing else ever looks.
  *
  * ─────────────────────────────────────────────────────────────────────
  * WHY THERE IS A REGEX HERE AT ALL, AFTER 2026-09-01
@@ -50,34 +82,57 @@
  * what failed and it stays deleted.
  *
  * The floor is a different object, and the difference is not a matter of
- * degree:
+ * degree. THIS IS THE ARGUMENT THAT JUSTIFIES THE FLOOR EXISTING AT ALL,
+ * and step 8 does not touch it:
  *
  *   a classifier decides WHAT a message means, and can be wrong in both
- *   directions. The floor decides only WHETHER the analyzer gets to
- *   look, and can be wrong in one. Its output feeds a set union, so its
- *   worst case is one extra $0.03 analyzer call on a batch that did not
- *   need it. It cannot suppress a write, cannot change a verdict, and
- *   cannot alter how a message is handled once analysed — the analyzer
+ *   directions. The floor decides only WHETHER anyone gets to look, and
+ *   can be wrong in one. Its output feeds a set union, so its worst case
+ *   is one extra owner's extractor call on a message that did not need
+ *   it. It cannot suppress a write, cannot change a verdict, and cannot
+ *   alter how a message is handled once it is in the set — the owner
  *   receives the identical message object either way and is told nothing
- *   about why it is in the batch.
+ *   about why it is there.
  *
  * That is a seatbelt, and it is proven rather than asserted:
  * `__tests__/gate.test.ts` fuzzes arbitrary routes against real message
  * bodies and shows `analysed(floor on) ⊇ analysed(floor off)`, that
  * `routeFloor` can never return `none` (the property the whole thing
  * rests on), and that the analysed list is the same objects in the same
- * order with or without it.
+ * order with or without it. That fuzz suite is untouched by step 8 and
+ * must stay that way.
  *
- * It still ships DEFAULT OFF, separately from the gate, for two
- * reasons: §11.1 says reintroducing a floor at all "is a product
- * decision that needs his sign-off", and the router's true recall can
- * only be measured with the floor out of the way.
+ * It still ships DEFAULT OFF, separately from everything else, for two
+ * reasons that step 8 did not change: §11.1 says reintroducing a floor
+ * at all "is a product decision that needs his sign-off", and the
+ * router's true recall can only be measured with the floor out of the
+ * way.
+ *
+ * ─────────────────────────────────────────────────────────────────────
+ * WHAT THIS FILE DELIBERATELY DOES *NOT* DO
+ * ─────────────────────────────────────────────────────────────────────
+ *
+ *   • It does not decide anything about a message it passes on. It
+ *     labels, and the label is a route.
+ *   • It does not remove a skipped message from the batch. The analyze
+ *     route keeps scanning the whole batch, and a `none` message
+ *     vanishing would change what later passes conclude about its
+ *     neighbours.
+ *   • It does not go silent about a skip. A skipped message still gets
+ *     an `AnalyzedMessage` row tagged `GATED_HANDLED_BY`, which is the
+ *     `none`-bucket sweep's only input and the reason "did the gate eat
+ *     an IN?" is a query rather than a shrug.
  */
 import { readFileSync } from "node:fs";
-// TYPE-ONLY, and it has to stay that way: `message-analyzer.ts` pulls in
-// the Prisma client, and a runtime import here would make this module
-// unloadable in the Playwright worker where the recall harness runs it.
-import type { AnalysisVerdict } from "../message-analyzer";
+// ── THE TYPE-ONLY IMPORT OF `AnalysisVerdict` IS DELETED (§10 step 8) ─
+//   It existed so `gatedVerdict` could return the mega-call's exact
+//   shape, and it was type-only because `message-analyzer.ts` pulls in
+//   the Prisma client and a runtime import here would make this module
+//   unloadable in the Playwright worker where the recall harness runs
+//   it. `AnalysisVerdict` no longer exists. THE PLAYWRIGHT CONSTRAINT
+//   STILL DOES: this module must stay loadable outside Next, so any
+//   future import of `message-analyzer` or a Prisma-touching module
+//   from here has to be type-only for the same reason.
 import type { AwaitingQuestion } from "./awaiting-answer";
 import { anthropicModel, degradation, type PipelineModel } from "./llm";
 import { routeBatch, routeFloor, type RouterMessage } from "./router";
@@ -85,65 +140,148 @@ import type { Degradation, Route, RoutedMessage } from "./types";
 
 // ── Flags ─────────────────────────────────────────────────────────────
 
-/** THE revert. Unset or `0` and the analyze route behaves exactly as it
- *  did on `2d52d7a`: every message reaches the existing prompt. */
-export const GATE_FLAG = "ROUTER_GATE_ENABLED";
-/** The floor, separately signed off (§11.1). Meaningless with the gate
- *  off — there is nothing to rescue when nothing is skipped. */
-export const FLOOR_FLAG = "ROUTER_GATE_FLOOR_ENABLED";
-/** The nightly `none`-bucket sweep (§11.1's fourth containment). */
-export const SHADOW_FLAG = "NONE_BUCKET_SHADOW_ENABLED";
 /**
- * §10 STEP 6 — THE REVERT.
+ * ── `ROUTER_GATE_ENABLED` AND `ATTENDANCE_ENGINE_ENABLED` ARE DELETED ─
+ *     (§10 step 8, 2026-09-06)
  *
- *   "Swap the attendance path to extractor + engine. `self_att`,
- *    `other_att`, `offer` only … Everything else still runs the old
- *    prompt."  revert: "flag flips the three routes back".
+ * Both were reverts, and the thing they reverted TO was `analyzeBatch`.
+ * With `analyzeBatch` deleted their "off" positions stopped being
+ * reverts and became something much worse than a missing flag:
  *
- * Unset it (or set it to `0`) and every attendance message goes back to
- * the 18,315-token prompt and `executeVerdict`, exactly as on `b03d96b`.
- * It is SEPARATE from `GATE_FLAG` on purpose and in BOTH directions: a
- * revert of step 6 must not also revert step 5, and turning step 5 on
- * must not turn the write path over.
+ *   • `ATTENDANCE_ENGINE_ENABLED=0` would leave NOBODY handling
+ *     `self_att` / `other_att` / `offer` / `unsure`. Every "IN", every
+ *     "sorry lads can't make it", every admin demote would be silence
+ *     plus an operator note. That is not a tuning lever; it is a kill
+ *     switch for the product's core write path wearing the name of one.
+ *   • `ROUTER_GATE_ENABLED=0` used to mean "the analyzer sees the banter
+ *     too". With no analyzer it means only that `skipped` is empty, and
+ *     every owner already refuses a `none` route on its own. The flag is
+ *     inert, and an inert flag is the "worst kind of flag" this file has
+ *     warned about since step 5, seen from the other side.
+ *
+ * A flag whose off position has no implementation is worse than no flag,
+ * so both are DELETED rather than defaulted ON. THE REVERT FOR STEP 8 IS
+ * `git revert`, and that is worth saying plainly rather than leaving a
+ * switch that looks like one.
+ *
+ * The four STEP-7 route flags are the deliberate contrast and they are
+ * KEPT, now defaulting ON: their off position is a survivable
+ * degradation (MatchTime goes quiet on questions, or on scores, and an
+ * operator is told) rather than an unimplemented one. The full argument
+ * is in `pipeline/route-flags.ts`.
+ *
+ * WHAT WENT WITH THEM: `isRouterGateEnabled`, `isAttendanceEngineEnabled`,
+ * `ENGINE_HEADER` / `engineHeaderOverride` (the test-only per-request
+ * A/B override — there is no second arm to A/B against any more), and
+ * the `enabled` / `engine` fields of `RouterStubConfig`. Nothing is left
+ * unguarded by their removal: the behaviour they used to select between
+ * no longer has two sides.
  */
-export const ENGINE_FLAG = "ATTENDANCE_ENGINE_ENABLED";
+
+/** The floor, separately signed off (§11.1). Default OFF. Reintroducing
+ *  a floor at all is a product decision that needs Kemal's sign-off, and
+ *  the router's true recall is only measurable with it out of the way. */
+export const FLOOR_FLAG = "ROUTER_GATE_FLOOR_ENABLED";
 
 /**
- * The three routes the engine owns, and no others.
+ * The nightly `none`-bucket sweep (§11.1's fourth containment). Default
+ * OFF, and it is the one flag in this file whose OFF position got more
+ * expensive on 2026-09-06.
  *
- * `unsure` is deliberately ABSENT even though it shares the attendance
- * extractor in the dry run. §11.1's asymmetry runs the other way once a
- * write is real: inside the dry run a doubtful message costs one
- * extractor call and proposes nothing, but on the WRITE path it would
- * decide a squad place from a route the router itself could not settle.
- * §13's conservative default — "a missed add is recoverable in one
- * message; a wrong registration on a paid match is not" — makes doubt
- * cost an analyzer call, which is today's behaviour and therefore
- * cannot be a regression.
+ * The sweep re-examines the messages this file skipped and shouts when
+ * one of them turns out to have carried an attendance claim. §11.1 calls
+ * it "the regression detector the current architecture has never had".
+ * IT MATTERS MORE NOW THAN WHEN IT WAS WRITTEN: with the mega-prompt
+ * deleted it is the ONLY remaining thing watching for a real IN that the
+ * router called banter. Before step 8, a wrong `none` could still be
+ * caught by a second decider reading the same window; there is no second
+ * decider, so nothing else ever looks at that bucket again.
  */
-export const ENGINE_ROUTES: readonly Route[] = ["self_att", "other_att", "offer"];
+export const SHADOW_FLAG = "NONE_BUCKET_SHADOW_ENABLED";
+
+/**
+ * The four routes the engine owns, and no others.
+ *
+ * ─────────────────────────────────────────────────────────────────────
+ * `unsure` JOINED THIS LIST ON 2026-09-06 (§10 STEP 8), AND THE REASON
+ * IT WAS EXCLUDED IS THE REASON IT IS NOW INCLUDED
+ * ─────────────────────────────────────────────────────────────────────
+ *
+ * What stood here until today, verbatim, and it was right at the time:
+ *
+ *   "`unsure` is deliberately ABSENT even though it shares the
+ *    attendance extractor in the dry run. §11.1's asymmetry runs the
+ *    other way once a write is real: inside the dry run a doubtful
+ *    message costs one extractor call and proposes nothing, but on the
+ *    WRITE path it would decide a squad place from a route the router
+ *    itself could not settle. §13's conservative default — 'a missed
+ *    add is recoverable in one message; a wrong registration on a paid
+ *    match is not' — makes doubt cost an analyzer call, WHICH IS
+ *    TODAY'S BEHAVIOUR and therefore cannot be a regression."
+ *
+ * Every clause of that argument rests on the last one. It compares the
+ * engine against a decider that has just been deleted. Step 8 removes
+ * `analyzeBatch` and the 19,850-token `SYSTEM_PROMPT`, so the question
+ * `unsure` asks is no longer "engine or analyzer" — it is "engine or
+ * SILENCE". §11.1 answers that one explicitly and in the opposite
+ * direction:
+ *
+ *   "A false positive costs one extractor call (~$0.002) that returns
+ *    no claims. A false negative costs a player their slot. The
+ *    asymmetry must be built in, not hoped for."
+ *
+ * NOTHING IS LOOSENED TO ACCEPT IT. An `unsure` message meets exactly
+ * the rules a `self_att` one meets, because it is handed to the same
+ * extractor and the same `engine.ts`: the interaction contract's tag
+ * gate, capacity, authorisation for a third-party move, the
+ * corroboration policy, `contingent`, `tense`, `personNamed`, the
+ * confidence floor. The engine is not a second router; it applies one
+ * set of rules to a message that arrived by a different door. Its worst
+ * case is the one §6.2 measured and accepted — the extractor returns no
+ * claims, nothing is written, and the operator note says so.
+ *
+ * ─────────────────────────────────────────────────────────────────────
+ * THIS MEMBERSHIP IS ALSO THE WHOLE OF §11.4'S ROUTER-FAILURE PLAN
+ * ─────────────────────────────────────────────────────────────────────
+ *
+ * `router.ts` already catches a failed router call and routes the entire
+ * batch to `unsure`, with the comment "§11.4: on router failure, route
+ * EVERYTHING to the attendance extractor. Expensive, correct, and
+ * self-limiting because batches are small."
+ *
+ * That comment was not true. `unsure` was not an engine route, so a
+ * router outage sent the whole batch to the mega-prompt — which, once
+ * the mega-prompt is gone, would have been silence for every message in
+ * it, including a bare "IN". One line here buys the entire containment,
+ * and `__tests__/gate.test.ts` pins it as its own case so that removing
+ * `unsure` again shows up as "router-failure handling broke" rather
+ * than as a routing preference.
+ *
+ * The same holds for PR #43's open-question rescue, which rewrites
+ * `none` → `unsure` while MatchTime is waiting for an answer. Without
+ * this line that rescue would, after step 8, have rescued a message into
+ * silence.
+ */
+export const ENGINE_ROUTES: readonly Route[] = [
+  "self_att",
+  "other_att",
+  "offer",
+  "unsure",
+];
 
 type Env = Record<string, string | undefined>;
 
-/** Deliberately strict: only these five spellings turn something on, so
- *  a typo in a Vercel env var can never enable a step-5 behaviour by
- *  accident. Same shape as `isShadowAnalysisEnabled`. */
+/** Deliberately strict: only these four spellings turn something on, so
+ *  a typo in a Vercel env var can never enable the floor or the nightly
+ *  sweep by accident. `route-flags.ts` keeps a deliberate COPY of this
+ *  and asserts the two agree on the same inputs, so loosening one cannot
+ *  quietly loosen the other. NOTE the asymmetry with that file: these
+ *  two flags default OFF and need an explicit ON, its four default ON
+ *  and need an explicit OFF, and each direction is the one that cannot
+ *  lose anything for the flag it guards. */
 function on(env: Env, key: string): boolean {
   const raw = env[key]?.trim().toLowerCase();
   return raw === "1" || raw === "true" || raw === "yes" || raw === "on";
-}
-
-export function isRouterGateEnabled(env: Env = process.env): boolean {
-  // The test seam wins, and ONLY when MT_TEST_ROUTER_STUB_FILE is set —
-  // an env var nothing but `buildTestEnv()` ever sets. Without it, not
-  // one byte of the stub file is read. This exists because the dev
-  // server's environment is fixed at boot, so a stubbed e2e spec has no
-  // other way to run one request with the gate on and the next with it
-  // off. Same shape and same blast radius as MT_TEST_LLM_STUB_FILE,
-  // which replaces the entire model.
-  const stub = routerStubConfig(env);
-  if (stub && typeof stub.enabled === "boolean") return stub.enabled;
-  return on(env, GATE_FLAG);
 }
 
 export function isRouterFloorEnabled(env: Env = process.env): boolean {
@@ -157,60 +295,20 @@ export function isNoneBucketShadowEnabled(env: Env = process.env): boolean {
 }
 
 /**
- * §10 step 6. Default OFF, same five spellings, same test seam.
+ * Does the engine decide this route?
  *
- * Read through a predicate rather than `process.env.X` in the route so
- * a unit test can prove the default without mutating the process, and
- * so there is exactly ONE place that decides whether the write path has
- * moved.
+ * PURE ROUTE MEMBERSHIP — no env var, no flag, no request context. That
+ * was true before §10 step 8 and it is why this predicate survived the
+ * deletion of `isAttendanceEngineEnabled` beside it: the flag answered
+ * "is the engine switched on at all", which is a question with only one
+ * answer now, while this answers "is this message the engine's", which
+ * is a question with nine.
+ *
+ * A route it has never heard of — including `undefined`, which is what a
+ * message the router never mentioned looks like — is never owned. That
+ * is §11.1's asymmetry restated as a default: a coverage hole must never
+ * look like a decision.
  */
-export function isAttendanceEngineEnabled(env: Env = process.env): boolean {
-  const stub = routerStubConfig(env);
-  if (stub && typeof stub.engine === "boolean") return stub.engine;
-  return on(env, ENGINE_FLAG);
-}
-
-/**
- * TEST-ONLY per-request override, for the ONE thing the stub-file seam
- * cannot do: an A/B on a LIVE run.
- *
- * The corpus and the replay harness both need "the same real model, the
- * same real world, the flag on for one arm and off for the other, in
- * one process". The stub file cannot serve that — a live run pins
- * `MT_TEST_ROUTER_STUB_FILE` empty on purpose, because a live sweep
- * that could read canned routes out of a file would not be measuring
- * anything. And the dev server's environment is fixed at boot, so the
- * env var cannot differ between two requests either.
- *
- * So the header. It is DOUBLE-gated and both gates matter:
- *
- *   1. `MT_TEST_MODE` must be exactly "1". Nothing sets that but
- *      `e2e/helpers/env.ts:buildTestEnv()`; it is not in `.env.example`,
- *      not in Vercel, and not on the Pi.
- *   2. Absent or unrecognised → `null`, and the caller falls back to the
- *      env flag. There is no value of this header that can turn the
- *      engine on in a process that has not declared itself a test.
- *
- * It can only ever choose between two shipped code paths. It cannot
- * inject a route, a fact, a verdict or a write.
- */
-export const ENGINE_HEADER = "x-mt-attendance-engine";
-
-export function engineHeaderOverride(
-  header: string | null | undefined,
-  env: Env = process.env,
-): boolean | null {
-  if (env.MT_TEST_MODE !== "1") return null;
-  const raw = header?.trim().toLowerCase();
-  if (raw === undefined || raw === "") return null;
-  if (raw === "1" || raw === "true" || raw === "yes" || raw === "on") return true;
-  if (raw === "0" || raw === "false" || raw === "no" || raw === "off") return false;
-  return null;
-}
-
-/** Does the engine decide this route? A route it has never heard of —
- *  including `undefined`, which is what a message the router never
- *  mentioned looks like — is never owned. */
 export function engineOwnsRoute(route: Route | undefined): boolean {
   return route !== undefined && ENGINE_ROUTES.includes(route);
 }
@@ -218,31 +316,38 @@ export function engineOwnsRoute(route: Route | undefined): boolean {
 /**
  * Must the router run at all?
  *
- * Step 5 needed routes to decide what the analyzer SEES; step 6 needs
- * the same routes to decide what the analyzer DECIDES. Either flag on
- * means the router call happens — otherwise turning step 6 on without
- * step 5 would silently own nothing, which is the worst kind of flag:
- * one that looks enabled and does nothing.
+ * YES, ALWAYS, and this function is kept rather than deleted so the
+ * question stays askable at the call site and the answer stays in one
+ * place.
+ *
+ * It used to take two arguments and OR two flags: step 5 needed routes
+ * to decide what the analyzer SAW, step 6 needed the same routes to
+ * decide what the analyzer DECIDED, and either flag on meant the router
+ * call happened. Both flags are gone (see the block above), and after
+ * step 8 a route is not an optimisation — it is the only thing that
+ * tells the analyze route WHICH OWNER a message belongs to. Without one,
+ * every message is unowned, every reply is an operator note, and
+ * MatchTime says nothing to anybody.
+ *
+ * So there is no environment in which skipping the router is correct,
+ * and the honest way to say that is a function that takes no arguments
+ * and returns true. The caller still asks; the answer is just no longer
+ * a decision.
  */
-export function routerIsNeeded(
-  env: Env = process.env,
-  /**
-   * The step-6 flag AS THE CALLER RESOLVED IT. The analyze route may
-   * have a per-request override (`engineHeaderOverride`) that the
-   * environment knows nothing about, and a predicate that re-read the
-   * env here would disagree with the caller about whether the engine is
-   * on — which would mean running the engine with no routes, the worst
-   * kind of flag: one that looks enabled and does nothing.
-   */
-  engineEnabled: boolean = isAttendanceEngineEnabled(env),
-): boolean {
-  return isRouterGateEnabled(env) || engineEnabled;
+export function routerIsNeeded(): boolean {
+  return true;
 }
 
 // ── The floor, as a boolean ───────────────────────────────────────────
 
 /**
- * Does the deterministic floor insist this message reaches the analyzer?
+ * Does the deterministic floor insist somebody looks at this message?
+ *
+ * "Reaches the analyzer" is what this used to ask. Since §10 step 8 the
+ * set it protects membership of is the set of messages that reach their
+ * OWNER rather than being dropped as banter, which is the same channel
+ * with a different thing on the far end — and the monotonicity argument
+ * below is about the channel, so it is unchanged.
  *
  * A BOOLEAN, on purpose. `routeFloor` returns a `Route`, and inside the
  * dry-run pipeline that route is used — it decides which extractor runs.
@@ -266,7 +371,15 @@ export interface GateMessage {
 }
 
 export interface Partitioned {
-  /** Ids handed to the unchanged analyzer, in input order. */
+  /**
+   * Ids that reach their owner, in input order.
+   *
+   * NAMED `analysed` FOR THE MEGA-PROMPT IT NO LONGER FEEDS, and kept
+   * that way deliberately: the analyze route, the recall harness, the
+   * corpus sweeps and three months of logs all read this field by name,
+   * and renaming a field in a deletion PR is how a deletion PR acquires
+   * a second bug. It means "not skipped".
+   */
   analysed: string[];
   /** Ids the router routed `none` and the floor did not rescue. */
   skipped: string[];
@@ -335,41 +448,48 @@ export function partition(
  */
 export const GATED_HANDLED_BY = "router-gate";
 
-/** Every gated row's `reasoning` starts with this. The `none`-bucket
- *  shadow and the reach guard both key off it. */
-export const GATED_REASON_PREFIX = "router-gate:";
+/**
+ * ── `GATED_REASON_PREFIX` IS DELETED (§10 step 8) ────────────────────
+ *
+ * It was `"router-gate:"`, and every gated row's `reasoning` started
+ * with it so that `gatedVerdict`'s prose could be told apart from
+ * `offlineVerdict`'s six prefixes by the partial-response admin DM —
+ * which decided whether to wake a human by matching strings.
+ *
+ * Nothing keys off it any more. The `none`-bucket sweep selects on
+ * `AnalyzedMessage.handledBy = GATED_HANDLED_BY` (`none-shadow.ts:132`),
+ * which is a column and not a substring, and the admin DM was replaced
+ * by `lib/operator-note.ts`, which selects on OWNERSHIP and drops every
+ * `none` route outright. The guard this prefix supported cannot fire
+ * wrongly because the thing it fed no longer reads prose at all.
+ *
+ * The analyze route still writes a row for every skipped message and
+ * still says which route it was skipped for; it just writes it as an
+ * ordinary reasoning string rather than one a regex elsewhere depends
+ * on.
+ */
 
 /**
- * The verdict a skipped message gets in place of the analyzer's.
+ * ── `gatedVerdict` IS DELETED (§10 step 8) ───────────────────────────
  *
- * `intent: "noise"` and every action field null — byte-for-byte what
- * the mega-call emits for the 69.3% of traffic that is banter, so every
- * downstream guard, audit pass and reconciliation sees exactly the
- * shape it saw yesterday. Deliberately NOT `offlineVerdict`: that one
- * means "we tried and failed" and fires the partial-response admin DM.
- * This one means "we decided not to ask".
+ * It returned "byte-for-byte what the mega-call emits for the 69.3% of
+ * traffic that is banter, so every downstream guard, audit pass and
+ * reconciliation sees exactly the shape it saw yesterday". There is no
+ * mega-call and no `AnalysisVerdict`, so there is no shape to imitate.
+ *
+ * `GATED_HANDLED_BY` above STAYS, and it is the load-bearing half. The
+ * nightly `none`-bucket sweep (`none-shadow.ts:132`) selects on
+ * `AnalyzedMessage.handledBy = "router-gate"`, and §11.1 calls that
+ * sweep "the regression detector the current architecture has never
+ * had". It matters MORE after step 8 than before: it is now the only
+ * thing watching for a real IN that the router called banter, because
+ * there is no longer a second decider to catch one.
+ *
+ * `GATED_REASON_PREFIX` went with the verdict. The analyze route still
+ * writes a row for every skipped message and still says which route it
+ * was skipped for; it just writes it as an ordinary reasoning string
+ * rather than one a regex elsewhere depends on.
  */
-export function gatedVerdict(waMessageId: string, route: Route | undefined): AnalysisVerdict {
-  return {
-    waMessageId,
-    intent: "noise",
-    confidence: 1,
-    react: null,
-    reply: null,
-    registerAttendance: null,
-    benchConfirmation: null,
-    scoreRed: null,
-    scoreYellow: null,
-    includeNames: null,
-    teamOverrides: null,
-    teamNames: null,
-    bulkPayment: null,
-    reminder: null,
-    registerFor: null,
-    recruitRequest: false,
-    reasoning: `${GATED_REASON_PREFIX} routed ${route ?? "none"}; the analyzer was not asked (§10 step 5)`,
-  };
-}
 
 export interface GateOutcome extends Partitioned {
   routes: RoutedMessage[];
@@ -404,8 +524,9 @@ export interface GateOptions {
    *
    * PASSED IN, not loaded here: `load-awaiting-answer.ts` is the only
    * module that touches Prisma, and this one has to stay loadable in the
-   * Playwright worker and in the plain `tsx` recall script (the same
-   * reason `message-analyzer` is imported type-only above).
+   * Playwright worker and in the plain `tsx` recall script — the same
+   * constraint recorded at the top of this file where the type-only
+   * `message-analyzer` import used to be.
    *
    * `undefined` -- the default, and what every existing caller gets --
    * is "MatchTime is not waiting for anything", under which the gate
@@ -417,11 +538,41 @@ export interface GateOptions {
 /**
  * Route a batch and partition it. NEVER THROWS.
  *
- * Every failure mode lands on "analyse everything", which is exactly
- * today's behaviour and therefore cannot be a regression. `routeBatch`
- * already handles a failed call that way; this catches anything above
- * it — a model constructor that throws for a missing key, an OOM, a bug
- * in this file.
+ * ─────────────────────────────────────────────────────────────────────
+ * WHAT FAIL-OPEN MEANS NOW, STATED RATHER THAN INHERITED
+ * ─────────────────────────────────────────────────────────────────────
+ *
+ * Until 2026-09-06 the comment here read: "Every failure mode lands on
+ * 'analyse everything', which is exactly today's behaviour and therefore
+ * cannot be a regression." Both halves of that depended on the analyzer.
+ * With it deleted, `everything()` below no longer means "analysed by the
+ * mega-prompt" — it means "skipped by nobody", which is not the same
+ * thing as "handled by somebody".
+ *
+ * The two failure paths are now genuinely different and the difference
+ * is worth knowing at 2am:
+ *
+ *   • A FAILED ROUTER CALL — the realistic one, and the one §11.4 plans
+ *     for — never reaches this catch. `routeBatch` handles it and routes
+ *     the ENTIRE batch to `unsure`, which since step 8 is an owned route
+ *     (`ENGINE_ROUTES`). Every message goes to the attendance extractor:
+ *     expensive, correct, and self-limiting because batches are small.
+ *     That is a real containment, not a hope.
+ *   • THIS CATCH covers what is left above `routeBatch`: a model
+ *     constructor that throws for a missing key, an OOM, a bug in this
+ *     file. It returns no routes at all, so every message reaches the
+ *     owners UNROUTED, no owner claims an undefined route, and the batch
+ *     lands on silence plus one deduped operator DM
+ *     (`lib/operator-note.ts`). THAT IS A REAL DEGRADATION AND IT IS NOT
+ *     PRETENDED OTHERWISE. It is left as it is because every failure it
+ *     covers — no API key, no memory — is one an extractor call would
+ *     hit a line later anyway, so manufacturing `unsure` routes here
+ *     would buy a second failure rather than a rescue, and would spend a
+ *     model call to find that out. What it does buy is the operator
+ *     note, which is the signal §9 says this product has never had.
+ *
+ * The invariant that has not changed: this function never throws, so a
+ * router problem can never take the analyze route down with it.
  */
 export async function gateBatch(
   messages: GateMessage[],
@@ -474,7 +625,8 @@ export async function gateBatch(
       degradation(
         "router",
         null,
-        `the router gate failed (${(err as Error).message}); the whole batch goes to the analyzer`,
+        `the router gate failed (${(err as Error).message}); nothing is skipped, and with no ` +
+          `routes no owner can claim a message — the batch degrades to an operator note`,
       ),
     ]);
   }
@@ -483,14 +635,19 @@ export async function gateBatch(
 /** The stub seam is checked BEFORE the real model is constructed, so a
  *  stubbed e2e run never needs a key. A missing key in production
  *  surfaces as a throw inside `gateBatch`'s try, where it degrades to
- *  "analyse everything" — today's behaviour. */
+ *  "nothing is skipped and nothing is routed" — see the fail-open essay
+ *  on `gateBatch` for what that costs now that there is no analyzer
+ *  behind it. */
 function defaultGateModel(): PipelineModel {
   return routerStubFromEnv() ?? anthropicModel();
 }
 
 /**
- * TEST-ONLY seam, mirroring `MT_TEST_LLM_STUB_FILE` in
- * `message-analyzer.ts`. When `MT_TEST_ROUTER_STUB_FILE` is set, the
+ * TEST-ONLY seam, the same shape as `pipeline/extractor-stub.ts`'s.
+ * (It used to be described as mirroring `MT_TEST_LLM_STUB_FILE` in
+ * `message-analyzer.ts`; that seam went with `analyzeBatch` in §10 step
+ * 8, and the extractor stub is now the live sibling to compare against.)
+ * When `MT_TEST_ROUTER_STUB_FILE` is set, the
  * router's answer is read from a JSON file
  * (`{"routes": {"<waMessageId>": "none"}}`) instead of a model call, so
  * the stubbed e2e suite can exercise the gate deterministically and for
@@ -498,20 +655,22 @@ function defaultGateModel(): PipelineModel {
  *
  * Never set in production. `e2e/helpers/live-llm.ts` refuses a "live"
  * run that can still see it, the same way it refuses one that can still
- * see the analyzer stub.
+ * see any other stub seam.
  */
 export const ROUTER_STUB_FILE_ENV = "MT_TEST_ROUTER_STUB_FILE";
 
 export interface RouterStubConfig {
-  /** Overrides ROUTER_GATE_ENABLED for this request. */
-  enabled?: boolean;
-  /** Overrides ROUTER_GATE_FLOOR_ENABLED for this request. */
+  /**
+   * Overrides ROUTER_GATE_FLOOR_ENABLED for this request.
+   *
+   * THE ONLY BOOLEAN LEFT. `enabled` (ROUTER_GATE_ENABLED) and `engine`
+   * (ATTENDANCE_ENGINE_ENABLED) were deleted with their flags in §10
+   * step 8 — a stub field can only ever choose between two shipped code
+   * paths, and neither of those flags has two any more. A stub file
+   * that still carries them is ignored rather than rejected: the extra
+   * keys parse, mean nothing, and cannot select anything.
+   */
   floor?: boolean;
-  /** Overrides ATTENDANCE_ENGINE_ENABLED for this request (§10 step 6).
-   *  Same seam, same blast radius: only ever read when
-   *  MT_TEST_ROUTER_STUB_FILE is set, which nothing outside the e2e
-   *  harness sets. */
-  engine?: boolean;
   /** waMessageId → route. Unmapped ids fall back to `unsure`. */
   routes?: Record<string, string>;
   /** Trimmed message body → route, for specs that cannot know the ids
@@ -519,7 +678,7 @@ export interface RouterStubConfig {
   bodies?: Record<string, string>;
 }
 
-/** Read fresh on every call, like the analyzer's stub, so a spec can
+/** Read fresh on every call, like the extractor stub, so a spec can
  *  rewrite it between requests. Returns null unless the env var is set —
  *  which is the only thing standing between this and production. */
 function routerStubConfig(env: Env = process.env): RouterStubConfig | null {
@@ -529,9 +688,9 @@ function routerStubConfig(env: Env = process.env): RouterStubConfig | null {
     return JSON.parse(readFileSync(file, "utf8")) as RouterStubConfig;
   } catch {
     // Missing or garbled → behave as if there were no stub at all. The
-    // gate then falls back to the env flags (off by default) and every
-    // message is analysed, which is the direction that cannot lose a
-    // write.
+    // only flag left for it to override is the floor, so the fallback is
+    // `ROUTER_GATE_FLOOR_ENABLED`, off by default — which means the
+    // router's own answer decides, exactly as in production.
     return {};
   }
 }

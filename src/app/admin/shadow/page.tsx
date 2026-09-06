@@ -5,22 +5,48 @@ import { redirect } from "next/navigation";
 import Link from "next/link";
 import { ArrowLeft } from "lucide-react";
 import { format, formatDistanceToNow } from "date-fns";
-import { isShadowAnalysisEnabled } from "@/lib/window-analyzer";
 import type {
   WindowVerdict as WindowVerdictShape,
   WindowStateChange,
 } from "@/lib/window-analyzer";
 
 /**
- * /admin/shadow — read-only dashboard comparing the shadow window-
- * analyzer's single-diff verdict against the live per-message
- * analyzer's verdicts for the same batch. Built 2026-05-29 to give us
- * a week of comparison data before deciding whether to cut over.
+ * /admin/shadow — read-only dashboard over the `WindowVerdict` table.
+ *
+ * Built 2026-05-29 to compare the shadow window-analyzer's single-diff
+ * verdict against the live per-message analyzer's verdicts for the same
+ * batch, and to give us a week of comparison data before deciding
+ * whether to cut over.
+ *
+ * ── THE LIVE SHADOW IS RETIRED (§10 step 7/8, 2026-09-06) ───────────
+ *
+ *   `isShadowAnalysisEnabled` used to drive the banner below; the flag,
+ *   `runShadowAnalysis` and the whole one-coherent-diff prompt are
+ *   deleted. The shadow was a COMPARISON against the mega-prompt, and
+ *   step 8 deleted the mega-prompt, so there is nothing left on the
+ *   other side of the diff. `src/lib/window-analyzer.ts` carries the
+ *   full argument.
+ *
+ *   THIS PAGE IS NOT DEAD AND IS NOT AN ARCHIVE. Two reasons it keeps
+ *   earning its place:
+ *
+ *     1. Three months of historical rows are the record of how the
+ *        cut-over decision was reached.
+ *     2. `api/cron/none-bucket-shadow` still WRITES new `WindowVerdict`
+ *        rows — §11.1's fourth containment, the nightly re-examination
+ *        of the messages the router called banter. After step 8 that
+ *        sweep is the ONLY thing watching for a real IN the router got
+ *        wrong, so its output is the most important thing on this page.
+ *
+ *   The "Live (per-message)" column is joined from `AnalyzedMessage` and
+ *   keeps working unchanged: those rows are written by whichever owner
+ *   handled the message, which since step 8 is an engine rather than the
+ *   analyzer.
  *
  * Layout: per WindowVerdict row, show
  *   - window timestamps + cost + latency
  *   - the messages in the window (resolved via waMessageId join)
- *   - shadow verdict: summary, stateChanges, groupReply
+ *   - the recorded verdict: summary, stateChanges, groupReply
  *   - live verdicts: per AnalyzedMessage row, intent + action
  *   - cheap "agreement" badge — heuristic, not authoritative
  */
@@ -69,7 +95,6 @@ export default async function ShadowDashboardPage() {
     }),
   );
 
-  const enabled = isShadowAnalysisEnabled();
   const totalCost = verdicts.reduce((s, v) => s + (v.costUsd ?? 0), 0);
   const dayCount = Math.max(1, Math.ceil((Date.now() - (verdicts.at(-1)?.createdAt.getTime() ?? Date.now())) / (24 * 60 * 60 * 1000)));
 
@@ -80,58 +105,46 @@ export default async function ShadowDashboardPage() {
       </Link>
 
       <div>
-        <h1 className="text-2xl font-bold text-slate-900">Shadow window-analyzer</h1>
+        <h1 className="text-2xl font-bold text-slate-900">Window verdicts</h1>
         <p className="text-sm text-slate-600 mt-1">
-          A single-diff analyzer that can run alongside the live per-message one. No attendance is
-          written from this path — it's a comparison view for the architectural cut-over decision.
+          Window-level verdicts recorded alongside the live per-message ones. No attendance is
+          written from this path — it is a read-only comparison view.
         </p>
       </div>
 
-      {enabled ? (
-        <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-900">
-          <p className="font-semibold">Shadow analysis is ON.</p>
-          <p className="mt-1">
-            Every batch is being analysed a second time (~$0.014 each, capped by{" "}
-            <code className="font-mono text-xs">SHADOW_DAILY_USD_CAP</code>, default $5/day). Turn it
-            off again with <code className="font-mono text-xs">SHADOW_ANALYZER_ENABLED=0</code> once
-            you have read the comparison you needed.
-          </p>
-        </div>
-      ) : (
-        <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
-          <p className="font-semibold">Shadow analysis is OFF. Nothing new is being recorded.</p>
-          <p className="mt-1">
-            It ran on every batch from 29 May to 31 Aug 2026 — a second, uncached Sonnet call per
-            batch, roughly 30% of the analyzer bill — without a decision ever being taken from it,
-            so it was switched off. Anything below is historical.
-          </p>
-          <p className="mt-2">
-            To collect fresh comparison data (e.g. to diff a new pipeline against the current one on
-            live traffic), set <code className="font-mono text-xs">SHADOW_ANALYZER_ENABLED=1</code>{" "}
-            in the app environment and redeploy. Turn it off again afterwards.
-          </p>
-        </div>
-      )}
+      <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
+        <p className="font-semibold">The shadow window-analyzer is retired. This page shows historical runs.</p>
+        <p className="mt-1">
+          It ran on every batch from 29 May to 31 Aug 2026 — a second, uncached Sonnet call per
+          batch, roughly 30% of the analyzer bill — and was switched off on 31 Aug without a
+          decision ever having been taken from it. On 6 Sep 2026 it was deleted outright: it
+          compared the new pipeline against the old mega-prompt, and the mega-prompt is gone, so
+          there is nothing left on the other side of the diff.
+        </p>
+        <p className="mt-2">
+          Rows dated before then are historical and are kept as the record of how that decision was
+          reached. There is no flag to turn it back on.
+        </p>
+        <p className="mt-2">
+          <span className="font-semibold">New rows can still appear here.</span> The nightly
+          none-bucket sweep (<code className="font-mono text-xs">NONE_BUCKET_SHADOW_ENABLED</code>)
+          writes into the same table when it re-examines messages the router treated as banter. That
+          sweep is now the only thing watching for a real IN the router got wrong, so its rows are
+          the ones worth reading.
+        </p>
+      </div>
 
       <div className="grid grid-cols-3 gap-3">
         <Stat label="Windows analyzed (14d)" value={verdicts.length.toString()} />
-        <Stat label="Total Sonnet cost" value={`$${totalCost.toFixed(4)}`} />
+        <Stat label="Total model cost" value={`$${totalCost.toFixed(4)}`} />
         <Stat label="Avg cost/window" value={`$${(verdicts.length ? totalCost / verdicts.length : 0).toFixed(4)}`} />
       </div>
 
       {verdicts.length === 0 && (
         <div className="rounded-lg border border-slate-200 bg-white p-6 text-sm text-slate-500">
-          {enabled ? (
-            <>
-              No shadow runs in the last 14 days. Once the bot's next Pi flush hits this org, you'll
-              see windows here. The Pi flushes every 10 min when there are pending messages.
-            </>
-          ) : (
-            <>
-              No shadow runs in the last 14 days — shadow analysis is switched off, so this is
-              expected. Nothing is broken. See the note above to turn it on.
-            </>
-          )}
+          No window verdicts in the last 14 days. The shadow analyzer that used to fill this table on
+          every batch is retired, so this is expected. Nothing is broken. Rows appear here when the
+          nightly none-bucket sweep runs.
         </div>
       )}
 
@@ -156,7 +169,7 @@ export default async function ShadowDashboardPage() {
               <div className="grid grid-cols-1 md:grid-cols-2 gap-0 divide-y md:divide-y-0 md:divide-x divide-slate-200">
                 {/* Shadow side */}
                 <div className="p-4 space-y-3 bg-emerald-50/40">
-                  <div className="text-xs uppercase tracking-wider text-emerald-700 font-semibold">Shadow (window-level)</div>
+                  <div className="text-xs uppercase tracking-wider text-emerald-700 font-semibold">Recorded (window-level)</div>
                   <p className="text-sm text-slate-800 italic">"{shadow.windowSummary}"</p>
                   {shadow.stateChanges.length === 0 ? (
                     <div className="text-xs text-slate-500 italic">No state changes.</div>
@@ -251,7 +264,7 @@ function AgreementBadge({ agreement }: { agreement: Agreement }) {
   );
 }
 
-/** Cheap heuristic: do shadow's stateChange action-counts match the
+/** Cheap heuristic: do the recorded stateChange action-counts match the
  *  live verdicts' implied actions (IN/OUT/etc)? Not authoritative —
  *  this is a glance-filter for the dashboard. */
 function computeAgreement(

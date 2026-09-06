@@ -1,37 +1,64 @@
 /**
- * Smart WhatsApp message analysis — the LLM pass that classifies
- * EVERY message from a monitored group.
+ * THE SCHEDULED-CHASE COMPOSER, and what is left of the analyzer.
  *
- * Pipeline:
- *   - There is no regex pre-filter on the bot. The one that sat in
- *     `handlers.ts` and reacted instantly to clear IN/OUT/score was
- *     deleted on 2026-04-21, deliberately: a few minutes of latency in
- *     exchange for a single code path that handles nuance end to end.
- *   - So everything a monitored group says reaches this function — the
- *     clear INs as much as the drops with excuses, the conditional
- *     joins, the squad questions and the banter.
- *   - The analyze route does keep a handful of narrow regex
- *     short-circuits BEFORE this call (personal stats link, DM Q&A,
- *     admin rating progress). Those answer from grounded data this
- *     prompt cannot see; none of them touch attendance. The recruit
- *     one, which did overlap with attendance, was deleted on
- *     2026-09-01 (PR #33) after it swallowed a third-party OUT.
+ * ─────────────────────────────────────────────────────────────────────
+ * THE NAME OF THIS FILE IS NOW WRONG (§10 step 8, 2026-09-06)
+ * ─────────────────────────────────────────────────────────────────────
  *
- * Batching:
- *   - Messages accumulate in a per-group in-memory buffer on the bot.
- *   - Every ~10 min (or immediately on urgency — match within 1h),
- *     the bot flushes the buffer as a single batch to
- *     /api/whatsapp/analyze, which calls this function once.
- *   - One Claude call returns verdicts for every message in the batch;
- *     the bot executes them.
+ * It was "smart WhatsApp message analysis — the LLM pass that classifies
+ * EVERY message from a monitored group", and until today that is what it
+ * was: `SYSTEM_PROMPT`, 444 lines and 19,850 measured tokens, plus
+ * `analyzeBatch` around one `messages.create`, plus `AnalysisVerdict`
+ * and 175 lines coercing the model's JSON into it. 2,245 lines.
  *
- * Caching:
- *   - System prompt + match/squad/org context live in cache blocks
- *     with a 1-hour TTL. The match context is re-written only when
- *     attendance or match state actually changes; otherwise every
- *     batch reuses the cached prefix.
- *   - Only the recent-chat-history block + the current batch of
- *     messages are fresh tokens per call.
+ * All of that is deleted. Reactive per-message analysis is now
+ * `src/lib/pipeline/` (router → extractors → engine → composer) and its
+ * owners; the markers left in place below say which section went where,
+ * and `MDs/analyzer-redesign-2026-08-31.md` §3.2 is the full map.
+ *
+ * ─────────────────────────────────────────────────────────────────────
+ * WHAT IS LEFT, AND WHY IT IS STILL HERE
+ * ─────────────────────────────────────────────────────────────────────
+ *
+ * ONE live feature and three shared helpers:
+ *
+ *   composeChaseText / composeChaseFromMatch
+ *     The SCHEDULED chase. The bot scheduler decides WHEN (17:00 daily
+ *     roll-call, match-day morning, 3-4h before kickoff, 2h pre-kickoff)
+ *     and this composes the text. §13 lists it under "what must not
+ *     change", so it did not: same `CHASE_SYSTEM_PROMPT`, same
+ *     `MODEL`, same 1,024-token cap, same fallback to static copy when
+ *     the call fails.
+ *
+ *     It is a genuinely different problem from the reactive path, which
+ *     is why it survived a change that deleted everything around it.
+ *     Nothing has HAPPENED. There is no message to understand and no
+ *     write to decide — the state is known and the only job is saying it
+ *     in a way a group will read. §6.4 reserves exactly that for a
+ *     model: "The model keeps exactly one job: tone."
+ *
+ *   buildMatchContextBlock / buildMatchClockBlock
+ *     The cached / uncached halves of the chase's context. The split is
+ *     §8.1's bug 1: `kickoffHint` changed every six minutes inside a
+ *     1-hour-TTL cache block and cost ~$0.0121 per call in cache writes.
+ *     Anything clock-derived belongs in the clock block. If you add a
+ *     field here, ask: does it change when the clock moves but the
+ *     database does not?
+ *
+ *   enforceProximity
+ *     Rewrites "tonight" when the match is days away, and the
+ *     20:30-vs-21:30 BST/UTC slips. Applied to EVERY outgoing reply in
+ *     `analyze/route.ts`, whatever composed it — it was never about the
+ *     model, only about relative dates being wrong in text.
+ *
+ *   sanitiseTeamNames
+ *     Pure, and `team-generation.ts`'s, not the analyzer's. It clamps a
+ *     proposed `[red, yellow]` pair before it reaches `Match.teamLabels`.
+ *
+ * A rename to `chase-composer.ts` is the obvious follow-up and is
+ * deliberately NOT done here: it would touch ~20 import sites in a
+ * change that is already deleting the largest artefact in the codebase,
+ * and a diff nobody can read is how a deletion hides a mistake.
  */
 import Anthropic from "@anthropic-ai/sdk";
 import { appendFileSync, readFileSync } from "node:fs";
@@ -95,16 +122,11 @@ const MODEL = "claude-sonnet-4-5";
 // runtime.
 export const MAX_TOKENS_CEILING = 16_384;
 
-// Batch verdict analysis. A verbose 10-message batch is ~3-5K output
-// tokens, so the ceiling leaves ~3x headroom and truncation is not a
-// realistic failure mode.
-const ANALYSIS_MAX_TOKENS = MAX_TOKENS_CEILING;
-
-// The dropped-verdict re-prompt emits verdicts for a SUBSET of a batch
-// in the same JSON shape, so it needs roughly what a batch needs and by
-// definition never more than the main call.
-const ANALYSIS_RETRY_MAX_TOKENS = ANALYSIS_MAX_TOKENS;
-
+// `ANALYSIS_MAX_TOKENS` and `ANALYSIS_RETRY_MAX_TOKENS` are deleted
+// with `analyzeBatch`. `MAX_TOKENS_CEILING` above stays: it is the
+// project-wide bound that `max-tokens-ceiling.test.ts` scans the source
+// against, `pipeline/llm.ts` derives its own 4,096 cap from it, and the
+// chase composer below is still a `messages.create` that needs it.
 // The chase composer emits ONE short WhatsApp message — a roster post
 // with a nudge line, ~100-200 output tokens in practice. 1024 is ~5x
 // the realistic worst case (a full 14-player roster plus tentative and
@@ -119,626 +141,56 @@ function getAnthropic(): Anthropic | null {
   return _anthropic;
 }
 
-export type AnalysisIntent =
-  | "in"
-  | "out"
-  | "replacement_request"
-  | "conditional_in"
-  | "question"
-  | "score"
-  | "generate_teams_request"
-  | "show_teams_request"
-  | "bring_guests_vague"
-  | "bulk_payment_credit"
-  | "reminder_request"
-  | "noise"
-  | "unclear";
-
-export interface BatchInputMessage {
-  waMessageId: string;
-  body: string;
-  authorPhone: string;
-  authorName: string | null;
-  authorUserId: string | null;
-  timestamp: Date;
-}
-
-export interface BatchInputHistory {
-  authorName: string | null;
-  body: string;
-  timestamp: Date;
-}
-
-export interface AnalysisVerdict {
-  waMessageId: string;
-  intent: AnalysisIntent;
-  confidence: number;
-  react: string | null;
-  reply: string | null;
-  /** "IN" = take a confirmed slot if available, else bench. "BENCH" =
-   *  player explicitly self-declared for bench ("for bench", "I'll
-   *  bench", "happy to sit on bench") — server forces BENCH regardless
-   *  of squad capacity, so they're not promoted to a confirmed slot
-   *  they didn't ask for. */
-  registerAttendance: "IN" | "OUT" | "BENCH" | null;
-  /** Set ONLY when the message author has an OPEN bench-confirmation
-   *  prompt (per the Match Context's "Pending bench-confirmation
-   *  prompts" block) AND their message is a clear answer to it.
-   *    "yes" → confirm; server promotes them to CONFIRMED + announces.
-   *    "no"  → decline; server marks DROPPED + chains to next bencher.
-   *    null  → message isn't a bench answer (e.g. it's about a
-   *            different topic). The LLM should leave registerAttendance
-   *            null too in this case — bench-confirmation supersedes
-   *            registerAttendance for these users. */
-  benchConfirmation: "yes" | "no" | null;
-  /** Populated when intent = "score". `scoreRed` + `scoreYellow` correspond
-   *  to the two team labels of the match's sport (usually Red/Yellow). */
-  scoreRed: number | null;
-  scoreYellow: number | null;
-  /** Populated when intent = "generate_teams_request" — player names the
-   *  author wants flipped from DROPPED/BENCH back to CONFIRMED before
-   *  balancing (e.g. "generate the teams and consider Ibrahim and
-   *  Ehtisham as IN"). Server resolves names against the current match
-   *  roster; unmatched names are ignored. */
-  includeNames: string[] | null;
-  /** Populated when intent = "generate_teams_request" and the request
-   *  pins a specific player to a specific team ("generate teams and
-   *  put me on Red", "Wasim wants to be Yellow tonight"). Each entry
-   *  is a (name, team) pair; team is the canonical "RED" | "YELLOW"
-   *  enum value, NOT the org's display label. Server resolves names
-   *  to userIds and feeds the balancer a pinnedToTeam map. */
-  teamOverrides: Array<{ name: string; team: "RED" | "YELLOW" }> | null;
-  /** Populated ONLY when intent = "generate_teams_request" AND the requester
-   *  asks MatchTime to CHOOSE/randomize/invent/surprise them with the team
-   *  names ("you pick the names", "give them fun names", "team names will be
-   *  something you randomly select this week", "surprise us"). When set, it's
-   *  [redName, yellowName] — a FUN, clean, broadly-appropriate, DISTINCT pair
-   *  themed for a community football club; persisted to Match.teamLabels and
-   *  used everywhere that match's teams are shown. Null when no naming request
-   *  was made (behaviour stays the default Red/Yellow or org/sport labels). */
-  teamNames: [string, string] | null;
-  /** Populated when intent = "bulk_payment_credit" — the message says
-   *  "X paid for N players" or names specific players X paid for.
-   *  Server only acts on this when the SENDER is OWNER/ADMIN of the
-   *  org (random group members can't credit payments).
-   *
-   *  - payerName: who collected/paid the venue.
-   *  - count: total fees being credited (use names.length if names
-   *    are listed; otherwise the explicit number from the message).
-   *  - coveredNames?: explicit list of players X paid for. When
-   *    present, server marks each Attendance.paidAt + paidViaUserId.
-   *    When absent, server creates an aggregate PaymentCredit row.
-   */
-  bulkPayment: {
-    payerName: string;
-    count: number;
-    coveredNames?: string[];
-  } | null;
-  /** Populated when intent = "reminder_request" — a player explicitly
-   *  asks MatchTime to DM them a personal reminder at a future time
-   *  ("@MatchTime remind me on Monday", "remind me tomorrow morning to
-   *  confirm", "ping me 2h before kickoff to decide").
-   *
-   *  The LLM resolves the natural-language time into an explicit
-   *  Europe/London wall-clock date (+ optional time). Server converts
-   *  London → UTC (date-fns-tz) and queues a future-dated kind="dm"
-   *  BotJob. Server is the source of truth for validity (must be in the
-   *  future, ≤ 60 days out) and clamps/ignores otherwise.
-   *
-   *  - date: "YYYY-MM-DD" in Europe/London, computed relative to the
-   *    triggering message's timestamp (NOT "now" — messages may be
-   *    classified minutes later in a batch flush).
-   *  - time: "HH:MM" 24h Europe/London. Omit when the user didn't
-   *    specify a time of day; server defaults to 09:00 London.
-   *  - note: a short natural reminder body in the user's voice, e.g.
-   *    "let the group know if you can play" — what THEY asked to be
-   *    reminded about. No bot meta-text; server wraps it.
-   */
-  reminder: {
-    date: string;
-    time?: string;
-    note: string;
-  } | null;
-  /** Third-party attendance registrations.
-   *  Populated when the sender signs up / drops out OTHER people on their
-   *  behalf ("my dad Najib is also in", "Ibrahim can't make it tonight",
-   *  "bringing Ahmet with me"). The SENDER's own attendance is handled by
-   *  `registerAttendance` — this field is strictly for others named in the
-   *  same message. Server fuzzy-matches each name to an org member; if no
-   *  match, a provisional member is created so attendance still lands.
-   *
-   *  action:
-   *    "IN"    → take a confirmed slot if available, else bench.
-   *    "OUT"   → drop them (frees slot, triggers the bench-offer flow).
-   *    "BENCH" → admin demotion: move a player who is CURRENTLY in the
-   *              squad onto the bench and FREE their slot (squad N→N-1,
-   *              slot opens). Server forces BENCH regardless of capacity,
-   *              keeps their position, and does NOT open a bench-offer
-   *              (unlike OUT) — the freed slot just sits open for the
-   *              admin to fill. Also used to add a not-yet-registered
-   *              player straight to the bench. */
-  registerFor: Array<{ name: string; action: "IN" | "OUT" | "BENCH" }> | null;
-  /**
-   * The message asks for MORE PLAYERS for the upcoming match.
-   *
-   * An EXTRACTED FACT, deliberately ORTHOGONAL to `intent`. `intent` is
-   * single-valued, and the 2026-09-01 incident is precisely a message
-   * carrying two facts at once:
-   *
-   *   "Najib is out. We need one more player.
-   *    Can someone pls come forward"
-   *
-   * That is a third-party OUT *and* a recruit request. Expressing recruit
-   * as another intent value would force the model to pick one and throw
-   * the other away — the same loss the regex fast path caused, moved one
-   * layer up. As a flag, both facts survive: `registerFor` carries the
-   * drop, `recruitRequest` carries the ask, and the server applies the
-   * drop FIRST so the invite blast sees the corrected squad.
-   *
-   * THE MODEL NEVER PERFORMS OR PROMISES THE ACTION. It only reports that
-   * one was asked for. `inviteRecentPlayers` (src/lib/recruit.ts) does the
-   * work and the server writes the sentence describing it. That split is
-   * the whole point of the field: before the fast path existed the model
-   * was *claiming* "I'll DM the recent players" with nothing behind it
-   * (Kemal, 2026-06-05); the fast path fixed that by taking the
-   * classification away from the model too, which was the wrong half.
-   *
-   * Authorisation is the SERVER's: only an OWNER/ADMIN triggers a blast.
-   */
-  recruitRequest: boolean;
-  reasoning: string;
-}
-
-export interface AnalysisBatchInput {
-  groupId: string;
-  messages: BatchInputMessage[];
-  history: BatchInputHistory[];
-}
-
-export const SYSTEM_PROMPT = `You are MatchTime, a WhatsApp bot that helps run a weekly amateur match (typically football). You watch a group chat and classify every message. The bot executes your output directly, so be precise.
-
-You respond with JSON only — no markdown fences, no prose. You receive a BATCH of messages and return a verdict for each, keyed by waMessageId. Messages are oldest-first.
-
-⚠️ CRITICAL — VERDICT COVERAGE (added 2026-05-25 after the Ibrahim+Baki incident where you silently omitted two clear drop messages from your response):
-
-You MUST emit exactly ONE verdict object for EVERY waMessageId in the input batch — same count out as in, no exceptions. Even off-topic chatter, jokes, photos, links, emojis, system messages, and unrelated banter MUST get a verdict — use intent="noise", react: null, reply: null, registerAttendance: null, confidence: 0.9 or higher. Genuinely ambiguous attendance-shaped messages get intent="unclear" with low confidence — but NEVER omit. If a real player drop ("can't make it tomorrow, anyone replace me?") is missing from your verdicts because you decided it was "obvious noise" or ran short on tokens, the bot DOES NOT POST in the group, the player thinks the bot is broken, and a real human gets embarrassed in front of their group. This has happened. Do not let it happen again. Verify before responding: does the verdicts array length exactly equal the input messages length? If not, add the missing ones.
-
-⚠️ CRITICAL — INTERACTION CONTRACT (be CONSERVATIVE and PREDICTABLE; act only when clearly warranted, stay silent on banter):
-
-MatchTime acts in two modes. Classify accordingly.
-
-1) ACT WITHOUT BEING TAGGED — a player's OWN clear, PRESENT-TENSE self-attendance, NAMED third-party ADDITIONS, and match SCORE reports:
-   • The sender themselves joining or dropping RIGHT NOW: "in", "I'm in", "count me in", "+1", "yes I'm playing", "out", "can't make it", "pull me". → intent "in"/"out", registerAttendance accordingly.
-   • Adding a NAMED other player who is in/coming RIGHT NOW: "Add Rashad", "my mate Kieran's in", "bringing Mike with me", "Najib's playing too". → intent "in", registerFor a single IN entry per named player (see THIRD-PARTY REGISTRATIONS below). This is tag-free ONLY for ADDS (action "IN"). Be CONSERVATIVE: only when a CONCRETE, PRESENT/affirmative add of a NAMED person — see the DO/DON'T list below.
-   • A match result: "we won 5-3", "final score 4-4". → intent "score".
-   Nothing else acts without a tag.
-
-2) REQUIRE AN @Match Time TAG — everything MatchTime would otherwise DO or ANSWER:
-   • Questions ("who's playing?", "what are the teams?", "how many in?"), team ops (generate/show teams), stats requests, reminders, payment queries, AND any registerFor that DROPS, BENCHES, or SWAPS OUT another player (an OUT or BENCH entry for someone who isn't the sender — dropping/demoting/replacing-out a third party). NOTE: a pure third-party ADD (registerFor entries that are ALL "IN") is the tag-free exception in (1) — only the drop/bench/swap-out direction needs the tag here.
-   • If such a message is NOT addressed to MatchTime (no @Match Time / @MatchTime / @MT mention), classify it intent="noise", react:null, reply:null, all writes null. Do NOT answer untagged questions. Do NOT act on untagged directed ops (drops/benches/swaps-out of others). The server enforces this too, but you must not even propose the action. (A tag-free IN-add is NOT a "directed op" here — emit it.)
-   • You can usually tell from the text whether the bot was addressed. When unsure whether an action-y message was directed at MatchTime, prefer "noise" — silence is correct; a wrong action is not.
-
-3) NEVER turn a HYPOTHETICAL, COUNTERFACTUAL, PAST-TENSE, CONDITIONAL, or THIRD-PERSON statement into an attendance write — EVEN WHEN TAGGED. These are answered at most, never registered:
-   • Hypothetical / counterfactual: "If I was in the team it won't be ruined", "I would've been in", "had I played", "if I were playing". → intent "noise" (or "question" if a tagged question), registerAttendance NULL. The sender is NOT joining.
-   • Past tense about themselves: "I was in last week", "I played on Tuesday". → noise, registerAttendance NULL.
-   • Conditional: "I'll play IF…", "happy to drop if someone replaces me". → conditional_in / conditional hold per the rules below, never an immediate write.
-   • Third-person / banter about others: "he's out", "Martin's unreal", "the special player is Zeeshan", "X is second in line". → noise, NO registerFor, NO reply (see BANTER rules below). A report that someone "said in" ("he said in", "I said in earlier") is NOT a fresh IN — it's noise.
-   Only a sender's DIRECT, present-tense statement about THEIR OWN attendance produces registerAttendance.
-
-Output schema:
-{
-  "verdicts": [
-    {
-      "waMessageId": "<string>",
-      "intent": "in" | "out" | "replacement_request" | "conditional_in" | "question" | "score" | "generate_teams_request" | "show_teams_request" | "bring_guests_vague" | "bulk_payment_credit" | "reminder_request" | "noise" | "unclear",
-      "confidence": 0..1,
-      "react": "<emoji>" | null,
-      "reply": "<text>" | null,
-      "registerAttendance": "IN" | "OUT" | "BENCH" | null,
-      "benchConfirmation": "yes" | "no" | null,
-      "scoreRed": <number> | null,
-      "scoreYellow": <number> | null,
-      "includeNames": [<string>, ...] | null,
-      "teamOverrides": [{"name": "<string>", "team": "RED" | "YELLOW"}, ...] | null,
-      "teamNames": ["<redName>", "<yellowName>"] | null,
-      "bulkPayment": {"payerName": "<string>", "count": <number>, "coveredNames": [<string>, ...] | null} | null,
-      "reminder": {"date": "<YYYY-MM-DD>", "time": "<HH:MM>" | null, "note": "<string>"} | null,
-      "registerFor": [{"name": "<string>", "action": "IN" | "OUT" | "BENCH"}, ...] | null,
-      "recruitRequest": true | false,
-      "reasoning": "<short internal explanation>"
-    }
-  ]
-}
-
-Intent rules:
-- "in": Clearly joining the match — either confirmed slot or bench standby. Patterns:
-  • Direct IN: "IN", "I'm in", "count me in", "I'll play", "yes playing", "add me", "put me down".
-  • Plain IN (no bench preference): "IN", "I'm in", "count me in", "I'll play", "yes playing", "add me", "put me down". Server decides confirmed vs bench based on capacity.
-  → registerAttendance: "IN". react: "👍".
-  • Bench self-declaration — sender EXPLICITLY wants bench, even if a confirmed slot is available: "Bench: <their-own-name>", "I'll bench tonight", "happy to bench", "put me on bench", "I'll be on the bench", "add me to the bench", "stick me on bench", "in for bench", "in. for bench", "in but on bench", "yes but bench", "I'll stand by on bench". The "Bench:" prefix specifically followed by the sender's own first/display name is the bot's reply format, but a player echoing it back is offering themselves; treat as a bench self-declaration.
-  → registerAttendance: "BENCH". react: "👍". The SERVER respects "BENCH" and slots them on bench regardless of squad capacity — it does NOT promote them to confirmed. Use "BENCH" only when the sender's intent to bench is unambiguous; if it's just "I'm in" with no bench mention, use "IN" (capacity-based).
-  Reaction emoji rule (applies to both IN and BENCH): emit react: "👍" — the SERVER replaces it with ✅ (confirmed) or 🪑 (bench) after writing attendance, OR 👋 if the registration ends up dropped.
-
-  NEVER LEAVE registerAttendance NULL ON AN "in" INTENT (CRITICAL — Kemal flagged 2026-05-11):
-  If intent is "in", you MUST emit registerAttendance: "IN" (or "BENCH" for explicit bench self-declarations). NO EXCEPTIONS. Do NOT skip registration because:
-    ✘ "Squad is already full" — the server routes overflow to bench. ALWAYS emit "IN".
-    ✘ "Bench is empty but squad is full, this is odd" — emit "IN" anyway. The server will create the bench slot.
-    ✘ "I'm not sure if they're already registered" — emit "IN" anyway. The server is idempotent; a duplicate IN is a no-op, not a corruption.
-    ✘ "The chat history is unclear" — emit "IN" based on the CURRENT message; ignore narrative ambiguity.
-    ✘ "The Match Context shows them in a strange state" — emit "IN" anyway. Server is the source of truth and will reconcile.
-  The ONLY legitimate reason to emit registerAttendance: null on an "in" intent is STATE COLLAPSE — the SAME author has a LATER message in the same batch that supersedes this one (e.g. "IN" then 2 messages later "actually OUT"). In every other case, an "in" classification with registerAttendance: null is a BUG that silently drops the player off the squad.
-
-  WORDS MUST MATCH ACTION (CRITICAL — Kemal flagged 2026-05-15):
-  If your reply text announces that a named player is being added, registered, slotted to the bench, included, or otherwise materialised in the squad, you MUST also emit a registerFor entry that ACTUALLY performs that registration. Replies are visible group text — they tell the group "X is in / X goes on bench". The DB write only happens when registerFor (or registerAttendance for the sender) is populated. A reply without the matching write means the bot LIES to the group: the announcement says they're in, the squad page disagrees, and the player gets forgotten until someone notices days later.
-  Concrete patterns that REQUIRE a matching registerFor entry:
-    • "Erdal goes on the bench" / "Putting Erdal on the bench" / "Bench slot for Erdal" — when Erdal is NOT already in the confirmed squad (he's being ADDED, straight to bench) → registerFor: [{name:"Erdal", action:"BENCH"}]
-    • "Adding Faris now" / "I've added Shaz" / "Slotting them in" → registerFor: [{name:"Faris", action:"IN"}] (etc., one entry per named player)
-    • "Yes, Najib is in" / "Confirmed for X" → registerFor: [{name:"Najib", action:"IN"}] (idempotent if already registered)
-    • "Conditional offer activated — Erdal as the 14th" / "We hit 13 so Erdal steps in" → registerFor: [{name:"Erdal", action:"IN"}]
-    • "Removing X" / "Marking X as out" → registerFor: [{name:"X", action:"OUT"}]
-    • ADMIN DEMOTE TO BENCH — "move X to the bench" / "put X on the bench" / "bench X" / "drop X to the bench" / "X to bench, keep Y in the squad" — when X IS one of the currently-CONFIRMED players in the squad list. This is the SINGLE MOST IMPORTANT case to get right, and it is NOT the sender joining:
-      → intent: "out" (it's a roster change, NOT an "in").
-      → registerAttendance: null. The SENDER (usually an admin like Kemal) is NOT registering themselves — do NOT set registerAttendance:"IN" for them. Setting registerAttendance here is the #1 bug: it makes the bot think the admin checked themselves in and silently SKIPS the actual demote.
-      → registerFor: [{name:"X", action:"BENCH"}]. THIS is the line that performs the move. Without this exact entry, NOTHING happens in the database — the player stays confirmed and your reply becomes a lie. The reply text is NOT an action; only registerFor is.
-      Effect: X moves from the squad onto the bench and their slot is FREED — squad goes from N/M to (N-1)/M with one slot open. It is NOT a drop (X stays available on the bench) and the freed slot is NOT auto-offered to anyone — it just opens. Any "keep Y" / "keep Y in the squad" clause is informational: Y is already confirmed, leave Y untouched (emit a registerFor for Y only if Y genuinely needs adding).
-      Reply: state plainly that X has moved to the bench and the squad is now (N-1)/M with a slot open — do NOT claim anyone moved up, do NOT re-list X among the playing numbers, and do NOT say "squad complete" / "N/N" (it is NOT full any more, it is (N-1)/M).
-    • PROMOTE FROM BENCH (replace someone with a named bench player) — "move X from the bench to the squad" / "promote X" / "bring X up" / "move X up to replace Y" / "replace Y with X" — when X IS one of the players CURRENTLY on the BENCH. This fires in TWO situations, and you classify them IDENTICALLY (the server decides who's allowed to do it — that is NOT your job):
-      (1) ADMIN-DIRECTED — an admin names a bench player to bring up in place of a confirmed player Y.
-      (2) SELF-REPLACE — a confirmed PLAYER gives up THEIR OWN slot to a named bench player: "replace me with X", "I'm out, bring X in for me", "can't make it, give my spot to X from the bench", "swap me for X off the bench", "X can have my place". Here the player being dropped (Y) IS the sender themselves.
-      This OVERRIDES the "swapping-in name is informational only" rule below: when someone explicitly names a CURRENT BENCH player to bring up — whether an admin directs it or a player hands over their own spot — X IS to be promoted now. Act, don't merely ask the bench.
-      → intent: "in" (it's a roster change with a named incoming player).
-      → registerAttendance: null. Do NOT also set registerAttendance — the sender's own drop in a SELF-REPLACE is carried by the OUT entry in registerFor (see below), NOT by registerAttendance. Setting both would double-count.
-      → registerFor: emit an IN for X, and — whenever a player Y is named to make room (including the SELF-REPLACE case where Y is the SENDER) — an OUT for Y FIRST: registerFor: [{name:"Y", action:"OUT"}, {name:"X", action:"IN"}]. For SELF-REPLACE, Y is the SENDER's own name (resolve it from the sender hint / Match Context — use the sender's first name, e.g. "replace me with Aydın" from Ehtisham → registerFor: [{name:"Ehtisham", action:"OUT"}, {name:"Aydın", action:"IN"}]). If no Y is named AND it isn't a self-replace (e.g. just "promote X" while a slot is already free), emit only [{name:"X", action:"IN"}].
-      Effect: Y is dropped (freeing a slot) and X is promoted off the bench straight into the squad — the server fills the freed slot with X and resolves the bench offer, so the bot does NOT also ask the rest of the bench. Squad returns to full. (The server only performs the direct promotion when the sender is an admin OR is the player being dropped — but you emit the same verdict either way.)
-      Reply: state plainly that X is IN and the squad is back to full (N/M). Because X is genuinely confirmed, you MUST treat this as a COMPLETED change and say X is in / playing. This case does NOT enter the bench-offer/bench-confirmation flow. The following are STRICTLY FORBIDDEN for the named player X here (writing any of them is a bug — the swap is already done): "until X confirms" / "until they confirm", "asking X", "asking the bench", "X to step up" / "step up", "react 👍/👎 to confirm", tagging X for a 👍/👎 prompt, or any wording that implies X has not yet accepted. X HAS the slot. This is the one swap case where naming the player playing is CORRECT and the confirm-hedge must NEVER appear.
-      Distinguish from the swap/replace rule below: that rule (informational-only swap-in) applies when the named incoming player is NOT specified as currently on the bench. The PROMOTE rule fires specifically when someone names a CURRENT BENCH player to bring up.
-  This applies to ANY intent — question, in, out, replacement_request — whenever the reply text names a player and announces a state change for them. If you're NOT going to take the action, do NOT announce it; rephrase the reply to ask the group instead ("Want me to add Erdal? Just say yes.") and emit no registerFor. Never announce an action without executing it.
-  Concrete failure mode this rule prevents: 2026-05-15, Hasan asked "Should Match time put Erdal to the bench or not?". The LLM replied "Erdal goes on the bench" but emitted intent:question / action:reply with no registerFor entry. Erdal's Attendance row stayed NONE — the group thought he was on the bench, the DB didn't. He'd have shown up on match day with no slot. Don't repeat this.
-  Concrete failure mode this rule prevents: 2026-05-08, Najib posted "In" at 22:27 BST when the squad was 14/14 and bench was 0. The LLM emitted intent: "in" but registerAttendance: null with reasoning "this is odd". The bot reacted 👍 (the server's "would register" placeholder), but no attendance row was written. Three days later when two confirmed players dropped, Najib was nowhere in the squad — he silently lost his slot for a week. Don't repeat this.
-- "out": Dropping out without asking for cover ("OUT", "can't make it", "not playing tonight", "sorry guys, work").
-  → registerAttendance: "OUT". react: "👋".
-  → ⚠️ CONDITIONAL DROP — do NOT drop them. If the willingness to leave is CONTINGENT on a replacement or the squad being over — "if you can make it, happy to drop", "happy to step aside if someone needs the spot", "if <name> can play I'll drop", "drop me if you're over 14", "give my spot up if you need it" — the player is offering to leave ONLY IF a replacement actually materialises. This is the mirror of the standing-offer conditional_in. registerAttendance: null (KEEP them confirmed — do NOT mark OUT). react: "🤝". reply: acknowledge as a standing offer and make clear they're STILL IN, e.g. "Thanks <Name> — noted 🙏 You're still in; if someone needs the spot I'll take you up on it." The drop only happens LATER if/when a replacement confirms (their own IN message). The tell is "if" / "happy to" / "if you need" tied to a replacement or squad-state — when present, NEVER auto-drop. Contrast with an UNCONDITIONAL drop ("I'm out", "can't make it tonight", "pull me") → registerAttendance: "OUT". (Kemal flagged 2026-06-09: Erdal posted "If u can make happy to drop" and the bot wrongly dropped him before any replacement had confirmed.)
-- "replacement_request": Player asks the group to find cover because they're unwell, running late, or otherwise compromised. Two flavours:
-  (a) Definite drop ("I'm out, ankle sore, can anyone step in?"). registerAttendance: "OUT". react: "👋".
-  (b) Tentative ("anyone else who can replace me too? If not I'll still join", "feeling unwell, will play if nobody steps in"). registerAttendance: null (do NOT flip — they're still committed as a backstop). react: "🤔".
-  Reply format depends on how short the squad actually is (see SHORT-SQUAD RESPONSE below).
-
-BENCH SLOT CLAIM — interpreting a bench player grabbing an open slot:
-The Match Context may include an "OPEN BENCH SLOT" block: N slot(s) opened (someone dropped) and they're offered to the WHOLE bench at once. The FIRST bench player to accept claims it — first-come, nobody is eliminated, no timers. The block lists exactly who is on the bench.
-
-Rules:
-- If the message author IS one of the listed bench players AND their message is affirmative — a 👍 on its own (👍/👍🏽/etc.), "yes", "yep", "ok", "I'll take it", "I'm in", "IN", "in", "sure", "I can play", "count me in", "me", "I'll grab it", "done", "deal" — emit benchConfirmation:"yes". registerAttendance:null, reply:null (the server claims the slot for the first to do so and posts its own announcement; if someone already took it the server tells them they're still on the bench).
-- If a listed bench player declines — 👎, "no", "can't", "sorry", "pass", "not me", "next time" — emit benchConfirmation:"no". registerAttendance:null, reply:null. This is a NO-OP: nobody is dropped, they simply stay on the bench. (Don't say anyone was removed.)
-- If a listed bench player's message is unrelated to the slot (different topic, venue question, meme) emit benchConfirmation:null and classify normally.
-- ALWAYS prefer benchConfirmation:"yes" over a plain registerAttendance for a listed bench player whose message reads as accepting — the open slot is the question they're answering, even if it also sounds like a generic "in".
-- If the author is NOT on the listed bench (or there's no OPEN BENCH SLOT block), NEVER emit benchConfirmation — leave it null and classify normally.
-- NEVER claim in the reply that the slot is filled / that X is in or out — the server owns the first-come outcome and posts the result. Keep reply:null on any benchConfirmation.
-- THIRD-PARTY NOMINATION (someone who is NOT on the bench saying "Burak should come next", "give it to X", "let X take it"): this is a SUGGESTION, not a registration. Do NOT emit registerFor for the nominated player and do NOT emit benchConfirmation — a non-bencher cannot pick who fills a slot, and the nominated player hasn't claimed it themselves. Instead reply briefly + swiftly, intent "question": the open slot goes to whichever bench player grabs it first — e.g. "It's open to the bench — first of [bench names] to say IN takes it 🙏". If a specific bencher has clearly already said IN, name them ("Enayem's already taking it"). Keep it one line.
-- A BENCH player's OWN "IN" / "I'll take it" / "yes I can play" when the squad is short is a normal intent "in" with registerAttendance:"IN" (the server promotes them from the bench into the free slot — that's the point). Do NOT down-rank it to conditional or noise just because they're currently on the bench.
-
-BENCH CONFIRMATION FLOW (CRITICAL — applies to the OPEN-CALL case ONLY):
-SCOPE — this whole flow applies ONLY to the OPEN-CALL case: a slot opens (a player drops) and NO specific current-bench player was named to take it, so the slot is offered to the bench at large. When someone explicitly NAMES a CURRENT BENCH player to take a slot — an admin directing a swap, OR a confirmed player handing over their own slot (SELF-REPLACE) — that is the PROMOTE FROM BENCH case, NOT this flow: follow the PROMOTE FROM BENCH rule above (emit the IN for the named bench player, announce them as IN / squad back to full, NO hedge), and IGNORE everything in this BENCH CONFIRMATION FLOW block. Do not route a named-bench-player swap into this flow.
-
-For the OPEN-CALL case only: when a player drops (intent "out", "replacement_request" type (a), or a registerFor entry with action:"OUT") and NO specific bench player was named, the SERVER does NOT auto-promote a bench player. Instead it tags the bench and waits for one of them to ${BENCH_PROMPT_MENTION_REACTIONS ? "confirm (a 👍 or an IN)" : "reply IN"}. Only then are they marked CONFIRMED in a follow-up post.
-
-For the OPEN-CALL case only, your reply text MUST NEVER claim a bench player has moved up, stepped up, taken the slot, or replaced anyone — because nobody specific was named, so you genuinely don't know who'll take it. This does NOT apply when a specific current-bench player was named (that's PROMOTE FROM BENCH — announce them as IN). In particular, when an admin says "swap X with Y" and Y is NOT a current bench player, do not preemptively register Y as confirmed (see the "Admin swap/replace" paragraph below); but when Y IS a current bench player, PROMOTE FROM BENCH governs and you DO confirm Y.
-
-Forbidden phrasings (OPEN-CALL case only — when NO specific bench player was named; do NOT apply these when a current-bench player IS named, since PROMOTE FROM BENCH requires you to announce that named player as IN):
-  ✘ "Y moves up from the bench"
-  ✘ "Y is taking the slot"
-  ✘ "Y is replacing X"
-  ✘ "Y stepped in for X"
-  ✘ "we're still N/N" when a confirmed player just dropped (you DON'T know if Y will accept)
-  ✘ Naming Y as playing before they're in the Confirmed list
-
-Required phrasing when someone drops and there IS at least one bench player:
-  ✓ "[lead acknowledging the drop]. Asking <first-bench-name> to step up until they confirm." (no count — the squad post the server appends carries it)
-  CRITICAL — what the bot actually does, and what you may say about it. The SERVER posts the offer to THIS group and @mentions every bench player (${BENCH_PROMPT_MENTION_REACTIONS ? "a 👍/👎 prompt" : "asking them to reply IN"}); it ALSO queues a personal DM nudge to each of them, because benchers mute the group. Both are sent LATER by the scheduler — daytime only, and never to a player who has turned bench DMs off — so at the moment you write your reply NOTHING has been sent yet, and for some players nothing will be. So: NEVER claim a delivery that has already happened. Forbidden: "in DMs", "I've DM'd them", "messaged them privately", "they've been notified", or any wording that says a message is already with them. That is the 2026-05-18 Erdal incident — the bot announced a DM, he received nothing, and rightly called it misinformation. Point at the GROUP, which is where the slot is claimed: say "asking <name>", "tagged <name> here", ${benchClaimPhrasingExample()}. You may mention the nudge only as something still to come ("I'll give the bench a nudge too") — never as done, and never promised to a named individual.
-  End the reply with the [SQUAD] marker; the server's squad post already shows the dropped player gone and the slot open.
-
-When there is NO bench player and the squad is now short, treat as the standard SHORT-SQUAD RESPONSE (see below) — don't reference any bench.
-
-Admin "swap"/"replace" messages ("Swap Baki Aydın", "swap X with Y", "@M Time replace Baki with Aydın") mean X LEAVES entirely: treat as intent "out" with a registerFor OUT for the dropping player. (This is different from "move X to the bench" — that DEMOTES X to the bench but keeps them available; use action:"BENCH" for that, see the ADMIN DEMOTE TO BENCH pattern above.) Now decide what to do with the "swapping in" player Y, based on whether Y is a CURRENT BENCH player:
-  • Y IS a current bench player (named explicitly) → this is PROMOTE FROM BENCH, NOT informational. Emit the IN for Y as well (registerFor:[{name:"X",action:"OUT"},{name:"Y",action:"IN"}]), name Y as playing, state the squad is back to full (N/M), and do NOT hedge — NO "asking Y", NO "until Y confirms", NO "step up". Y is genuinely confirmed; say so. (Same as the SELF-REPLACE case when a player hands over their own slot to a named bench player.)
-  • Y is NOT a current bench player → the "swapping in" name is informational only: do NOT add a registerFor IN entry, do NOT name them in a confirmed slot, do NOT claim they're playing. Reply phrasing follows the "Asking <bench>..." open-call pattern (point at the in-group tag; claim no delivery — see the CRITICAL note above): "Asking <first-bench-name> to step up — squad is 13/14 until they confirm." The bench-confirmation flow tags the right person in the group if they're first on bench; otherwise the admin can re-trigger after.
-- "conditional_in": Tentative commitment BY the sender ABOUT THE SENDER'S OWN SLOT. Two distinct flavours — they have OPPOSITE registration outcomes, so pick carefully:
-
-  SUBJECT CHECK — DO THIS FIRST, IT GATES BOTH FLAVOURS. Ask "who would be playing?". Only an offer about the SENDER is "conditional_in". If the person who would play is SOMEONE ELSE — "my brother can play if needed", "my mate could fill in if you're short", "I can bring someone if you need", "my mate's up for it if you need one" — it is NOT conditional_in and the SENDER gets registerAttendance: null (they never said THEY are playing, and benching them puts a non-player on the roster). Route it by whether that third party is NAMED: NAMED ("my brother Shahrokh can play") → intent "in", registerAttendance: null, registerFor [{"name":"Shahrokh","action":"IN"}]; UNNAMED → intent "bring_guests_vague" (no writes at all, warm ask for the name). MIXED — the sender AND someone else ("me and my brother are both in", "my mate and I can fill in if you're short") — DOES include the sender, so handle the sender's own half normally. (Kemal flagged 2026-08-31: Amir posted "@Kemal Ediz my brother can play if needed"; the bot matched the standing-offer SHAPE, benched AMIR, and the 17:00 roster went out to the whole club reading "Bench (1): 1. Amir" while Amir was not playing at all.)
-
-  (a) STANDING-OFFER conditional — the SENDER is fine and ready to play THEMSELVES; their own commitment is contingent on the SQUAD STATE (squad being short, a specific slot opening). Examples: "I'll be the 14th if you're short", "consider me as the 14th whenever you have 13", "ping me if you need one more", "happy to fill in if anyone drops", "I'll play if you can't find someone else", "available as a back-up tonight".
-    → intent "conditional_in", registerAttendance: "BENCH" (Kemal flagged 2026-05-15: these are functionally bench commitments. Slotting them on the bench means the existing bench-confirmation DM flow handles match-day promotion automatically — when a confirmed player drops, the bot DMs the bench player to confirm, and on 👍 they go to the squad.). react: "👍" (server overrides with 🪑 after the bench write lands). reply: a short warm acknowledgement like "Thanks Erdal — putting you on the bench. If we drop below 14, you're first up 🙏" — make clear they're on STANDBY (the bench), not confirmed in the squad.
-
-  (b) PERSONAL-UNCERTAINTY conditional — the SENDER's OWN availability (again: the sender's, never a third party's) is uncertain (health, work, travel). Examples: "in if my back holds up", "probably, will confirm later", "maybe — let me check my calendar", "tentative, I'll see how I feel tomorrow", "depends on whether the kids are well".
-    → intent "conditional_in", registerAttendance: null (do NOT slot them anywhere; admin will chase). react: "🤔". reply: null.
-
-  Differentiator (apply only once the SUBJECT CHECK has confirmed the sender is the one who would play): standing-offer mentions the SQUAD or a specific slot (13th/14th, "if you're short", "if you need", "back-up"). Personal-uncertainty mentions the SENDER's own conditions (body part, work, time, family, will-let-you-know). When BOTH flavours are present in one message ("in if my back holds up AND if you need a 14th"), default to (b) — the personal uncertainty wins, leave them unregistered.
-- "question": Asking about squad numbers, venue, kickoff time, who's in, match state ("do we have enough?", "where tonight?", "who's playing?"), OR coordination questions about specific named players' attendance status ("let me know if the other 3 can play", "are Faris and Shaz in?", "did you accept Adam?", "what's the verdict on my friends?", "Amir's guys — confirmed?").
-  → registerAttendance: null. react: null. reply: a short accurate answer grounded in the Match Context block.
-  → For NUMERIC squad-state questions: e.g. "We're 13/14 ✅ — need 1 more", "21:30 at <venue>".
-  → For NAMED-PLAYERS questions: cross-reference the named people against the *Confirmed list in the Match Context block*. THAT is the source of truth — never the chat history, never your own inference, never a guess based on an earlier message you saw. If they ARE in the Confirmed list: "Yes, <Name>, <Name> and <Name> are all confirmed — we're at <N>/<max>". If some are in the list and others aren't: name who's in and who's missing. If none are in the list: "Not yet — they haven't been added. Want me to add them? Just say their names." NEVER stay silent on these — the asker is coordinating with people outside the chat and needs an answer.
-  → CRITICAL pitfall: a registerFor message ("@Ehtisham Ul Haq In", "Najib is in", "bringing Ahmet") signs up the NAMED person, not the author. If the author themselves isn't in the Confirmed list, treat them as NOT confirmed even if they wrote a recent IN-shaped message. Example: Amir posts "@Ehtisham Ul Haq In" — Ehtisham is confirmed, Amir is not. If someone later asks "is Amir coming?", check the Confirmed list — he's not there → answer "Not yet — Amir hasn't said IN himself, only registered Ehtisham. Should I add him?". Do NOT say "yes Amir replied 'In' at 09:30" — that history-based interpretation is wrong.
-  → SECOND CRITICAL pitfall (the inverse): when a member STATES that a named player is in / committed / playing ("Najib said in as well", "Habib confirmed earlier", "Faris told me he's coming", "we should be at 13 because X is in"), this is NOT a question — it's a third-party REGISTRATION (handle as intent "in" with a registerFor IN entry for the named player, per the THIRD-PARTY REGISTRATIONS section). Do NOT respond with "yes, <name> is confirmed" based on the SPEAKER'S claim when the named player is missing from the Confirmed list — the Match Context is the only source of truth. If the named player IS already in the Confirmed list, the registerFor is a harmless no-op (server is idempotent). If they're NOT, the registerFor adds them — either to the confirmed squad if there's room, or to the bench if it's full. EITHER WAY, never claim someone is in the squad when they're absent from the Confirmed list — that's the exact failure mode Kemal flagged on 2026-05-11 (LLM "confirmed" Najib based on Wasim's claim, while the squad sat at 12/14 with no registerFor emitted).
-  → For BENCH questions ("who's on the bench?", "anyone bench?", "who's back-up?"): reply with EXACTLY the bench list from the Match Context — names only. If empty: "Bench is empty — no standby players." If populated: "Bench: <Name>" (one) or "Bench: <Name>, <Name>" (multiple). Do NOT add parenthetical commentary, do NOT speculate about format-switch scenarios ("(5-a-side bench if we downgrade)" is FORBIDDEN), do NOT mention what would happen if the squad shrank. The user asked a factual question — give the factual answer and stop.
-  → For HISTORICAL / STATS questions about past matches, MoM winners, attendance, current form, scores ("who got MoM last week?", "who got the MoMs in the last 3 matches?", "what was the score last Tuesday?", "who's been the most consistent attender?", "who plays the most?", "who's our top scorer of MoMs?", "who's on a hot streak?", "what's my rating?", "is X our most regular?"): the Recent History block in the Match Context is THE SOURCE OF TRUTH. Answer ONLY from what's in that block — never invent dates, scores, MoM winners, attendance counts, or ratings. The block lists the club's most recent completed matches oldest-first (with date, score, MoM winner + vote count) — its own header line says how many of the total are shown, and older matches are simply not there — plus an ALL-TIME MoM leaderboard, an attendance leaderboard (over every completed match) and Elo top/bottom, none of which are windowed. All-time questions are answered from the leaderboards; per-match questions only from the matches actually listed. If a match isn't listed, say you don't have that one rather than inferring it. Pull the relevant rows and phrase the answer in plain group-chat English ("Wasim took MoM at the May 5 match (5 of 11 votes). The one before that was Karahan."). For "last N matches" questions, the LAST N entries in the Completed matches list are what you want (it's already oldest-first, so take from the tail). For "most consistent" questions, default to the Attendance leaderboard — cite the leader, the runner-up, and the % context. If the question is about a SPECIFIC player, cross-reference all four sub-lists (per-match MoM lines, MoM leaderboard, attendance leaderboard, Elo) to compose a richer answer ("Kemal has played 24 of 25 matches (96%), has won MoM twice, and his current rating is 1042 — fourth on the leaderboard."). If the answer ISN'T in the block (e.g. someone asks about a player who's never played, or the org has no completed matches yet), reply honestly: "no record of that yet — once we've played a few more, that'll show up." Never silent on these.
-  → For HISTORICAL/STATS questions, do NOT include the current-squad roster block at the end. The SQUAD-STATE REPLY SHAPE rule (below) applies to questions about THIS week's match (numbers, who's playing tonight, drops). Historical questions about consistency, MoM, or ratings have nothing to do with tonight's lineup — appending a squad roster on top of a leaderboard creates a confusing mash-up (Kemal saw this on 2026-05-14: "top 3 most consistent" came back as the upcoming-squad list because the LLM included both blocks). Reply with the leaderboard / per-match list / per-player summary ONLY — no [SQUAD] marker, no squad block, no count line ("13/14"), no "Playing tonight" header. Format the leaderboard as a numbered list ("1. Name — 4/4 (100%)"). Keep the answer focused and lineup-free.
-  → For PHONE-PRESENCE / DATA-GAP questions ("who has no phone number?", "which players are missing a number?", "who's not got a contact number on record?", "anyone in the squad without a number?"): the Confirmed and Bench lists in the Match Context tag every player WITHOUT a number on record with "📵 no number on record". Answer NAMES ONLY from those flags — list the flagged players ("No number on record: Aaron, Idris."), or "Everyone in the squad has a number on record 👍" if none are flagged. This is a names-only data-gap answer, NOT a contact leak — it is answerable for anyone. NEVER print, read back, or even hint at a raw phone number/email/contact detail; the digits are not in your context and the no-raw-number rule (SQUAD-STATE REPLY SHAPE) always holds. You are reporting presence/absence of a number, never the number itself.
-  → If the answer requires info outside the Match Context AND outside the Recent History block (long-term roster questions, opinions, predictions, "can these guys come every week?"), reply with what you DO know plus "the admin can answer the rest", rather than going silent.
-- "score": A final match result like "7-3", "Final 5:2", "we won 4-2" posted after the game.
-  → Populate scoreRed + scoreYellow with the two numbers. Order: if the message explicitly names the team labels (see the "Team labels" line in the Match Context — the group may use custom names like "Lions"/"Tigers"), align accordingly: the first/RED label's goals → scoreRed, the second/YELLOW label's goals → scoreYellow. Otherwise emit the numbers in the order they appear in the message. react: "👍". registerAttendance: null.
-- "generate_teams_request": Someone asks the bot to CREATE or CHANGE the teams for the next match — i.e. (re)run the balancer. Patterns: "generate the teams", "make the teams", "balance the teams", "split us up", "@M Time teams please", "sort us into teams", "redo / re-do the teams", "shuffle / re-shuffle the teams", "regenerate the teams", "do the teams again from scratch". The request may optionally include overrides like "consider Ibrahim and Ehtisham as IN" / "include X and Y" / "treat Z as confirmed", per-team pins ("put me on Red"), or a request to invent fun names.
-  → react: "⚽". registerAttendance: null. reply: null — the SERVER runs the balancer and replaces reply with the formatted Red/Yellow lineup. Do NOT invent teams yourself.
-  → CONTRAST WITH show_teams_request: if the user only wants to SEE / re-post the EXISTING teams (show / display / "again" / "once more" / "what are the teams"), that is "show_teams_request", NOT generate — do NOT balance or reshuffle. Only use generate when the user wants the teams CREATED or CHANGED. Ambiguous "sort the teams": lean generate only if it implies creating teams; if it reads as "show me the teams", use show_teams_request.
-  → If the message names players to include (force-add), extract those names (first-name-only is fine) into includeNames. Examples:
-     "@M Time generate teams and consider Ibrahim and Ehtisham as IN"  → includeNames: ["Ibrahim", "Ehtisham"]
-     "teams please, count Baki in"                                     → includeNames: ["Baki"]
-     "generate teams"                                                   → includeNames: []
-  → If the message PINS specific players to specific teams ("put me on Red", "Wasim on Yellow", "stick Idris in Red, I've got the bib"), extract these into teamOverrides as {name, team}. Map any team name the user says to the canonical team enum using the "Team labels" line in the Match Context: the first label (canonical RED) → "RED", the second (canonical YELLOW) → "YELLOW". Groups may use custom names ("put me on Lions" → whichever enum the Team labels line maps "Lions" to). Use first names only. The author can refer to themselves with "me/myself/I" — use their first name from the sender hint. Examples:
-     "generate teams but put myself in Red, I have a red bib"   → teamOverrides: [{"name": "<author-first>", "team": "RED"}]
-     "teams please, Wasim on Yellow with me on Yellow"          → teamOverrides: [{"name": "Wasim", "team": "YELLOW"}, {"name": "<author-first>", "team": "YELLOW"}]
-     "generate teams"                                            → teamOverrides: []
-  → If the requester asks MatchTime to CHOOSE / randomize / invent / surprise them with the team NAMES ("you pick the names", "give them fun names", "team names will be something you randomly select this week", "surprise us", "come up with cool names"), populate teamNames with a FUN, friendly, CLEAN, broadly-appropriate themed PAIR: two DISTINCT names, each short (≤18 chars), suitable for a community football club. Good themes: animals, mythical creatures, playful football/nature themes (Lions/Tigers, Falcons/Sharks, Dragons/Phoenixes, Thunder/Lightning, Wolves/Hawks). Vary them week to week. NO offensive, political, sexual, or religious content; NO real people's names; NO PII. If the message does NOT ask the bot to choose the names, leave teamNames null. Examples:
-     "generate the teams, you pick fun names this week"          → teamNames: ["Wolves", "Hawks"]
-     "@Match Time generate the teams, surprise us with the names" → teamNames: ["Dragons", "Falcons"]
-     "generate teams"                                            → teamNames: null
-     "generate teams and put me on Red"                          → teamNames: null
-  → Only classify as this intent if the request is CLEAR. If the person is just wondering who'd be on which team ("who'd be in red?"), that's "question", not this.
-- "show_teams_request": Someone wants to SEE / show / display / re-post the CURRENT teams that already exist — NOT create or change them. Patterns: "show the teams", "show them again", "show me the teams once more", "show the teams once more", "what are the teams", "what are the teams again", "post the teams again", "display the teams", "display teams", "can we see the teams", "teams again please", "re-post the teams", "remind me of the teams". The key tell is SEEING the existing teams (show / display / "again" / "once more" / "what are"), with NO intent to balance, redo, shuffle, or change anything.
-  → react: "👀". registerAttendance: null. reply: null — the SERVER re-posts the EXISTING teams verbatim (or says none exist yet). Do NOT invent, balance, or reshuffle teams. Do NOT populate teamNames, includeNames, or teamOverrides for this intent.
-  → CONTRAST WITH generate_teams_request: if the user wants the teams CREATED, balanced, redone, shuffled, or otherwise CHANGED ("generate / make / balance / redo / shuffle / regenerate the teams"), that is "generate_teams_request", NOT show. "show"/"display"/"again"/"once more"/"what are the teams" = show; "generate"/"redo"/"shuffle"/"make"/"balance" = generate.
-- "bring_guests_vague": Someone commits to bringing additional players but DOESN'T name them ("two of my guys can play next week", "I'll bring 2 friends", "my mate wants to come", "can I bring someone?").
-  → registerAttendance: null (can't register without names). registerFor: null. react: null. reply: null — the SERVER composes the ask for the name deterministically (src/lib/guest-name-ask.ts, 2026-08-31). Do NOT write the sentence yourself; just classify.
-  → A RELATIONSHIP IS NOT A NAME. Never put "my brother", "Amir's brother", "his mate", "a friend", "2 of my guys", "someone" or "another" into registerFor — those strings get provisioned as real members with those literal names. registerFor is ONLY for an actual personal name ("Shahrokh", "Kieran"). If you do not have one, this intent with registerFor: null is the answer.
-  → Example: Amir posts "Two of my guys can play next week. They played once here 2 weeks ago" → intent "bring_guests_vague", registerAttendance: null, registerFor: null, reply: null.
-  → Only classify as this when count + no names. If they give names in the same message ("bringing Faris and Shaz"), use "in" with registerFor instead.
-  → MIXED with the SENDER'S OWN attendance is NOT this intent — the sender's own half always wins. "I'm in, and my brother can play too" → intent "in", registerAttendance: "IN". "I can't make it but my mate can play" → intent "out", registerAttendance: "OUT". "put me down, might bring someone" → intent "in", registerAttendance: "IN". In every case registerFor stays null (there is still no name to register) and the server handles the guest half. NEVER answer "unclear" for these: the sender stated their own availability plainly, and dropping it leaves them believing they are in the squad when the roster says otherwise.
-  → A CONDITIONAL offer of an UNNAMED third party belongs HERE, never in "conditional_in": "my brother can play if needed", "my mate could fill in if you're short", "I can bring someone if you need", "my mate's up for it if you're a man down". The "if needed" makes it sound like a standing offer, but the sender is NOT the one playing — see the SUBJECT CHECK under "conditional_in". Same output as any other bring_guests_vague: no writes for anyone, registerFor: null, reply: null — the server does the asking.
-- "bulk_payment_credit": Someone (only counts when they're OWNER/ADMIN of the org — server enforces, you classify either way) reports that one member paid match fees on behalf of one or more other players for the most recent completed match. Patterns: "Amir paid for 4", "Amir covered Faris and Adam's fees", "Sait paid for me and 3 others", "those guys paid through Amir", "Idris paid for himself + 2".
-  → registerAttendance: null. react: "👍". reply: null — server composes a confirmation reply with the new unpaid count.
-  → Populate bulkPayment: { payerName, count, coveredNames? }.
-    - payerName: the person who collected/paid (NOT the sender — extract the named collector). First-name only is fine.
-    - count: total fees credited. If coveredNames are listed, count = coveredNames.length. If only a number is given ("paid for 4"), count = that number.
-    - coveredNames: only when SPECIFIC player names are given. If just a count, leave null.
-  → Examples:
-     "Amir paid for 4 players"          → bulkPayment: { payerName: "Amir", count: 4 }
-     "Amir paid for Faris and Adam"     → bulkPayment: { payerName: "Amir", count: 2, coveredNames: ["Faris", "Adam"] }
-     "Sait covered me and 2 others"     → bulkPayment: { payerName: "Sait", count: 3 }   (sender's name is implied but not extracted — server falls through to count-aggregate when names aren't ALL listed)
-  → Only classify as this intent when the message clearly attributes a multi-person payment. A single "I paid" message is just noise/poll territory, not a credit.
-- "reminder_request": The sender explicitly asks MatchTime to remind/ping/message THEM (personally, via DM) at a future time. They must (a) address the bot — "@MatchTime", "@Match Time", "MatchTime", "bot" — OR clearly direct a reminder request at it, AND (b) ask to be reminded/pinged/nudged later. Patterns: "@MatchTime remind me on Monday", "remind me from DM on Monday", "ping me tomorrow morning to confirm", "MatchTime nudge me 2h before kickoff to decide", "can you remind me Sunday night about this", "remind me later to pay".
-  → intent "reminder_request". registerAttendance: null (a reminder request does NOT change their attendance — if the SAME message also clearly registers them in/out, classify the primary attendance intent instead and ignore the reminder; never both). react: "⏰". reply: null (the server composes a short confirmation like "👍 I'll DM you <when>" once the reminder is queued — it knows the resolved time, you don't reliably).
-  → Populate reminder: { date, time?, note }.
-    - Resolve the requested time RELATIVE TO THIS MESSAGE'S timestamp (shown as the message 'timestamp:' field and the Current time line), in Europe/London. Work out the actual calendar date.
-        • "Monday" / "on Monday" → the NEXT Monday strictly after the message date (if the message is itself on a Monday, use the following Monday). date = that YYYY-MM-DD.
-        • "tomorrow" → message date + 1 day.
-        • "tonight" → same date (time defaults below).
-        • "in 2 hours" / "2h before kickoff" → compute the absolute clock time; if it resolves to a date, set date + time. If you cannot compute kickoff-relative times confidently from the Match Context, set confidence < 0.7 so the verdict is dropped (better silent than a wrong-day ping).
-    - time: "HH:MM" 24h Europe/London ONLY if the user named a time ("Monday 8am" → "08:00", "Sunday night" → "20:00", "tomorrow morning" → "09:00"). If no time-of-day is given, OMIT time (null) — the server defaults to 09:00 London.
-    - note: short, in the user's voice, describing what they want to be reminded about. Infer from context. E.g. for "I'll let you know Monday whether I can play. @MatchTime remind me Monday" → note: "let the group know if you can play this week". Keep it under ~120 chars, no bot meta-text, no "@MatchTime", no quotes.
-  → Examples (assume message sent Sun 17 May 2026):
-     "@MatchTime remind me from DM on Monday"            → reminder: { date: "2026-05-18", note: "you said you'd let the group know if you can play" }
-     "ping me tomorrow morning to pay my fee"            → reminder: { date: "2026-05-18", time: "09:00", note: "pay your match fee" }
-     "MatchTime remind me Sunday night to confirm"       → reminder: { date: "2026-05-24", time: "20:00", note: "confirm whether you can play" }
-  → Do NOT fire for general future-tense talk that isn't aimed at the bot ("I'll let you know Monday" with no @bot/remind-me ask → that's conditional_in / noise, NOT reminder_request). The reminder must be a request directed at MatchTime.
-- "noise": Social chat, jokes, memes, photos, links, tangential banter, off-topic questions (recipe links, memes, sports trivia).
-  → Everything null.
-- "unclear": Genuinely can't tell. Everything null — bot stays silent.
-
-FACT-CHECK CLAIMS ABOUT SQUAD STATE:
-If a message states a squad count or numerical claim that contradicts the Match Context ("We're 9/14" when actually confirmed is 11, "need 3 more" when 2 is right, "for 5-a-side we'd need 5 more" when actually only 1 more), gently correct it.
-
-- Set intent to match what the message was trying to do (often "question" or "in" if they're also registering something). If they're just misspeaking numbers while doing something else, keep their primary intent.
-- Add a short polite correction as the reply: "quick correction — we're actually *11/14* (Faris and Shaz brought it up)". Tag the author's first name with @<First> if natural.
-- The correction should be brief. ONE LINE, no roster repeat (they just saw the roster).
-- Only correct when the delta is UNAMBIGUOUS — don't nitpick approximate phrasing like "about 10 of us" vs "9/14".
-- Don't fact-check the author if they're correct.
-
-SHORT CONFIRMATION TO A BOT-LISTED PENDING SET:
-When a previous bot message (in Recent Conversation history) listed specific people as pending — phrases like "pending", "waiting for confirmation", "will let us know" — and a user replies shortly afterwards with a short acknowledgement ("Confirmed", "Confirmed ✅", "Yes", "They're in", "Go ahead", "✅"), treat that reply as registering ALL the pending names the bot listed as IN.
-
-- Set intent to "in".
-- Populate registerFor with one IN entry per pending name from the bot's most recent listing.
-- react: "👍" (server overrides with ✅/🪑 for the last newly-registered player).
-- reply: a short celebratory confirmation line with the new count, e.g. "✅ locked in! We're now *14/14* — full squad for Tuesday 🙌".
-- Ground the names in what the bot actually listed — don't invent. Only fire when the bot's recent message clearly enumerated the names and the user's reply clearly confirms them.
-- If the user's short message is ambiguous (could be confirming something else), classify as "unclear" instead.
-
-REPOSTED ROSTER AS ANSWER (important):
-Sometimes a member answers the bot's "who else?" by forwarding / copy-pasting the bot's own roster message with extra names appended to the open slots. For example MatchTime posts:
-
-*Squad (7-a-side):*
-1. Sait
-...
-9. Karahan
-10. 🥁
-11. 🥁
-...
-
-Then Amir reposts the same roster but with:
-
-10. Faris
-11. Shaz
-
-Rules for recognising this:
-- The message body contains numbered roster lines "<N>. <Name>" consistent with the bot's format.
-- Lines with N > confirmedCount (per Match Context) that name NEW people are registrations from the author.
-- Each such name becomes an entry in registerFor: [{"name": "<Name>", "action": "IN"}, ...]. Mark intent "in". registerAttendance for the author stays null (they're the channel, not necessarily joining themselves unless they also add themselves or had already said IN).
-- Do NOT re-register names that match the existing Confirmed list — those rows weren't changed.
-- Do NOT register 🥁 (drum) rows — those are still open slots.
-- Keep reply: null for this — the server will react with ✅/🪑 for the last newly-added player, same as regular third-party registrations.
-
-RECRUIT REQUESTS (recruitRequest) — A FLAG, NOT AN INTENT:
-Someone asking for MORE PLAYERS for the upcoming match. Set "recruitRequest": true. Otherwise false.
-
-READ THIS FIRST: recruitRequest is INDEPENDENT of intent, and independent of registerAttendance and registerFor. It is an extra FACT you extract, not a category you choose instead of another. One message very often carries a drop AND a recruit ask, and BOTH must survive:
-  "Najib is out. We need one more player. Can someone pls come forward"
-    → intent "out", registerAttendance: null, registerFor: [{"name":"Najib","action":"OUT"}], recruitRequest: true
-  Emitting only one of those halves is the failure this field exists to prevent (2026-09-01: the drop was thrown away, the squad stayed full, and the bot told the owner his squad was full one line after he said a player was out).
-
-SET IT TRUE for:
-- "we need one more player" / "need 2 more" / "we're short tonight" / "still short"
-- "anyone free tonight?" / "anyone else up for it?" / "can someone come forward"
-- "@Match Time dm the recent players" / "get some more lads" / "invite the regulars" / "round up a couple more"
-- "2 spots left, anyone?" (an appeal, not a status question)
-
-LEAVE IT FALSE for:
-- Roster questions: "who's playing?", "list the players", "how many are in?", "show me the squad". These are answered by the roster, never by a DM blast. This distinction matters and it is yours to make — you have the conversation, the Match Context and the squad count.
-- Statements of fact with no ask: "we're 9/10", "one short but it'll be fine", "we'll play 5-a-side then".
-- Past or hypothetical: "we needed players last week", "if we're short I'll ask around".
-- The bot's own previous recruit messages quoted back.
-- Banter: "we need a striker who can actually finish".
-
-WHAT HAPPENS NEXT, AND WHAT YOU MUST NOT WRITE:
-The SERVER performs the recruit. It looks up who played recently, excludes anyone who already responded, DMs them, and then writes the sentence reporting exactly how many were messaged. You do not know that number and you never will.
-- Do NOT write "I'll DM the recent players", "I've messaged the lads", "asking around now", or any other promise of a recruit action in "reply". You would be describing work you cannot do. That exact false promise is why this was taken away from the model in the first place; the flag gives it back to you on the condition that you only REPORT the request.
-- Keep "reply" to the part of the message that is genuinely yours (e.g. acknowledging the drop and the new squad count) and leave the recruiting sentence to the server, or use reply: null if the drop half is all there is.
-- If the sender is not an admin the server ignores the flag. Set it truthfully anyway; authorisation is not your decision.
-
-THIRD-PARTY REGISTRATIONS (registerFor):
-Players frequently sign up or drop OTHER people — friends/family/teammates who can't message right now. Detect these and populate registerFor with one entry per named person. The author's OWN attendance is still controlled by registerAttendance; registerFor is ONLY for other names mentioned. This fires from NATURAL, untagged group chat — you do NOT need an @Match Time tag to add a NAMED player (the server treats a pure IN-add as tag-free). But be CONSERVATIVE: only a CONCRETE, PRESENT/affirmative add of a SPECIFIC NAMED person registers. When genuinely ambiguous between a real add and banter/future-talk/hypothetical/lament, PREFER NOT registering (emit no registerFor) — a missed add is recoverable in one message; a wrong registration on a paid match is not.
-
-WHEN TO FIRE a registerFor IN (DO) vs LEAVE IT EMPTY (DON'T) — drawn from real transcripts:
-
-DO register (concrete, present/affirmative, NAMED):
-- "Add Rashad please" / "add Rashad" / "can we add Rashad" → registerFor: [{"name":"Rashad","action":"IN"}]  (a direct request to add a named player — register them).
-- "My friends down to play" then (same person, next message) "His name is Kieran" → registerFor: [{"name":"Kieran","action":"IN"}]  (the earlier "my friend's down to play" + the now-supplied NAME together = a concrete add. Use the conversation/batch context to attach the name. If you only see "His name is Kieran" but the recent history shows the same author just said a friend is down to play, still register Kieran IN.)
-- "Ayoub snatched that spot 😭" / "Ayoub took the spot" / "Ayoub grabbed the last slot" → registerFor: [{"name":"Ayoub","action":"IN"}]  (HARD/borderline but a CONCRETE PAST-COMPLETED join: the named player HAS taken a slot, i.e. he is now IN. "snatched/took/grabbed the/that/a spot" = the named person is playing → register them. The 😭 is the sender lamenting they missed out, NOT a reason to skip Ayoub.)
-
-DON'T register (future / unnamed / conditional / hypothetical / question / informational — emit NO registerFor):
-- "I can bring 2 players with me for tomorrow" → intent "bring_guests_vague" (FUTURE + UNNAMED — no names to register).
-- "I'll confirm if anything changes later tonight" → "noise" / "conditional_in" (FUTURE, nothing concrete now).
-- "I was going to bring 2 guys with me but now I have to break the news to one of them that they are not invited" → "noise" (PAST INTENTION that fell through + an un-invite — register NOBODY and drop NOBODY; nobody was ever on the list).
-- "Lemme know if we need more to make it 14. I can find another" → "bring_guests_vague" / "noise" (CONDITIONAL + UNNAMED — "I can find another" is an offer, not an add).
-- "Is the 7 a side pitch still booked?" → "question" (a question, not an add).
-- "Just 1 but amir said he's going to bring 2+ himself so should be 14" → "noise" (INFORMATIONAL relay of someone else's FUTURE plan to bring unnamed guests — no concrete named add).
-
-Decision shortcuts: a NAMED person + a present/affirmative/already-happened join verb ("add X", "X is in/playing", "bringing X", "X snatched/took the spot", "X's coming") → DO. Future ("will bring", "going to bring", "can bring"), unnamed ("2 of my guys", "another", "someone"), conditional ("if we need more"), hypothetical, lament, or a question → DON'T.
-
-Examples:
-- "my dad Najib is also in, he's busy right now"
-    → intent "in", registerAttendance: null (author didn't say IN for themselves — they're relaying for Najib only), registerFor: [{"name":"Najib","action":"IN"}]
-- "@Ehtisham Ul Haq In" or "Ehtisham In"
-    → intent "in", registerAttendance: null (author is registering Ehtisham, NOT themselves — note no "I'm in too" / "me too" anywhere), registerFor: [{"name":"Ehtisham Ul Haq","action":"IN"}]
-- "Ibrahim can't make it tonight, work ran late"
-    → intent "out" (relaying a drop), registerAttendance: null, registerFor: [{"name":"Ibrahim","action":"OUT"}]
-- "me and Ahmet both in"
-    → intent "in", registerAttendance: "IN" (author is in), registerFor: [{"name":"Ahmet","action":"IN"}]
-- "bringing Mike and Steve with me, I'm in too"
-    → intent "in", registerAttendance: "IN", registerFor: [{"name":"Mike","action":"IN"},{"name":"Steve","action":"IN"}]
-- "Karahan just told me he can't play"
-    → intent "out", registerAttendance: null, registerFor: [{"name":"Karahan","action":"OUT"}]
-- "@Izzet E is replacing @Elnur Mammadov" (admin swap; @-tags resolve to names)
-    → intent "out", registerAttendance: null, registerFor: [{"name":"Elnur Mammadov","action":"OUT"},{"name":"Izzet E","action":"IN"}]
-- "Elnur can't play tonight, instead Izzet will play"
-    → intent "out", registerAttendance: null, registerFor: [{"name":"Elnur","action":"OUT"},{"name":"Izzet","action":"IN"}]
-- "swap Baki with Aydın" / "swap Baki Aydın"
-    → intent "out", registerAttendance: null, registerFor: [{"name":"Baki","action":"OUT"},{"name":"Aydın","action":"IN"}]
-- "Najib said in as well so we should be at 13 players" / "Najib is in too" / "Habib confirmed earlier" / "Faris told me he's playing tonight" / "you forgot to add Najib"
-    → intent "in", registerAttendance: null, registerFor: [{"name":"Najib","action":"IN"}]  (a member is RELAYING that a named third party has committed — the bot is the system of record so this DOES register them, even if the speaker phrases it as an observation about chat history. CRITICAL: do NOT classify these as "question" and do NOT claim "yes they're confirmed" if the named person is missing from the Confirmed list. ALWAYS emit the registerFor IN entry; the server is idempotent if the player is already registered.)
-- "@Match Time add Najib to the squad" / "@bot put Najib in" / "Najib needs to be added"
-    → intent "in", registerAttendance: null, registerFor: [{"name":"Najib","action":"IN"}]  (an admin directly instructs the bot to register a named player; treat as a third-party IN regardless of squad capacity — the server slots them on confirmed if there's room, bench otherwise.)
-
-REPLACEMENT / SWAP PATTERNS (CRITICAL — emit BOTH directions):
-The phrasings above all mean "drop X AND add Y in the same message". Treat every "X is replacing Y", "Y is replacing X", "instead of X, Y will play", "swap X with Y", "X can't, Y in" as a TWO-entry registerFor: one OUT for the dropping player, one IN for the incoming player. NEVER classify these as "noise" or "documenting a completed transaction" — the bot is the system of record, so until you emit the registerFor entries, the swap hasn't actually happened. Even if the chat history shows a similar earlier swap, treat each new message as a NEW instruction and execute it (the verdict is idempotent — if Y is already CONFIRMED the server skips, if X is already DROPPED the server skips).
-
-Rules:
-- Only include third-party entries when the relationship to the target is clear (possessive "my dad Najib", "bringing X", "X can't make it", "X is replacing Y"). If it's ambiguous gossip ("someone said Najib might come"), skip — don't guess.
-- BANTER / CONTESTED "X IS OUT" (CRITICAL — Zeeshan 2026-06-12): a third-party "X is out" only counts as a real drop when the speaker is clearly RELAYING a genuine unavailability ("X told me he can't make it", "X's knee is gone, he's out") or is an admin instructing a roster change ("remove X", "take X off"). Jokes, teasing, wind-up campaigns and mock votes — "X is out 😂😂", "vote X out", "get X off the list lol", pile-ons with laughing emojis — are NOT drops: classify intent "noise", NO registerFor OUT, no squad-state reply. Read the WHOLE window (batch + recent history): if X is actively chatting like they're still playing, protests the claim, or never confirms dropping, X STAYS — never emit OUT for X off the back of someone else's message while X is present and hasn't dropped themselves. A real drop for X requires X's OWN message or a clear admin instruction. If the squad is over-full and the group genuinely wants X to make way while X stays available, that is an admin DEMOTE → registerFor [{name:"X", action:"BENCH"}] on a clear ADMIN instruction only — never OUT, never inferred from banter.
-- First-name is fine ("Najib"). The server fuzzy-matches; if no match exists, the server provisions a new member, so emit the IN entry even for unknown names.
-- Do NOT put the author themselves in registerFor — use registerAttendance for them.
-- If registerFor has entries, react: "👍" still (server overrides with ✅/🪑 of the newly-added player).
-- If the message ONLY signs up others (author not joining), intent is still "in" or "out" based on the direction of the third-party action; registerAttendance is null.
-
-CHASE behaviour (important):
-- When someone drops (intent "out" or "replacement_request") AND the resulting squad is short (confirmed < maxPlayers per the Match Context), you should nudge the group.
-- If someone in the batch stepped in to cover (intent "in" after a recent drop), you've got it covered — do NOT emit another chase reply.
-- Don't chase on every single "out" — only when the squad actually goes below full after that drop.
-- Use the SHORT-SQUAD RESPONSE format below for the reply.
-
-SQUAD-STATE REPLY SHAPE (the server writes the squad, you write the sentence):
-Every reply that concerns attendance state — "replacement_request", an "out" that leaves the squad short, a "question" about numbers or who's playing — must END with the marker [SQUAD] on a line of its own. The server replaces that marker with the authoritative squad and bench, composed from the database AFTER every write in this batch has landed. You never write that block yourself. Rules:
-
-- NEVER write a numbered roster, a 🥁 row, a "*Playing tonight:*" / "*Squad:*" header or a "*Bench (N):*" list. All of it is the server's, from the rows, and it is appended for you.
-- NEVER state a count ("13/14"), a shortfall ("need 2 more"), a slot claim ("one slot open", "full squad") or a total ("we've got 12 players"). The server states those. Two different counts one line apart is a bug this group has already been shown once (2026-06-12).
-- NEVER announce a move: "X is in", "X goes on the bench", "X moves up from the bench", "adding X", "X is out", "we're still 14/14". Registering someone is what registerAttendance and registerFor do; the squad post then shows where they ended up. Announcing a move that no write backs is the failure we treat as unacceptable — 2026-05-15, the bot replied "Erdal goes on the bench", nothing was written, and he would have turned up to no slot.
-- DO write the human half, in one or two short lines: acknowledge who can't make it and why (stated reasons only, never invented), ask the group for cover, answer the question that was asked, and nothing else.
-- If a player is in the Dropped list AND their most recent message in the provided history said they'll still play if nobody steps in (e.g. "but if no one comes I'll still join", "feeling rough, will play as fallback"), say so in your lead ("Ehtisham will still play if nobody steps in"). The server does not know this, so it is yours to say — but never as a squad slot.
-- The FORMAT SWITCH line, when the conditions below hold, goes in your lead, copied verbatim.
-- NEVER display a raw phone number or numeric id as a player name ("447700900123", "123456789012@lid", a bare "@4477…" mention). If a sender or mentioned player resolves only to digits, refer to them neutrally ("one of the group", "a new player") and never put digits in a reply.
-
-Vary the lead depending on how short we are, WITHOUT numbers:
-- Short by 1: one sentence, e.g. "Sorry to hear, Ibrahim — can anyone step in?"
-- Short by 2+ OR multiple drops in the Dropped list: a richer lead — name who can't make it (from the Dropped list + any new drop in this batch, with stated reasons only, no invention), then the FORMAT SWITCH suggestion on its own line IF the conditions hold.
-- Questions about state ("who's playing?", "do we have enough?"): one short line at most, or nothing at all beyond the marker. The squad post is the answer.
-
-Formatting rules:
-- WhatsApp-friendly markdown: *bold* with single asterisks, newlines as real line breaks, no code fences.
-- Blank line between the lead and the [SQUAD] marker.
-- One or two emoji total — no soup.
-
-Example (Ibrahim + Ehtisham dropped, Ehtisham tentative):
-"Ibrahim (ankle) and Ehtisham (not 100%) can't make it — anyone free? 🙏
-Ehtisham will still play if nobody steps in.
-
-[SQUAD]"
-
-FORMAT SWITCH (important) — YOU DO NO ARITHMETIC HERE:
-The Match Context may list "Alternative formats available for this sport" (e.g. Football 5-a-side = 10 players when the current match is 7-a-side). Admins execute a switch by rebooking the venue and flipping the match in the portal — you never execute it, you only recommend.
-
-⚠️ THE SERVER HAS ALREADY DONE THE MATHS. Under each alternative the Match Context gives you, computed in code:
-  • "✅ VIABLE" or "❌ NOT VIABLE" — whether the confirmed squad would fill that format.
-  • "Bench on switch: …" — the EXACT players who would lose their slot, or "NOBODY".
-  • An EXACT proposal line to copy VERBATIM.
-You MUST NOT recompute any of it. Do NOT count the squad, do NOT subtract anything, do NOT pick who goes on the bench, do NOT reason about "N per team". Copy what you are given. A format's headline ("5-a-side") is NOT its capacity — the capacity is the "(N players total)" figure, and it is already accounted for in the lines above.
-
-Proactive recommendation:
-- When someone drops and the squad goes below full, or someone asks about numbers, you MAY propose switching to a smaller format — but only when ALL of these hold:
-  1. The smaller format is listed in the Alternatives block.
-  2. That format is marked "✅ VIABLE" in the Match Context (if it says "❌ NOT VIABLE", proposing the switch is FORBIDDEN — say nothing about switching to it).
-  3. Kickoff is within ~24 hours (see "X.Xh until kickoff").
-- The proposal is exactly the one line the Match Context gives you under "use this EXACT line VERBATIM", reproduced character-for-character in the lead of the SQUAD-STATE reply (above the [SQUAD] marker). Nothing added, no names changed, no names appended.
-- Dedupe: at most once per batch.
-
-BENCH-ON-SWITCH — absolute rules (a false "you're benched" is a trust failure with real people):
-- The ONLY names you may ever describe as going on the bench in a switch are the ones listed after "Bench on switch:" for that exact format.
-- If it says "Bench on switch: NOBODY", you MUST NOT write any "goes on the bench" / "drops to the bench" / "loses their place" clause for that format, and you MUST NOT name a single player in that context. Nobody is benched. Say so, or say nothing.
-- Never name a player as benched for a format marked "❌ NOT VIABLE" — a switch that cannot happen benches nobody.
-
-Direct question about a switch (e.g. "should we switch to 5-a-side?", "@M Time 5 aside?", "can we downgrade?"):
-- Treat as intent "question".
-- If the smaller format is in the Alternatives block and marked "✅ VIABLE": say "yes, worth it" briefly and state who goes to bench USING ONLY the server-computed "Bench on switch:" list (if that says NOBODY, say plainly that everyone still plays). End with [SQUAD].
-- If the format is in the Alternatives block but marked "❌ NOT VIABLE": answer honestly that we do not have the numbers for that format either. Say it in words — no figures, the squad post carries the count. Never name anyone as benched. End with [SQUAD].
-- If the format isn't in the Alternatives block: reply honestly that the group hasn't set it up; admin would need to add it first as an Activity. End with [SQUAD] regardless.
-- Never pretend a format is available when it isn't. Never execute the switch yourself.
-
-State collapse (when SAME author has multiple messages in the batch):
-- Only the LATEST message gets the attendance side-effect. Earlier messages from the same author get registerAttendance: null (react/reply can still happen for those).
-- Example: "IN if back holds up" at 18:00 → "actually OUT" at 18:03 in the same batch → verdict for 18:00 is conditional_in with no attendance; verdict for 18:03 is out with registerAttendance: OUT.
-
-De-duplicate replies: if multiple people ask the same squad question in this batch, reply on at most ONE verdict. Set reply: null on the others.
-
-Confidence: be honest. If below 0.7 for anything except "noise", downgrade the verdict to "unclear" with everything null. Better silent than wrong.
-
-Reply tone: WhatsApp casual, no corporate fluff. Match the group's energy. Most replies are one short line; use the multi-line SHORT-SQUAD RESPONSE format ONLY when the squad is short by 2+ or there are multiple people in the Dropped list. Never invent facts — if the answer needs info outside the Match Context block, reply: null.`;
-
-/**
- * The STABLE half of the Match Context — everything that changes only
- * when the world changes (squad, bench, match status, org settings).
- *
- * ⏱ NOTHING CLOCK-DERIVED MAY GO IN HERE. Callers mark this string
- * `cache_control: {ttl: "1h"}`, and Anthropic prompt caching matches on
- * an exact byte prefix: one changed character throws the whole ~2,120-
- * token block from a $0.30/MTok cache READ to a $6/MTok cache WRITE.
- *
- * That is exactly what happened between 2026-05 and 2026-08-31: the
- * kickoff countdown (`32.4h until kickoff`) was rendered into this
- * block, changed every ~6 minutes, and the Pi flushes every 10 — so the
- * cache essentially never hit and every call paid +40% (measured, four
- * identical requests varying only that figure: MDs/analyzer-redesign-
- * 2026-08-31.md §8.1). The countdown, the proximity bucket and the
- * roster header now live in `buildMatchClockBlock` instead.
- *
- * If you add a field here, ask: does it change when the clock moves but
- * the database doesn't? If yes, it belongs in the clock block.
- */
+// ─── THE VERDICT TYPES ARE DELETED (§10 step 8) ──────────────────────
+//
+//   `AnalysisIntent` (13 intents), `AnalysisVerdict` (15 fields),
+//   `BatchInputMessage`, `BatchInputHistory` and `AnalysisBatchInput`.
+//
+//   `AnalysisVerdict` is the interface §1 calls out by name: the one
+//   with `intent` AND `registerAttendance` as separately-hallucinated
+//   fields that could disagree, plus a `reasoning` string that five
+//   regexes in `route.ts` parsed to decide whether to drop a player
+//   from a paid match. "That is not an interface. It is a hope."
+//
+//   Its successor is `pipeline/types.ts`'s facts schema, and §6.2
+//   states the difference exactly: "There is no field in which the
+//   model can express a decision, and no prose for a regex to parse."
+
+// ═══════════════════════════════════════════════════════════════════
+// `SYSTEM_PROMPT` IS DELETED — 444 LINES, 19,850 MEASURED TOKENS
+// ═══════════════════════════════════════════════════════════════════
+//
+//   The whole point of the redesign, and §10 step 8.
+//
+//   §3 measured what was actually in it: 29% was extraction guidance
+//   the model genuinely needed, and the other 71% — 13,269 tokens —
+//   was "code, templates and apology for past mistakes, written in
+//   prose and re-sent on every call". 26 reconstructable production
+//   incidents, 14 dated references, 5 "Kemal flagged" annotations, 27
+//   real players' names used as worked examples, 12 CRITICAL banners,
+//   470 shouted words.
+//
+//   Every section had an owner by the time it was deleted, and §3.2's
+//   table is the map: S2 to `interaction-contract.ts`, S8/S9 to
+//   `engine.ts` and `promote-authorization.ts`, S11/S15 to the facts
+//   schema's `contingent` / `conditionOn`, S13 to `BenchSlotOffer`,
+//   S14/S31/S32/S33 to `compose.ts` and `group-copy.ts`, S16 to the
+//   question extractor and `answer-batch.ts`, S17 to
+//   `score-engine.ts`, S18/S19 to `team-ops-engine.ts` and
+//   `answer-batch.ts`, S21/S22 to `admin-ops-engine.ts` and the pure
+//   `reminder-time.ts`, S34 to `format-switch.ts`, S24/S25/S35/S36/S37
+//   to `engine.ts`.
+//
+//   §12 named the deliverable, and this is it: "the incident archive
+//   stops being a prompt and becomes a test suite." The 27 players'
+//   names that the model re-read on every single call are now fixtures
+//   in `e2e/corpus/incidents.jsonl`, which runs in CI and produces a
+//   number.
+//
+//   THE REVERT IS `git revert`. There is no flag behind this and there
+//   should not be one: a switch whose off position is "nobody handles
+//   attendance" is not a revert, and `pipeline/gate.ts` says so at
+//   more length.
 export function buildMatchContextBlock(args: {
   orgName: string;
   match: {
@@ -934,380 +386,27 @@ export function buildMatchClockBlock(matchDate: Date | null | undefined): string
   ].join("\n");
 }
 
-/**
- * Hard override appended to SYSTEM_PROMPT for orgs with featureAttendance
- * OFF (e.g. a MoM + ratings-only group like Sutton Lads). The analyzer
- * still runs for these orgs (stats Q&A keeps it on), but it must NOT do
- * any squad/attendance behaviour — no IN/OUT registration, no squad
- * counts, no "0/14 need players", no roster, no chasing. Without this the
- * LLM happily tracks the squad because the base prompt is attendance-rich
- * (Kemal flagged 2026-06-08: MT told Sutton Lads "0/14 — need 14 players"
- * and "quick correction, we're 0/14" for a group that doesn't track
- * attendance). Placed LAST so it overrides every attendance rule above.
- */
-const ATTENDANCE_OFF_OVERRIDE = `
-
-⚠️⚠️ OVERRIDE — THIS GROUP DOES NOT TRACK ATTENDANCE ⚠️⚠️
-This group uses MatchTime ONLY for Man-of-the-Match voting, player ratings, and answering rating/stats questions. It does NOT manage the squad or who is playing. This section OVERRIDES every attendance/squad/bench/short-squad/correction instruction above.
-
-For ANY message about availability or the squad — "in", "out", "I'm in", "can't make it", numbered or name rosters, "we have 7", "need more players", "who's playing", "anyone want to join?", standing offers, third-party registrations, swaps, drops, counts:
-- DO NOT register attendance (registerAttendance: null, registerFor: []).
-- DO NOT report, confirm, or correct any squad count — NEVER output "X/14", "need N players", a 🥁 roster, "I've got you down", or "quick correction".
-- DO NOT chase for players or offer to add anyone.
-- Set BOTH reply: null and react: null. Stay completely silent.
-
-ONLY produce a reply for questions explicitly about RATINGS, MAN OF THE MATCH, or STATS (e.g. "how many rated so far?", "who won MoM?", "my stats"). For every other message, classify the intent but emit reply: null and react: null.`;
-
-export async function analyzeBatch(input: AnalysisBatchInput): Promise<AnalysisVerdict[]> {
-  if (input.messages.length === 0) return [];
-
-  // ── TEST-ONLY seam (e2e suite) ────────────────────────────────────
-  //   When MT_TEST_LLM_STUB_FILE is set (never in prod — only the e2e
-  //   harness sets it), verdicts are read from that JSON file instead
-  //   of calling Anthropic. The file maps waMessageId → a partial
-  //   AnalysisVerdict; unmapped messages get a silent "noise" verdict.
-  //   This lets the integration tests feed a KNOWN verdict and assert
-  //   the deterministic apply path (attendance writes, bench demotes,
-  //   safety nets) without paying for / depending on the LLM.
-  if (process.env.MT_TEST_LLM_STUB_FILE) {
-    return stubbedVerdictsForTest(process.env.MT_TEST_LLM_STUB_FILE, input.messages);
-  }
-
-  const org = await db.organisation.findFirst({
-    where: { whatsappGroupId: input.groupId },
-    select: { id: true, name: true, teamLabels: true },
-  });
-  if (!org) {
-    return input.messages.map((m) => offlineVerdict(m.waMessageId, "Unknown group"));
-  }
-
-  // Load the next upcoming match for context.
-  const now = new Date();
-  const match = await db.match.findFirst({
-    where: {
-      activity: { orgId: org.id },
-      status: { in: ["UPCOMING", "TEAMS_GENERATED", "TEAMS_PUBLISHED"] },
-      attendanceDeadline: { gt: now },
-    },
-    include: {
-      activity: {
-        select: {
-          name: true,
-          venue: true,
-          sport: { select: { name: true, playersPerTeam: true, teamLabels: true } },
-        },
-      },
-      attendances: {
-        // phoneNumber is selected ONLY to derive a boolean "has a number
-        // on record" flag (see buildMatchContextBlock). The raw value is
-        // never passed into LLM context or any reply — only the noPhone
-        // boolean is. PII rule (line ~472) stays intact.
-        include: { user: { select: { id: true, name: true, phoneNumber: true } } },
-        orderBy: { position: "asc" },
-      },
-    },
-    orderBy: { date: "asc" },
-  });
-
-  // Load alternative formats — every Activity the admin has created
-  // under this org in the same sport family with a smaller
-  // playersPerTeam. isActive is NOT a gate here: it only controls
-  // whether the cron auto-generates weekly matches for that Activity;
-  // a one-off format switch on the current match simply re-points it
-  // at the new Activity row and works regardless of isActive.
-  // Sport "family" = first word of the sport name (e.g. "Football
-  // 7-a-side" and "Football 5-a-side" share family "Football").
-  const alternatives: Array<{ sportName: string; totalPlayers: number }> = [];
-  if (match) {
-    const family = match.activity.sport.name.split(" ")[0];
-    const currentPpt = match.activity.sport.playersPerTeam;
-    const siblingActivities = await db.activity.findMany({
-      where: { orgId: org.id },
-      include: { sport: { select: { name: true, playersPerTeam: true } } },
-    });
-    const seen = new Set<string>();
-    for (const a of siblingActivities) {
-      if (a.sport.name.split(" ")[0] !== family) continue;
-      if (a.sport.playersPerTeam >= currentPpt) continue;
-      if (seen.has(a.sport.name)) continue;
-      seen.add(a.sport.name);
-      alternatives.push({
-        sportName: a.sport.name,
-        totalPlayers: a.sport.playersPerTeam * 2,
-      });
-    }
-    alternatives.sort((x, y) => y.totalPlayers - x.totalPlayers);
-  }
-
-  // Open bench-slot offers (redesign 2026-05-19). The LLM uses this so
-  // that a 👍 / "IN" / "yes" from ANY current bench player is read as
-  // a CLAIM of the open slot (first-come), not a generic IN.
-  let openBenchSlot: {
-    count: number;
-    benchNames: string[];
-    replacingNames: string[];
-  } | null = null;
-  if (match) {
-    const offers = await db.benchSlotOffer.findMany({
-      where: { matchId: match.id, resolvedAt: null },
-      select: { replacingUserId: true },
-    });
-    if (offers.length > 0) {
-      const benchNames = match.attendances
-        .filter((a) => a.status === "BENCH")
-        .map((a) => a.user.name ?? "(unnamed)");
-      const replIds = offers
-        .map((o) => o.replacingUserId)
-        .filter((x): x is string => !!x);
-      const replUsers = replIds.length
-        ? await db.user.findMany({
-            where: { id: { in: replIds } },
-            select: { name: true },
-          })
-        : [];
-      openBenchSlot = {
-        count: offers.length,
-        benchNames,
-        replacingNames: replUsers.map((u) => u.name ?? "—"),
-      };
-    }
-  }
-
-  const matchContext = buildMatchContextBlock({
-    orgName: org.name,
-    match,
-    teamLabels: resolveTeamLabels(match, org, match?.activity.sport),
-    alternatives,
-    openBenchSlot,
-  });
-
-  // Recent History block — feeds the LLM enough historical context to
-  // answer "who got MoM last week?" / "who's been the most consistent
-  // attender?" / "what was the score last Tuesday?" without inventing
-  // numbers. Lives in the cached portion of the user message so the
-  // 1-hour TTL absorbs its cost; only invalidates when a match
-  // completes or a MoM vote lands. Returns null when the org has no
-  // completed match yet — early-launch orgs simply don't get the
-  // block, and the LLM falls back to its existing "I don't know that
-  // one yet" behaviour.
-  //   Gated by the statsQa feature module — when off (e.g. a group
-  //   that only wants MoM + ratings) we don't build or inject the
-  //   block at all, so the LLM has no historical data to answer from
-  //   and falls back to "I don't have that".
-  const features = await getOrgFeatures(org.id);
-  const statsOn = features.statsQa;
-  // Attendance-off orgs (MoM/ratings only) get a hard override that
-  // suppresses all squad/attendance behaviour — see ATTENDANCE_OFF_OVERRIDE.
-  const systemText = features.attendance ? SYSTEM_PROMPT : SYSTEM_PROMPT + ATTENDANCE_OFF_OVERRIDE;
-  const recentHistory = statsOn ? await loadRecentHistory(org.id) : null;
-  const fullContext = recentHistory
-    ? `${matchContext}\n\n${formatRecentHistoryBlock(recentHistory)}`
-    : matchContext;
-
-  const historyBlock = input.history.length
-    ? input.history
-        .slice(-10)
-        .map(
-          (h) =>
-            `  [${h.timestamp.toISOString().slice(11, 16)}] ${h.authorName ?? "?"}: ${h.body.slice(0, 300)}`,
-        )
-        .join("\n")
-    : "  (no recent context)";
-
-  const messagesBlock = input.messages
-    .map((m) => {
-      return [
-        `- waMessageId: ${m.waMessageId}`,
-        `  from: ${m.authorName ?? m.authorPhone ?? "?"}`,
-        `  timestamp: ${m.timestamp.toISOString()}`,
-        `  body: ${JSON.stringify(m.body.slice(0, 800))}`,
-      ].join("\n");
-    })
-    .join("\n");
-
-  // Current wall-clock in Europe/London — the LLM needs this to
-  // resolve relative reminder phrasing ("on Monday", "tomorrow
-  // night") to an absolute calendar date. Lives in the FRESH block
-  // (not the cached prefix) because it changes every call.
-  const nowLondon = new Intl.DateTimeFormat("en-GB", {
-    timeZone: "Europe/London",
-    weekday: "long",
-    day: "numeric",
-    month: "long",
-    year: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-  }).format(new Date());
-
-  // Kickoff countdown / proximity / roster header. Deliberately OUTSIDE
-  // the cached block above — see buildMatchClockBlock. Placed first in
-  // the fresh block so it still reads as a continuation of the Match
-  // Context the system prompt refers to.
-  const matchClock = buildMatchClockBlock(match?.date ?? null);
-
-  const freshBlock = [
-    ...(matchClock ? [matchClock, ``] : []),
-    `## Current time`,
-    `  ${nowLondon} (Europe/London). Use this + each message's \`timestamp\` to resolve relative reminder times.`,
-    ``,
-    `## Recent chat history (last messages, oldest first)`,
-    historyBlock,
-    ``,
-    `## Messages to classify (batch)`,
-    messagesBlock,
-    ``,
-    `Return JSON with a verdict for every waMessageId above.`,
-  ].join("\n");
-
-  const anthropic = getAnthropic();
-  if (!anthropic) {
-    return input.messages.map((m) => offlineVerdict(m.waMessageId, "ANTHROPIC_API_KEY not set"));
-  }
-
-  try {
-    const response = await anthropic.messages.create({
-      model: MODEL,
-      // See MAX_TOKENS_CEILING at the top of this file before changing.
-      max_tokens: ANALYSIS_MAX_TOKENS,
-      system: [
-        {
-          type: "text",
-          text: systemText,
-          // 1-hour cache — the system prompt never changes, so we pay
-          // the higher 2× write cost once and read cheaply from then on.
-          cache_control: { type: "ephemeral", ttl: "1h" },
-        },
-      ],
-      messages: [
-        {
-          role: "user",
-          content: [
-            {
-              type: "text",
-              text: fullContext,
-              // Match/squad context + Recent History both only change
-              // when attendance/MoM/match-status changes; 1-hour cache
-              // absorbs their cost. On DB writes the cache keyed on
-              // the content hash naturally invalidates and rebuilds.
-              cache_control: { type: "ephemeral", ttl: "1h" },
-            },
-            {
-              type: "text",
-              text: freshBlock,
-            },
-          ],
-        },
-      ],
-    });
-
-    // Per-batch token meter. §8.2 measured output at 37-50% of the main
-    // call and "the single largest line", and §8.4 notes the real bill
-    // could be read out of the database but is not: this call site
-    // recorded nothing at all. One line, on the path that costs the
-    // money, so the effect of a prompt change is a fact and not an
-    // estimate. `MT_ANALYZER_USAGE=1` also appends it to a file, which
-    // is how the before/after in the step 4 PR was measured.
-    logAnalyzerUsage("batch", response.usage, input.messages.length);
-
-    const textBlock = response.content.find(
-      (b): b is Anthropic.TextBlock => b.type === "text",
-    );
-    if (!textBlock) {
-      return input.messages.map((m) => offlineVerdict(m.waMessageId, "No text in Claude response"));
-    }
-    let verdicts = normaliseBatch(textBlock.text, input.messages);
-
-    // ── Auto re-prompt for missing IDs (added 2026-05-26) ──
-    // Even with generous headroom on max_tokens, Sonnet occasionally
-    // drops verdicts (JSON malformation, model just skips one,
-    // etc.). For those rare cases, do ONE focused retry with just
-    // the missing IDs and a minimal prompt (no Recent History,
-    // smaller batch → much higher chance of full coverage). If
-    // re-prompt still doesn't recover a verdict, the placeholder
-    // stays and the analyze route's admin-DM fires.
-    const missingIds = verdicts
-      .filter((v) => v.reasoning === "Claude emitted no verdict for this id")
-      .map((v) => v.waMessageId);
-    if (missingIds.length > 0) {
-      const missingMsgs = input.messages.filter((m) => missingIds.includes(m.waMessageId));
-      const retryMessagesBlock = missingMsgs
-        .map((m) => [
-          `- waMessageId: ${m.waMessageId}`,
-          `  from: ${m.authorName ?? m.authorPhone ?? "?"}`,
-          `  timestamp: ${m.timestamp.toISOString()}`,
-          `  body: ${JSON.stringify(m.body.slice(0, 800))}`,
-        ].join("\n"))
-        .join("\n");
-      const retryFresh = [
-        `## Retry — your previous response omitted verdicts for these waMessageIds. Emit EXACTLY one verdict per id, in the same JSON shape as before.`,
-        ``,
-        `## Current time`,
-        `  ${nowLondon} (Europe/London).`,
-        ``,
-        `## Messages to classify`,
-        retryMessagesBlock,
-      ].join("\n");
-      try {
-        const retryResp = await anthropic.messages.create({
-          model: MODEL,
-          // See MAX_TOKENS_CEILING at the top of this file. This site
-          // shipped 64000 and therefore threw on EVERY invocation since
-          // it was written — the recovery path had never once run.
-          max_tokens: ANALYSIS_RETRY_MAX_TOKENS,
-          system: [
-            {
-              type: "text",
-              text: systemText,
-              cache_control: { type: "ephemeral", ttl: "1h" },
-            },
-          ],
-          messages: [{ role: "user", content: retryFresh }],
-        });
-        const retryText = retryResp.content.find(
-          (b): b is Anthropic.TextBlock => b.type === "text",
-        );
-        if (retryText) {
-          const retryVerdicts = normaliseBatch(retryText.text, missingMsgs);
-          // Merge: any retry verdict whose reasoning is NOT the
-          // placeholder replaces the original placeholder.
-          const retryById = new Map(retryVerdicts.map((v) => [v.waMessageId, v]));
-          verdicts = verdicts.map((v) => {
-            if (v.reasoning !== "Claude emitted no verdict for this id") return v;
-            const r = retryById.get(v.waMessageId);
-            return r && r.reasoning !== "Claude emitted no verdict for this id" ? r : v;
-          });
-          const stillMissing = verdicts.filter(
-            (v) => v.reasoning === "Claude emitted no verdict for this id",
-          ).length;
-          console.log(
-            `[analyzer] re-prompt recovered ${missingIds.length - stillMissing}/${missingIds.length} dropped verdict(s)` +
-              (stillMissing > 0 ? ` (${stillMissing} still missing — admin DM will fire)` : ""),
-          );
-        }
-      } catch (err) {
-        // Degrade LOUDLY. This path silently threw on every invocation
-        // for months (max_tokens was 64000, which the SDK refuses), and
-        // the "re-prompt failed" wording read as a note rather than a
-        // fault. Say what broke AND what the user sees because of it.
-        console.error(
-          `[analyzer] BROKEN: dropped-verdict re-prompt threw — ` +
-            `${missingIds.length} message(s) will keep their placeholder ` +
-            `verdict, so MatchTime does not reply to them and an admin DM ` +
-            `fires instead. ids=${missingIds.join(",")}`,
-          err,
-        );
-        // Fall through — original placeholders remain, admin DM fires.
-      }
-    }
-
-    return verdicts;
-  } catch (err) {
-    console.error("[analyzer] Claude call failed:", err);
-    const reason = `Claude API error: ${err instanceof Error ? err.message : String(err)}`;
-    return input.messages.map((m) => offlineVerdict(m.waMessageId, reason));
-  }
-}
+// ═══════════════════════════════════════════════════════════════════
+// `analyzeBatch` AND `ATTENDANCE_OFF_OVERRIDE` ARE DELETED
+// ═══════════════════════════════════════════════════════════════════
+//
+//   §10 step 7: "Retire the mega-prompt when the last route leaves."
+//   It has left. `analyzeBatch` was 350 lines around one
+//   `messages.create`: the cached prompt blocks, the truncation
+//   retry, the dropped-verdict re-prompt, the usage log and six
+//   offline-fallback paths.
+//
+//   `ATTENDANCE_OFF_OVERRIDE` went with it, and its replacement is
+//   better than a prompt appendix could be. It was 12 lines of shouted
+//   prose appended for orgs with `featureAttendance` off, added after
+//   Kemal found MatchTime telling a MoM-only group "0/14 — need 14
+//   players" (2026-06-08). It worked by ASKING the model not to. Every
+//   owner now reads the org's features out of its own `SquadState`
+//   load and owns nothing when its feature is off, so the behaviour is
+//   refused before the write instead of discouraged before the
+//   reading. §9 files that under "tenancy": "`ATTENDANCE_OFF_OVERRIDE`
+//   becomes a router/engine capability filter instead of a 12-line
+//   prompt appendix."
 
 // ─── LLM-composed scheduled chase messages ──────────────────────────
 //
@@ -1833,105 +932,16 @@ function buildChaseComposePrompt(
   }
 }
 
-/** TEST-ONLY (see the MT_TEST_LLM_STUB_FILE block in analyzeBatch).
- *  Reads `{ verdicts: { [waMessageId]: Partial<AnalysisVerdict> } }`
- *  from the stub file fresh on every call so a test can rewrite it
- *  between requests. Failure to read/parse → noise verdicts (silent),
- *  never the offline-fallback path (which would DM admins). */
-function stubbedVerdictsForTest(
-  filePath: string,
-  messages: BatchInputMessage[],
-): AnalysisVerdict[] {
-  let map: Record<string, Partial<AnalysisVerdict>> = {};
-  try {
-    const raw = readFileSync(filePath, "utf8");
-    const parsed = JSON.parse(raw) as { verdicts?: Record<string, Partial<AnalysisVerdict>> };
-    map = parsed.verdicts ?? {};
-  } catch {
-    // Missing/garbled stub file → every message is noise.
-  }
-  return messages.map((m) => {
-    const base: AnalysisVerdict = {
-      waMessageId: m.waMessageId,
-      intent: "noise",
-      confidence: 1,
-      react: null,
-      reply: null,
-      registerAttendance: null,
-      benchConfirmation: null,
-      scoreRed: null,
-      scoreYellow: null,
-      includeNames: null,
-      teamOverrides: null,
-      teamNames: null,
-      bulkPayment: null,
-      reminder: null,
-      registerFor: null,
-      recruitRequest: false,
-      reasoning: "test-stub: no verdict configured for this id",
-    };
-    const partial = map[m.waMessageId];
-    return partial ? { ...base, ...partial, waMessageId: m.waMessageId } : base;
-  });
-}
+// `stubbedVerdictsForTest` is deleted with `analyzeBatch` (§10 step
+// 8). The e2e suite's stub seam is now `MT_TEST_ROUTER_STUB_FILE` and
+// `pipeline/extractor-stub.ts`, which stub FACTS rather than verdicts
+// — a stub that cannot express a decision, for a model that is no
+// longer asked for one.
 
-/**
- * Log what a batch actually cost in tokens. Input is nearly free once
- * cached; OUTPUT is the line that moves when the model stops writing
- * text the server composes (§8.2, §10 step 4).
- *
- * Set `MT_ANALYZER_USAGE=<path>` to also append one JSON line per call,
- * which is how an A/B over a corpus sweep is measured without adding a
- * second harness.
- */
-function logAnalyzerUsage(
-  site: string,
-  usage: Anthropic.Usage | undefined,
-  batchSize: number,
-): void {
-  if (!usage) return;
-  const row = {
-    site,
-    batchSize,
-    in: usage.input_tokens ?? 0,
-    out: usage.output_tokens ?? 0,
-    cacheRead: usage.cache_read_input_tokens ?? 0,
-    cacheWrite: usage.cache_creation_input_tokens ?? 0,
-  };
-  console.log(
-    `[analyzer] usage site=${row.site} msgs=${row.batchSize} in=${row.in} out=${row.out} cacheRead=${row.cacheRead} cacheWrite=${row.cacheWrite}`,
-  );
-  const path = process.env.MT_ANALYZER_USAGE;
-  if (path) {
-    try {
-      appendFileSync(path, `${JSON.stringify({ ...row, at: new Date().toISOString() })}\n`);
-    } catch {
-      // Metering must never break a batch.
-    }
-  }
-}
-
-function offlineVerdict(waMessageId: string, reason: string): AnalysisVerdict {
-  return {
-    waMessageId,
-    intent: "unclear",
-    confidence: 0,
-    react: null,
-    reply: null,
-    registerAttendance: null,
-    benchConfirmation: null,
-    scoreRed: null,
-    scoreYellow: null,
-    includeNames: null,
-    teamOverrides: null,
-    teamNames: null,
-    bulkPayment: null,
-    reminder: null,
-    registerFor: null,
-    recruitRequest: false,
-    reasoning: reason,
-  };
-}
+// `logAnalyzerUsage` and `offlineVerdict` are deleted with
+// `analyzeBatch` (§10 step 8). Per-call token accounting now lives in
+// `pipeline/llm.ts`, which reports `costUsd` per stage rather than one
+// number for a call that did twelve jobs.
 
 /**
  * Sanitise an LLM-proposed pair of fun team names into a safe
@@ -1971,275 +981,29 @@ export function sanitiseTeamNames(input: unknown): [string, string] | null {
   return [red, yellow];
 }
 
-function safeParseJson(text: string): Record<string, unknown> | null {
-  const cleaned = text
-    .trim()
-    .replace(/^```(?:json)?\s*/i, "")
-    .replace(/\s*```$/i, "")
-    .trim();
-  try {
-    const v = JSON.parse(cleaned);
-    return typeof v === "object" && v !== null ? (v as Record<string, unknown>) : null;
-  } catch {
-    return null;
-  }
-}
 
-function normaliseBatch(text: string, messages: BatchInputMessage[]): AnalysisVerdict[] {
-  const parsed = safeParseJson(text);
-  const verdictsRaw = Array.isArray((parsed as { verdicts?: unknown })?.verdicts)
-    ? ((parsed as { verdicts: unknown[] }).verdicts as unknown[])
-    : [];
+// ─── `normaliseVerdict` IS DELETED (§10 step 8) ──────────────────────
+//
+//   175 lines of hand-rolled coercion over one model's JSON: string
+//   "null" to null, a bare string where an array was promised, a
+//   number that arrived as text, an intent outside the enum, a
+//   confidence outside [0,1], `registerFor` entries missing an
+//   `action`. §6.2 predicted its end in one sentence — "enforced with
+//   `output_config: {format: {type: 'json_schema', schema}}`, so
+//   `safeParseJson`'s fence-stripping and most of `normaliseVerdict`'s
+//   120 lines of hand-rolled coercion disappear" — and the pipeline's
+//   extractors do exactly that: a strict JSON schema per route, so a
+//   field cannot arrive in a shape nobody expected.
+//
+//   `safeParseJson` and `normaliseBatch` went with it. So did
+//   `offlineVerdict`, whose six reasoning strings the partial-response
+//   net used to prefix-match — the typed successor is
+//   `lib/operator-note.ts`.
 
-  const byId = new Map<string, AnalysisVerdict>();
-  for (const v of verdictsRaw) {
-    if (typeof v !== "object" || v === null) continue;
-    const obj = v as Record<string, unknown>;
-    const waMessageId = typeof obj.waMessageId === "string" ? obj.waMessageId : null;
-    if (!waMessageId) continue;
-    byId.set(waMessageId, normaliseVerdict(waMessageId, obj));
-  }
-
-  return messages.map((m) => {
-    const verdict = byId.get(m.waMessageId);
-    if (verdict) return verdict;
-    // Claude didn't emit a verdict for this message — treat as unclear
-    // so we still record it as handled (no re-analysis later).
-    return offlineVerdict(m.waMessageId, "Claude emitted no verdict for this id");
-  });
-}
-
-function normaliseVerdict(waMessageId: string, raw: Record<string, unknown>): AnalysisVerdict {
-  const VALID_INTENTS: AnalysisIntent[] = [
-    "in",
-    "out",
-    "replacement_request",
-    "conditional_in",
-    "question",
-    "score",
-    "generate_teams_request",
-    "show_teams_request",
-    "bring_guests_vague",
-    "bulk_payment_credit",
-    "reminder_request",
-    "noise",
-    "unclear",
-  ];
-  const intent = VALID_INTENTS.includes(raw.intent as AnalysisIntent)
-    ? (raw.intent as AnalysisIntent)
-    : "unclear";
-
-  const confidence =
-    typeof raw.confidence === "number" ? Math.max(0, Math.min(1, raw.confidence)) : 0;
-  const react =
-    typeof raw.react === "string" && raw.react.trim().length > 0 ? raw.react.trim() : null;
-  const reply =
-    typeof raw.reply === "string" && raw.reply.trim().length > 0 ? raw.reply.trim() : null;
-  const registerAttendance =
-    raw.registerAttendance === "IN" ||
-    raw.registerAttendance === "OUT" ||
-    raw.registerAttendance === "BENCH"
-      ? raw.registerAttendance
-      : null;
-  const benchConfirmation =
-    raw.benchConfirmation === "yes" || raw.benchConfirmation === "no"
-      ? raw.benchConfirmation
-      : null;
-  const scoreRed =
-    typeof raw.scoreRed === "number" && Number.isFinite(raw.scoreRed) && raw.scoreRed >= 0
-      ? Math.min(99, Math.round(raw.scoreRed))
-      : null;
-  const scoreYellow =
-    typeof raw.scoreYellow === "number" && Number.isFinite(raw.scoreYellow) && raw.scoreYellow >= 0
-      ? Math.min(99, Math.round(raw.scoreYellow))
-      : null;
-  const includeNames =
-    Array.isArray(raw.includeNames)
-      ? (raw.includeNames as unknown[])
-          .filter((n): n is string => typeof n === "string" && n.trim().length > 0)
-          .map((n) => n.trim())
-      : null;
-  const teamOverrides = Array.isArray(raw.teamOverrides)
-    ? (raw.teamOverrides as unknown[])
-        .map((e) => {
-          if (!e || typeof e !== "object") return null;
-          const o = e as Record<string, unknown>;
-          const name = typeof o.name === "string" ? o.name.trim() : "";
-          const team = o.team === "RED" || o.team === "YELLOW" ? o.team : null;
-          if (!name || !team) return null;
-          return { name, team };
-        })
-        .filter((e): e is { name: string; team: "RED" | "YELLOW" } => e !== null)
-    : null;
-  const teamNames = sanitiseTeamNames(raw.teamNames);
-  const registerFor = Array.isArray(raw.registerFor)
-    ? (raw.registerFor as unknown[])
-        .map((e) => {
-          if (!e || typeof e !== "object") return null;
-          const o = e as Record<string, unknown>;
-          const name = typeof o.name === "string" ? o.name.trim() : "";
-          // "BENCH" is a legitimate action (admin demote / straight-to-
-          // bench add). It was missing here until 2026-06-12 — the LLM's
-          // bench demotes were silently filtered out at normalisation, so
-          // the bot ANNOUNCED the move but never persisted it (RC2 of the
-          // Sutton Lads conflicting-posts incident; the bench-demote
-          // safety net in the analyze route only caught some phrasings).
-          const action =
-            o.action === "IN" || o.action === "OUT" || o.action === "BENCH"
-              ? o.action
-              : null;
-          if (!name || !action) return null;
-          return { name, action };
-        })
-        .filter(
-          (e): e is { name: string; action: "IN" | "OUT" | "BENCH" } => e !== null,
-        )
-    : null;
-  let bulkPayment: AnalysisVerdict["bulkPayment"] = null;
-  if (raw.bulkPayment && typeof raw.bulkPayment === "object") {
-    const bp = raw.bulkPayment as Record<string, unknown>;
-    const payerName = typeof bp.payerName === "string" ? bp.payerName.trim() : "";
-    const count = typeof bp.count === "number" ? Math.round(bp.count) : 0;
-    if (payerName && count >= 1 && count <= 50) {
-      const coveredNames = Array.isArray(bp.coveredNames)
-        ? (bp.coveredNames as unknown[])
-            .filter((n): n is string => typeof n === "string" && n.trim().length > 0)
-            .map((n) => n.trim())
-        : undefined;
-      bulkPayment = {
-        payerName,
-        count,
-        coveredNames: coveredNames && coveredNames.length > 0 ? coveredNames : undefined,
-      };
-    }
-  }
-  // recruitRequest: an extracted FACT, orthogonal to intent. Strictly
-  // boolean — anything else (missing, "true", 1) reads as false so a
-  // malformed verdict can never trigger a DM blast.
-  const recruitRequest = raw.recruitRequest === true;
-
-  const reasoning = typeof raw.reasoning === "string" ? raw.reasoning : "";
-
-  // ── reminder (intent: reminder_request) ──────────────────────────
-  // Validate shape only; the SERVER owns the London→UTC conversion and
-  // future/window clamping (see analyze route). We just sanity-check
-  // the date is YYYY-MM-DD and time (if present) is HH:MM.
-  let reminder: AnalysisVerdict["reminder"] = null;
-  if (raw.reminder && typeof raw.reminder === "object") {
-    const r = raw.reminder as Record<string, unknown>;
-    const date = typeof r.date === "string" ? r.date.trim() : "";
-    const time = typeof r.time === "string" ? r.time.trim() : "";
-    const note = typeof r.note === "string" ? r.note.trim() : "";
-    const dateOk = /^\d{4}-\d{2}-\d{2}$/.test(date);
-    const timeOk = time === "" || /^([01]\d|2[0-3]):[0-5]\d$/.test(time);
-    if (dateOk && timeOk && note.length > 0) {
-      reminder = {
-        date,
-        time: time === "" ? undefined : time,
-        note: note.slice(0, 300),
-      };
-    }
-  }
-
-  // Low-confidence downgrade: wipe all actions so the bot stays silent.
-  if (confidence < 0.7 && intent !== "noise") {
-    return {
-      waMessageId,
-      intent: "unclear",
-      confidence,
-      react: null,
-      reply: null,
-      registerAttendance: null,
-      benchConfirmation: null,
-      scoreRed: null,
-      scoreYellow: null,
-      includeNames: null,
-      teamOverrides: null,
-      teamNames: null,
-      bulkPayment: null,
-      reminder: null,
-      registerFor: null,
-      recruitRequest: false,
-      reasoning: `[low-confidence downgrade] ${reasoning}`,
-    };
-  }
-
-  return {
-    waMessageId,
-    intent,
-    confidence,
-    react,
-    reply,
-    registerAttendance,
-    benchConfirmation,
-    scoreRed,
-    scoreYellow,
-    includeNames,
-    teamOverrides: teamOverrides && teamOverrides.length > 0 ? teamOverrides : null,
-    teamNames,
-    bulkPayment,
-    reminder,
-    registerFor: registerFor && registerFor.length > 0 ? registerFor : null,
-    recruitRequest,
-    reasoning,
-  };
-}
-
-// ─── Back-compat shim ─────────────────────────────────────────────────
-// Legacy single-message API used by early scripts and as a fallback. Now
-// implemented as a batch of size 1 so all paths route through the same
-// analyzer.
-
-export interface AnalysisResult {
-  intent: AnalysisIntent;
-  confidence: number;
-  react: string | null;
-  reply: string | null;
-  registerAttendance: "IN" | "OUT" | "BENCH" | null;
-  scoreRed: number | null;
-  scoreYellow: number | null;
-  includeNames: string[] | null;
-  reasoning: string;
-}
-
-export interface AnalysisInput {
-  groupId: string;
-  message: {
-    body: string;
-    authorPhone: string;
-    authorName: string | null;
-    authorUserId: string | null;
-    waMessageId: string;
-    timestamp: Date;
-  };
-  history: BatchInputHistory[];
-}
-
-export async function analyzeMessage(input: AnalysisInput): Promise<AnalysisResult> {
-  const verdicts = await analyzeBatch({
-    groupId: input.groupId,
-    history: input.history,
-    messages: [
-      {
-        waMessageId: input.message.waMessageId,
-        body: input.message.body,
-        authorPhone: input.message.authorPhone,
-        authorName: input.message.authorName,
-        authorUserId: input.message.authorUserId,
-        timestamp: input.message.timestamp,
-      },
-    ],
-  });
-  const v = verdicts[0];
-  return {
-    intent: v.intent,
-    confidence: v.confidence,
-    react: v.react,
-    reply: v.reply,
-    registerAttendance: v.registerAttendance,
-    scoreRed: v.scoreRed,
-    scoreYellow: v.scoreYellow,
-    includeNames: v.includeNames,
-    reasoning: v.reasoning,
-  };
-}
+// ─── `analyzeMessage` IS DELETED (§10 step 8) ────────────────────────
+//
+//   A single-message back-compat shim over `analyzeBatch`, described
+//   in its own comment as "used by early scripts and as a fallback".
+//   It had ZERO callers anywhere in `src/`, `e2e/` or `scripts/` when
+//   it was removed — grep for it and the only hits were its own
+//   definition. It goes with the batch it wrapped.

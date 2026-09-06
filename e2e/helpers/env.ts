@@ -52,7 +52,19 @@ export const E2E = {
   WHATSAPP_API_KEY: "mt-e2e-whatsapp-key",
   CRON_SECRET: "mt-e2e-cron-secret",
 
-  /** The LLM stub file the server reads fresh on every analyzeBatch. */
+  /**
+   * `MT_TEST_LLM_STUB_FILE`'s path.
+   *
+   * ⚠️ ITS CONTENTS HAVE HAD NO READER SINCE §10 STEP 8. It was the file
+   * `analyzeBatch` read verdicts out of; `analyzeBatch` is deleted. What
+   * survives is the ENV VAR, because `src/lib/dm-qa.ts:180` keys its own
+   * stub off `!!process.env.MT_TEST_LLM_STUB_FILE` — a truthiness test,
+   * never a read — and that stub is what makes the DM-Q&A no-leak
+   * assertions structural rather than a model's opinion. Setting a path
+   * nobody opens is the cheapest way to keep that flag honest; see
+   * `helpers/stub.ts`'s header for the full account and for the list of
+   * specs still waiting to be ported off the dead half.
+   */
   LLM_STUB_FILE: path.join(REPO_ROOT, ".e2e", "llm-stub.json"),
 
   /** The ROUTER stub file (§10 step 5). Carries the router's answer AND
@@ -117,11 +129,12 @@ export function assertSafeTestDbUrl(url: string | undefined): asserts url is str
 export function buildTestEnv(): Record<string, string> {
   // Opt-in "live LLM" seam: when MT_SIM_LIVE_LLM=1, the group-simulator
   // harness exercises the real Anthropic model instead of the deterministic
-  // stub. This omits MT_TEST_LLM_STUB_FILE (so message-analyzer.ts falls
-  // through to getAnthropic()), passes the real ANTHROPIC_API_KEY from the
-  // orchestrator's env, and propagates the flag into the Playwright workers
-  // (where group.ts runs). When the flag is OFF (the default), the returned
-  // env is byte-identical to the original stubbed configuration.
+  // stubs. It pins all three stub-file vars empty (so the router, the
+  // extractors and dm-qa all fall through to a real model), passes the real
+  // ANTHROPIC_API_KEY from the orchestrator's env, and propagates the flag
+  // into the Playwright workers (where group.ts runs). When the flag is OFF
+  // (the default), the returned env is byte-identical to the original
+  // stubbed configuration.
   const live = process.env.MT_SIM_LIVE_LLM === "1";
   const env: Record<string, string> = {
     // Pin the resolved ports for every child process (Playwright and its
@@ -165,12 +178,21 @@ export function buildTestEnv(): Record<string, string> {
     // removes it from the overlay — an MT_TEST_LLM_STUB_FILE already in
     // the orchestrator's own environment survived into the dev server
     // and the "live" sweep ran entirely off the stub. An empty string
-    // overrides it, and analyzeBatch's check is a plain truthiness test.
+    // overrides it, and every reader's check is a plain truthiness test.
     // helpers/live-llm.ts asserts the result rather than trusting it.
+    //
+    // SINCE §10 STEP 8 THIS PINS ONE READER, NOT TWO. `analyzeBatch` is
+    // deleted, so the only thing still keyed off this variable is
+    // `dm-qa.ts`'s scoped-answer stub — which is exactly the thing a
+    // live run must not be reading, since a "live" DM-Q&A sweep that
+    // echoed the scoped context back would prove nothing about the
+    // model. The two seams that decide a WRITE are pinned below.
     env.MT_TEST_LLM_STUB_FILE = "";
     // Same reasoning, for the router: a "live" sweep must not be able to
     // read a canned route out of a file, and must not be able to have
-    // the step-5 flags flipped by one either. Pinned empty, not deleted.
+    // the floor or step 7's route ownership flipped by one either
+    // (`RouterStubConfig.floor`, `engineRoutes`). Pinned empty, not
+    // deleted.
     env.MT_TEST_ROUTER_STUB_FILE = "";
     // And for the extractor (§10 step 6). A "live" sweep that could read
     // canned FACTS out of a file would be grading its own answer key —
@@ -180,26 +202,43 @@ export function buildTestEnv(): Record<string, string> {
     env.MT_TEST_EXTRACTOR_STUB_FILE = "";
     env.ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY ?? "";
     env.MT_SIM_LIVE_LLM = "1";
-    // §10 step 5's flags, forwarded ONLY on a live run.
+    // The pipeline's remaining flags, forwarded ONLY on a live run.
     //
-    // This is how "the corpus, with the gate on" becomes runnable, and
-    // it is the strongest evidence step 5 exists to produce: the same 47
-    // incident cases, the same real model, the REAL router in front,
-    // scored against the same baseline. A stubbed run could not answer
-    // it — stubbing the router means choosing the routes, which is
-    // assuming the conclusion.
+    // This is how "the corpus, with the pipeline configured THIS way"
+    // becomes runnable: the same 47 incident cases, the same real model,
+    // the real router in front, scored against the same baseline. A
+    // stubbed run could not answer it — stubbing the router means
+    // choosing the routes, which is assuming the conclusion.
     //
     // Live only, deliberately. A stubbed run has no key, so the router
-    // would fail on every batch and fall back to analysing everything;
-    // the flags would read as on and mean nothing.
-    // ATTENDANCE_ENGINE_ENABLED joins them for §10 step 6: "the corpus,
-    // with the engine deciding and WRITING" is the evidence that step
-    // is judged by, and it needs the real router, the real extractor
-    // and the real apply path all at once.
+    // fails on every batch; the flags would read as on and mean nothing.
+    //
+    // ── THE LIST CHANGED TWICE ON 2026-09-06 (§10 step 8) ────────────
+    //
+    // `ROUTER_GATE_ENABLED` and `ATTENDANCE_ENGINE_ENABLED` LEFT it,
+    // because they were deleted from `pipeline/gate.ts`. Both were
+    // reverts and the thing they reverted to was `analyzeBatch`; with it
+    // gone, `ATTENDANCE_ENGINE_ENABLED=0` would have meant nobody at all
+    // handles `self_att` / `other_att` / `offer` / `unsure`, which is a
+    // kill switch for the core write path wearing the name of a tuning
+    // lever. Forwarding a name nothing reads would look like an arm of a
+    // sweep that cannot exist.
+    //
+    // STEP 7'S FOUR JOINED it, and their sense INVERTED with the same
+    // change: they now default ON, so forwarding them is how a sweep
+    // turns a route OFF — the "MatchTime goes quiet on questions and an
+    // operator is told" arm, which is a survivable degradation and the
+    // reason those four were kept when the other two were deleted.
+    //
+    // Still forwarded ONLY when the operator set them, so an unmodified
+    // `npm run test:corpus:live` is unchanged.
     for (const flag of [
-      "ROUTER_GATE_ENABLED",
       "ROUTER_GATE_FLOOR_ENABLED",
-      "ATTENDANCE_ENGINE_ENABLED",
+      "NONE_BUCKET_SHADOW_ENABLED",
+      "QUESTION_ENGINE_ENABLED",
+      "BALANCER_ENGINE_ENABLED",
+      "SCORE_ENGINE_ENABLED",
+      "ADMIN_OPS_ENGINE_ENABLED",
     ]) {
       if (process.env[flag]) env[flag] = process.env[flag]!;
     }
