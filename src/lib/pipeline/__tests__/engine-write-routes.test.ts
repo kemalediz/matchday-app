@@ -14,6 +14,7 @@
  */
 import { describe, it, expect } from "vitest";
 import { decide } from "../engine";
+import type { TeamFacts } from "../types";
 import { NOW, msg, world } from "./helpers";
 
 describe("S17 · a score from an UNRESOLVED sender is still recorded", () => {
@@ -317,5 +318,247 @@ describe("the recruit blast is DECIDED by the engine and RUN by the route", () =
     // words come from what `inviteRecentPlayers` actually did.
     const r = recruit("kemal");
     expect(r.speech).toHaveLength(0);
+  });
+});
+
+describe("S19 · `generate` is owned; `rename` and `swap` are not", () => {
+  // §10 step 8. `generate_teams_request` is the club's most-used
+  // command — 23 in 120 days on Sutton FC, more than every question
+  // shape put together — so deleting the mega-prompt without an owner
+  // for it would have taken the feature with it. These are the rules a
+  // revert of `BALANCER_ENGINE_ENABLED` now reverts.
+  const SQUAD = ["kemal", "elvin", "sait", "mustafa", "abid", "idris", "faris"];
+
+  const teams = (
+    over: Partial<Omit<TeamFacts, "kind">> = {},
+    opts: {
+      from?: string | null;
+      tagged?: boolean;
+      state?: Parameters<typeof world>[0];
+    } = {},
+  ) =>
+    decide({
+      now: NOW,
+      state: world({ confirmed: SQUAD, ...(opts.state ?? {}) }),
+      messages: [
+        msg({
+          from: opts.from === undefined ? "kemal" : opts.from,
+          body: "@Match Time generate the teams",
+          tagged: opts.tagged ?? true,
+          route: "balancer",
+          facts: {
+            kind: "teams",
+            action: "generate",
+            includeRefs: [],
+            teamNames: null,
+            swaps: [],
+            pairings: [],
+            ...over,
+          },
+        }),
+      ],
+    });
+
+  const genWrite = (r: ReturnType<typeof decide>) =>
+    r.writes.find((w) => w.kind === "generate_teams");
+
+  it("proposes a generate_teams write for a tagged request", () => {
+    const r = teams();
+    expect(genWrite(r)).toMatchObject({
+      forceInclude: [],
+      pinned: [],
+      unmatchedIncludes: [],
+      unmatchedPins: [],
+      teamNames: null,
+    });
+    expect(r.outcomes[0].disposition).toBe("acted");
+  });
+
+  it("proposes NO speech — the post is the balancer's own output", () => {
+    // The composer cannot render the line-ups from `SquadState`: they do
+    // not exist until the write has run. `team-ops-engine.ts` composes
+    // from what LANDED (§3.2 S7).
+    expect(teams().speech).toHaveLength(0);
+  });
+
+  it("refuses an untagged request (both team intents are ACTIONY_INTENTS)", () => {
+    const r = teams({}, { tagged: false });
+    expect(r.writes).toHaveLength(0);
+    expect(r.outcomes[0].reasons.join(" ")).toMatch(/@Match Time tag/);
+  });
+
+  it("does NOT require an admin — the shipped path does not either", () => {
+    expect(genWrite(teams({}, { from: "zair" }))).toBeTruthy();
+  });
+
+  it("resolves an include against ANY attendance row, not just CONFIRMED ones", () => {
+    // "generate the teams including Zair" pulling a BENCH player back in
+    // is the whole point of the feature.
+    const r = teams({ includeRefs: ["Zair"] }, { state: { confirmed: SQUAD, bench: ["zair"] } });
+    expect(genWrite(r)).toMatchObject({
+      forceInclude: [{ userId: "u-zair", name: "Zair Malik", ref: "Zair" }],
+    });
+  });
+
+  it("reports an include it cannot place rather than guessing", () => {
+    const r = teams({ includeRefs: ["Bazza"] });
+    expect(genWrite(r)).toMatchObject({ forceInclude: [], unmatchedIncludes: ["Bazza"] });
+  });
+
+  it("never force-includes somebody with no attendance row at all", () => {
+    // Ehtisham is on the ROSTER but has no row on this match. The
+    // shipped path matches against the match's attendance rows, so he is
+    // not a candidate, and inventing a row for him is a squad change
+    // nobody asked for.
+    const r = teams({ includeRefs: ["Ehtisham"] });
+    expect(genWrite(r)).toMatchObject({ forceInclude: [], unmatchedIncludes: ["Ehtisham"] });
+  });
+
+  it("turns a named side into an absolute pin, against CONFIRMED players", () => {
+    const r = teams({ swaps: [{ personRef: "Sait", team: "YELLOW" }] });
+    expect(genWrite(r)).toMatchObject({
+      pinned: [{ userId: "u-sait", name: "Sait Demir", team: "YELLOW" }],
+    });
+  });
+
+  it("does not pin somebody who is not in the squad", () => {
+    const r = teams({ swaps: [{ personRef: "Zair", team: "RED" }] });
+    expect(genWrite(r)).toMatchObject({ pinned: [], unmatchedPins: ["Zair"] });
+  });
+
+  it("de-duplicates an include named twice", () => {
+    // "generate the teams, Zair is playing, Zair Malik is playing" must
+    // not flip the same row twice or print the name twice above the post.
+    const r = teams(
+      { includeRefs: ["Zair", "Zair Malik"] },
+      { state: { confirmed: SQUAD, bench: ["zair"] } },
+    );
+    expect(genWrite(r)!.forceInclude).toEqual([
+      { userId: "u-zair", name: "Zair Malik", ref: "Zair" },
+    ]);
+  });
+
+  it("keeps the FIRST pin when one player is named for both sides", () => {
+    // Two instructions about one player contradict each other and the
+    // balancer can honour only one; the earlier is at least the one the
+    // message said first.
+    const r = teams({
+      swaps: [
+        { personRef: "Sait", team: "RED" },
+        { personRef: "Sait", team: "YELLOW" },
+      ],
+    });
+    expect(genWrite(r)!.pinned).toEqual([{ userId: "u-sait", name: "Sait Demir", team: "RED" }]);
+  });
+
+  it("rebinds `me` to the sender, from a closed list and never from a model", () => {
+    const r = teams({ swaps: [{ personRef: "me", team: "RED" }] });
+    expect(genWrite(r)).toMatchObject({ pinned: [{ userId: "u-kemal", team: "RED" }] });
+  });
+
+  it("lets a pin name somebody the SAME message force-includes", () => {
+    const r = teams(
+      { includeRefs: ["Zair"], swaps: [{ personRef: "Zair", team: "RED" }] },
+      { state: { confirmed: SQUAD, bench: ["zair"] } },
+    );
+    expect(genWrite(r)).toMatchObject({
+      forceInclude: [{ userId: "u-zair" }],
+      pinned: [{ userId: "u-zair", team: "RED" }],
+    });
+  });
+
+  it("honours a PAIRING by pinning the group to one arbitrary colour", () => {
+    // `generateTeamsForMatch` takes an absolute team per player and has
+    // no notion of "together", so the constraint is preserved by pinning
+    // the group to one side. Which side means nothing, and the reason
+    // says so out loud rather than pretending otherwise.
+    const r = teams({ pairings: [["me", "Sait"]] });
+    expect(genWrite(r)!.pinned).toEqual([
+      { userId: "u-kemal", name: "Kemal Ediz", team: "RED" },
+      { userId: "u-sait", name: "Sait Demir", team: "RED" },
+    ]);
+    expect(r.outcomes[0].reasons.join(" ")).toMatch(/the colour is arbitrary/);
+  });
+
+  it("a pairing inherits the colour of a member already pinned by name", () => {
+    const r = teams({
+      swaps: [{ personRef: "Sait", team: "YELLOW" }],
+      pairings: [["me", "Sait"]],
+    });
+    expect(genWrite(r)!.pinned).toEqual([
+      { userId: "u-sait", name: "Sait Demir", team: "YELLOW" },
+      { userId: "u-kemal", name: "Kemal Ediz", team: "YELLOW" },
+    ]);
+  });
+
+  it("does not pin a pairing that resolved to fewer than two people", () => {
+    const r = teams({ pairings: [["me", "Bazza"]] });
+    expect(genWrite(r)!.pinned).toEqual([]);
+    expect(genWrite(r)!.unmatchedPins).toEqual(["Bazza"]);
+    expect(r.outcomes[0].reasons.join(" ")).toMatch(/constrains nothing/);
+  });
+
+  it("does not change the projected squad — the apply layer owns the flip", () => {
+    // Modelling the force-include in the projection would flip
+    // `squadChanged` and put a batch-level squad post BESIDE the team
+    // post: two posts for one message, §3.2 S36.
+    const r = teams({ includeRefs: ["Zair"] }, { state: { confirmed: SQUAD, bench: ["zair"] } });
+    expect(r.nextState.rows.find((x) => x.userId === "u-zair")?.status).toBe("BENCH");
+    expect(r.speech.filter((s) => s.kind === "squad_status")).toHaveLength(0);
+  });
+
+  it("degrades `rename` and `swap` rather than owning either", () => {
+    for (const action of ["rename", "swap"] as const) {
+      const r = decide({
+        now: NOW,
+        state: world({ confirmed: SQUAD }),
+        messages: [
+          msg({
+            from: "kemal",
+            body: "@Match Time do the thing",
+            tagged: true,
+            route: "balancer",
+            facts: {
+              kind: "teams",
+              action,
+              includeRefs: [],
+              teamNames: null,
+              swaps: [],
+              pairings: [],
+            },
+          }),
+        ],
+      });
+      expect(r.writes).toHaveLength(0);
+      expect(r.outcomes[0].disposition).toBe("degraded");
+      expect(r.degradations.map((d) => d.detail).join(" ")).toMatch(/has no owner in the pipeline/);
+    }
+  });
+
+  it("still owns `show`, and still writes nothing for it", () => {
+    // The other half of the two-owner split, asserted from the engine's
+    // side: `show` and `generate` cannot both take the same branch.
+    const r = decide({
+      now: NOW,
+      state: world({ confirmed: SQUAD, teams: { kemal: "RED", sait: "YELLOW" } }),
+      messages: [
+        msg({
+          from: "kemal",
+          body: "@Match Time show the teams",
+          tagged: true,
+          route: "balancer",
+          facts: {
+            kind: "teams",
+            action: "show",
+            includeRefs: [],
+            teamNames: null,
+            swaps: [],
+            pairings: [],
+          },
+        }),
+      ],
+    });
+    expect(r.writes).toHaveLength(0);
+    expect(r.speech.map((s) => s.kind)).toContain("teams_post");
   });
 });

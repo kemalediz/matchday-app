@@ -1,14 +1,85 @@
 /**
- * Writes the LLM stub file the server-under-test reads on every
- * `analyzeBatch` call (see MT_TEST_LLM_STUB_FILE in
- * src/lib/message-analyzer.ts). Tests call `setLlmStub` with a map of
- * waMessageId → partial verdict immediately before POSTing to
- * /api/whatsapp/analyze.
+ * The three stub seams the e2e suite drives the server through, in the
+ * order a request meets them: the VERDICT seam (dead), the ROUTER seam,
+ * the EXTRACTOR seam.
+ *
+ * ═══════════════════════════════════════════════════════════════════════
+ * ⚠️ THE VERDICT SEAM IS INERT SINCE §10 STEP 8 — READ THIS FIRST
+ * ═══════════════════════════════════════════════════════════════════════
+ *
+ * `setLlmStub` used to write the file `analyzeBatch` read instead of
+ * calling Anthropic: a map of waMessageId → the verdict the model "would
+ * have emitted". §10 step 8 deleted `analyzeBatch`, `SYSTEM_PROMPT` and
+ * `AnalysisVerdict` from `src/lib/message-analyzer.ts` and
+ * `executeVerdict` from `analyze/route.ts`. **Nothing reads the contents
+ * of that file any more.** `setLlmStub({...})` still writes it; the
+ * server never opens it.
+ *
+ * WHY THE FUNCTION IS STILL HERE, rather than deleted with the decider
+ * it stubbed: `MT_TEST_LLM_STUB_FILE` is ALSO the DM-Q&A stub flag.
+ * `src/lib/dm-qa.ts:180` reads `!!process.env.MT_TEST_LLM_STUB_FILE` as a
+ * plain truthiness test and, when set, returns the SCOPED CONTEXT itself
+ * instead of calling Anthropic — which is how `e2e/sim/qa.spec.ts`
+ * asserts the no-leak guarantee structurally (no raw phone digits ever
+ * enter a model's context). That flag is live. The env var stays, the
+ * path stays, and only the FILE'S CONTENTS are dead.
+ *
+ * WHAT REPLACED IT, and why it is not the same shape: `MT_TEST_ROUTER_STUB_FILE`
+ * (`src/lib/pipeline/gate.ts`) and `MT_TEST_EXTRACTOR_STUB_FILE`
+ * (`src/lib/pipeline/extractor-stub.ts`), both below. They stub FACTS and
+ * ROUTES, never a decision — the model is no longer asked for one, so a
+ * stub that could express one would be stubbing something that does not
+ * exist. `StubVerdict.registerAttendance` has no successor field
+ * anywhere: what used to be "the model said register this person IN" is
+ * now a `claim` with a `polarity`, which the ENGINE then decides about.
+ *
+ * ── WHAT THIS COSTS TODAY, STATED RATHER THAN DISCOVERED ─────────────
+ *
+ * Twenty-one spec files still address the server through `verdict:` /
+ * `setLlmStub` and are therefore driving a decider that no longer exists.
+ * They do not fail to COMPILE — a `StubVerdict` is still a valid object —
+ * they fail to MEAN anything: the server sees an untagged message, no
+ * route, no facts, and (per `route.ts`'s "NOBODY OWNED IT" branch) stays
+ * silent. Every assertion that something was written will fail.
+ *
+ *   e2e/api/analyze-honest-ack.spec.ts      e2e/sim/recruit.spec.ts
+ *   e2e/api/analyzer.spec.ts                e2e/sim/router-gate.spec.ts
+ *   e2e/api/attendance-event-log.spec.ts    e2e/sim/router-gate-awaiting.spec.ts
+ *   e2e/api/pasted-roster.spec.ts           e2e/sim/score-mom.spec.ts
+ *   e2e/corpus/current-analyzer-pipeline.ts e2e/sim/show-teams.spec.ts
+ *   e2e/sim/attendance.spec.ts              e2e/sim/squad-from-list.spec.ts
+ *   e2e/sim/attendance-engine-overload.spec.ts
+ *   e2e/sim/bench-capacity.spec.ts          e2e/sim/squad-post.spec.ts
+ *   e2e/sim/guest-name-ask.spec.ts          e2e/sim/teams.spec.ts
+ *   e2e/sim/interaction-contract.spec.ts    e2e/sim/tentative-followup.spec.ts
+ *   e2e/sim/qa.spec.ts                      e2e/sim/third-party-offer.spec.ts
+ *   e2e/sim/self-replace-live.spec.ts
+ *
+ * They are LEFT FAILING on purpose rather than deleted or weakened. Each
+ * one pins a shipped behaviour that still exists — capacity, bench
+ * offers, the interaction contract, the batch-final squad post — and the
+ * port is mechanical but not small: every `verdict:` becomes a
+ * `setRouterStub({ bodies })` entry plus a `setExtractorStub({ bodies })`
+ * entry, and the step-5/6/7 flags have to be turned on per request
+ * (`enabled`, `engine`, `engineRoutes` below). Deleting them to make the
+ * suite green would delete the only end-to-end coverage of the apply
+ * path; a half-done port that passes would be worse still. The list is
+ * here so the size of the remaining job is a fact rather than a
+ * discovery.
+ *
+ * `e2e/sim/attendance-engine.spec.ts` is the worked example of what a
+ * ported spec looks like.
  */
 import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { E2E } from "./env";
 
+/**
+ * ⚠️ DEAD SHAPE. This is `AnalysisVerdict`'s test-side mirror and
+ * `AnalysisVerdict` no longer exists. Kept only so the twenty-one specs
+ * listed in the header still compile while they wait to be ported; do
+ * not add a field to it, and do not write a new spec against it.
+ */
 export interface StubVerdict {
   intent?: string;
   confidence?: number;
@@ -30,6 +101,13 @@ export interface StubVerdict {
   reasoning?: string;
 }
 
+/**
+ * ⚠️ NO LONGER CHANGES WHAT THE SERVER DECIDES. See the header: the file
+ * it writes has had no reader since §10 step 8 deleted `analyzeBatch`.
+ * It still writes it, because `E2E.LLM_STUB_FILE` is the path
+ * `MT_TEST_LLM_STUB_FILE` points at and `dm-qa.ts` keys its own stub off
+ * that variable being set.
+ */
 export function setLlmStub(verdicts: Record<string, StubVerdict>): void {
   mkdirSync(path.dirname(E2E.LLM_STUB_FILE), { recursive: true });
   writeFileSync(E2E.LLM_STUB_FILE, JSON.stringify({ verdicts }, null, 2));
@@ -56,8 +134,35 @@ export interface RouterStub {
    *  ROUTER stub because the engine needs the router's answer anyway,
    *  and one file per request is easier to reason about than two. */
   engine?: boolean;
-  /** waMessageId → route. Unmapped ids come back `unsure`, so the
-   *  analyzer still sees them — the direction that cannot lose a write. */
+  /**
+   * Which of §10 step 7's routes this request owns — `question`,
+   * `balancer`, `score`, `admin_ops`. Read by
+   * `src/lib/pipeline/route-flags.ts:routeStubConfig` out of THIS SAME
+   * FILE, deliberately: one stub JSON configures the whole pipeline for
+   * a request, rather than two files that can disagree about which
+   * request they describe.
+   *
+   * It was reachable from the server and NOT from this helper until §10
+   * step 8, which is why no spec drove a step-7 route deterministically.
+   * Before step 8 that only meant the mega-prompt answered instead; now
+   * it means silence, so the seam has to be expressible here.
+   *
+   * Omitted → the env flags, which are off. `[]` → own nothing, stated
+   * rather than defaulted (the baseline arm of an A/B needs to be able
+   * to say that).
+   */
+  engineRoutes?: string[];
+  /**
+   * waMessageId → route. Unmapped ids fall back to `unsure`
+   * (`gate.ts:711`), and WHAT THAT MEANS CHANGED WITH §10 STEP 8: this
+   * comment used to read "so the analyzer still sees them — the
+   * direction that cannot lose a write". There is no analyzer. `unsure`
+   * joined `ENGINE_ROUTES` (`gate.ts:265-270`) in the same change and
+   * for that reason, so an unmapped id now goes to the ATTENDANCE
+   * EXTRACTOR when the engine flag is on, and to nobody when it is not.
+   * Either way a spec that leaves an id unmapped is asserting something
+   * about the engine, not about a fallback.
+   */
   routes?: Record<string, string>;
   /** Trimmed body → route. The sim harness mints its own message ids, so
    *  a spec addresses the router by what was said. */

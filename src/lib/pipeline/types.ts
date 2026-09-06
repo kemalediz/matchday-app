@@ -252,6 +252,25 @@ export interface TeamFacts {
   includeRefs: string[];
   teamNames: [string, string] | null;
   swaps: Array<{ personRef: string; team: "RED" | "YELLOW" }>;
+  /**
+   * "put me and Kemal on the same team" — a PAIRING, added 2026-09-06.
+   *
+   * A separate field and not a `swaps` entry, because the two say
+   * different things. `swaps` is ABSOLUTE ("David on Red"); a pairing is
+   * RELATIVE ("these people together") and names no colour at all. The
+   * measured production corpus carries this shape twice in 23 generate
+   * requests, and before this field existed the only way to express it
+   * was to make the model invent a colour — exactly the class of
+   * model-authored fact §6.4 exists to remove.
+   *
+   * Each element is one group of verbatim person references that must
+   * end up on the same side. `engine.ts` resolves a group onto ONE
+   * colour, and says out loud there that the colour is arbitrary:
+   * `generateTeamsForMatch` takes an absolute team per player and has no
+   * notion of "together", so the constraint is preserved by pinning the
+   * whole group to the same side rather than by a new balancer concept.
+   */
+  pairings: string[][];
 }
 
 export interface ScoreFacts {
@@ -451,6 +470,44 @@ export type ProposedWrite =
       kind: "resolve_bench_offer";
       offerId: string;
       claimedByUserId: string;
+      sourceMessageId: string;
+      reason: string;
+    }
+  | {
+      /**
+       * RUN THE BALANCER AND POST THE LINE-UPS — §10 step 8's carve-out
+       * for the club's most-used command. 23 occurrences in 120 days on
+       * Sutton FC, more than every question shape combined, so deleting
+       * the mega-prompt without an owner for it would take the feature
+       * with it.
+       *
+       * ONE write rather than a `generate` plus a handful of
+       * `attendance` writes, deliberately. The force-include is
+       * capacity-BLIND — "generate the teams including Ibrahim"
+       * overrides the format rather than queueing behind it — so it has
+       * none of the bench ordering, offer resolution or promotion
+       * authorisation `kind: "attendance"` carries, and routing it
+       * through that apply layer would silently acquire all of them.
+       * `team-ops-engine.ts` applies this, and nothing else does.
+       *
+       * Every name here is ALREADY RESOLVED. `engine.ts` resolves
+       * against `SquadState` so the decision is auditable and pure; the
+       * apply layer translates and never re-litigates.
+       */
+      kind: "generate_teams";
+      /** Rows to flip to CONFIRMED before balancing: the resolved user,
+       *  the display name for the "_Including …_" prefix, and the
+       *  ORIGINAL wording for the `AttendanceEvent` note. */
+      forceInclude: Array<{ userId: string; name: string; ref: string }>;
+      /** Include references that resolved to nobody. Reported to the
+       *  group ("couldn't find … — ignored"), never dropped silently. */
+      unmatchedIncludes: string[];
+      /** Absolute team pins, from `swaps` AND from resolved pairings. */
+      pinned: Array<{ userId: string; name: string; team: "RED" | "YELLOW" }>;
+      /** Pin references that resolved to nobody. */
+      unmatchedPins: string[];
+      /** Per-match display names, when the message supplied both. */
+      teamNames: [string, string] | null;
       sourceMessageId: string;
       reason: string;
     }

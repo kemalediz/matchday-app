@@ -859,9 +859,203 @@ export function decide(input: EngineInput): EngineResult {
         out.reasons.push("re-posting the existing teams; the balancer is not re-run");
         return;
       }
+
+      // ── `generate` — §10 STEP 8 ────────────────────────────────────
+      //
+      // The club's most-used command: 23 "generate the teams" in 120
+      // days on Sutton FC, more than every question shape put together.
+      // Deleting the mega-prompt without an owner for it would take the
+      // feature with it, which is why it is here rather than degrading
+      // alongside `rename` and `swap`.
+      //
+      // WHAT THIS BRANCH DECIDES, AND WHAT IT DOES NOT:
+      //
+      //   • It resolves NAMES — who to force-confirm, who to pin — and
+      //     nothing else. The line-ups are `team-balancer.ts`'s, the
+      //     target match is the runner's, and the post is
+      //     `generateTeamsForMatch`'s.
+      //   • It requires the @Match Time tag (checked above for the whole
+      //     handler): `generate_teams_request` is in `ACTIONY_INTENTS`.
+      //   • It does NOT require an admin, because the shipped path does
+      //     not (`route.ts:3552`) — any tagged member may ask. An admin
+      //     gate here would be a regression dressed as caution.
+      //   • It does NOT touch `w`. The force-include is applied by
+      //     `team-ops-engine.ts` in its own transaction, so modelling it
+      //     in the projection would flip `squadChanged` and make the
+      //     composer emit a batch-level squad post BESIDE the team post —
+      //     two posts for one message, §3.2 S36 exactly. The cost is
+      //     that `nextState` under-reports a force-include; the runner
+      //     composes the team post from the balancer's own output and
+      //     never from `nextState`, so nothing reads the stale half.
+      if (facts.action === "generate") {
+        const senderFirstRef = msg.senderName?.trim().split(/\s+/)[0] ?? null;
+        /** "me" / "myself" / "I" → the sender, from a CLOSED list. The
+         *  shipped path rebinds these the same way
+         *  (`route.ts:3637-3641`); `identity.ts` correctly refuses to
+         *  match "me" against a roster, so the mapping happens here and
+         *  never by asking a model who "me" is. */
+        const deSelf = (ref: string): string =>
+          SELF_REFS.has(ref.trim().toLowerCase()) && senderFirstRef ? senderFirstRef : ref;
+
+        /** Members with ANY attendance row on the match. The shipped
+         *  force-include matches against exactly this set
+         *  (`route.ts:3570-3574`) — a BENCH or DROPPED player is the
+         *  whole point of the feature, so CONFIRMED-only would break it. */
+        const attending = w.roster.filter((mem) => w.rows.has(mem.userId));
+
+        const forceInclude: Array<{ userId: string; name: string; ref: string }> = [];
+        const unmatchedIncludes: string[] = [];
+        for (const rawRef of facts.includeRefs) {
+          const r = resolvePerson(deSelf(rawRef), attending);
+          if (r.kind !== "resolved") {
+            // Reported to the group as "couldn't find … — ignored",
+            // never dropped in silence. STRICTER than the shipped path,
+            // which takes the first fuzzy hit: `resolvePerson` refuses
+            // an ambiguous first name rather than force-confirming
+            // whichever of two Amirs happened to sort first.
+            unmatchedIncludes.push(rawRef);
+            out.reasons.push(`include "${rawRef}" did not resolve to one member (${r.kind})`);
+            continue;
+          }
+          if (forceInclude.some((f) => f.userId === r.member.userId)) continue;
+          forceInclude.push({ userId: r.member.userId, name: r.member.name, ref: rawRef });
+        }
+
+        // Pins resolve against the squad AS IT WILL BE — CONFIRMED rows
+        // plus anyone this same message force-includes. The shipped path
+        // re-reads the roster after the flips for exactly this reason
+        // and calls it "the (now possibly updated) roster"
+        // (`route.ts:3630`).
+        const forcedIds = new Set(forceInclude.map((f) => f.userId));
+        const pinnable = w.roster.filter(
+          (mem) => forcedIds.has(mem.userId) || w.rows.get(mem.userId)?.status === "CONFIRMED",
+        );
+
+        const pinned: Array<{ userId: string; name: string; team: "RED" | "YELLOW" }> = [];
+        const unmatchedPins: string[] = [];
+        const pin = (rawRef: string, team: "RED" | "YELLOW") => {
+          const r = resolvePerson(deSelf(rawRef), pinnable);
+          if (r.kind !== "resolved") {
+            unmatchedPins.push(rawRef);
+            out.reasons.push(`pin "${rawRef}" did not resolve to one confirmed player (${r.kind})`);
+            return;
+          }
+          // First pin wins. Two instructions about one player contradict
+          // each other and the balancer can honour only one; taking the
+          // earlier is at least the one the message said first.
+          if (pinned.some((p) => p.userId === r.member.userId)) return;
+          pinned.push({ userId: r.member.userId, name: r.member.name, team });
+        };
+
+        for (const s of facts.swaps) pin(s.personRef, s.team);
+
+        // ── PAIRINGS: "put me and David on the same team" ─────────────
+        //
+        // THE HONEST BIT. `generateTeamsForMatch` takes `pinnedToTeam` —
+        // an ABSOLUTE colour per player — and has no notion of
+        // "together". So a pairing is honoured by pinning the whole
+        // group to ONE side, and WHICH side is arbitrary: it inherits
+        // the colour of any member the message already pinned by name,
+        // and otherwise falls to RED. Red and Yellow carry no meaning of
+        // their own (the labels are per-match display names), so the
+        // constraint the message actually expressed — these people
+        // together — is preserved exactly, and the only thing invented
+        // is a colour that means nothing.
+        //
+        // The shipped path has the SAME limitation and resolves it
+        // worse: the mega-prompt had to pick the colour itself, so a
+        // pairing arrived as two model-authored `teamOverrides`.
+        //
+        // `team-balancer.ts:63-66` caps pins at `perTeam` per side and
+        // lets the overflow fall back into the ordinary pool, so an
+        // over-large pairing degrades into a partial constraint rather
+        // than an impossible match. No cap is re-implemented here.
+        for (const group of facts.pairings) {
+          const resolved: Array<{ userId: string; name: string }> = [];
+          for (const rawRef of group) {
+            const r = resolvePerson(deSelf(rawRef), pinnable);
+            if (r.kind !== "resolved") {
+              unmatchedPins.push(rawRef);
+              out.reasons.push(
+                `pairing member "${rawRef}" did not resolve to one confirmed player (${r.kind})`,
+              );
+              continue;
+            }
+            resolved.push({ userId: r.member.userId, name: r.member.name });
+          }
+          if (resolved.length < 2) {
+            // One resolved name is not a pairing, and pinning them alone
+            // would impose a colour the message never asked for.
+            if (resolved.length === 1) {
+              out.reasons.push(
+                `pairing "${group.join(" + ")}" resolved only ${resolved[0].name}; a group of ` +
+                  `one constrains nothing, so no pin was made`,
+              );
+            }
+            continue;
+          }
+          const already = resolved
+            .map((r) => pinned.find((p) => p.userId === r.userId)?.team)
+            .find((t): t is "RED" | "YELLOW" => t !== undefined);
+          const team = already ?? "RED";
+          for (const r of resolved) {
+            if (pinned.some((p) => p.userId === r.userId)) continue;
+            pinned.push({ userId: r.userId, name: r.name, team });
+          }
+          out.reasons.push(
+            `pairing ${resolved.map((r) => r.name).join(" + ")} honoured by pinning the group ` +
+              `to ${team} (the colour is arbitrary; the balancer has no "together" constraint)`,
+          );
+        }
+
+        emit({
+          kind: "generate_teams",
+          forceInclude,
+          unmatchedIncludes,
+          pinned,
+          unmatchedPins,
+          // Only when the message SUPPLIED both names. "come up with fun
+          // team names" supplies none, and the extractor is told not to
+          // invent any — `team-ops-engine-batch.ts` records what that
+          // loses relative to the mega-prompt.
+          teamNames: facts.teamNames,
+          sourceMessageId: msg.id,
+          reason: "team generation requested",
+        });
+        // NO SPEECH INTENT, deliberately. The group post is
+        // `generateTeamsForMatch`'s `groupPost` — the real balancer
+        // output, with the real names and the real ratings — and the
+        // composer cannot produce it from `SquadState`, because the
+        // line-ups do not exist until the write has run.
+        // `team-ops-engine.ts` composes it from what LANDED: the same
+        // shape the payment ack uses, for the same reason (§3.2 S7 — the
+        // words must match the action).
+        return;
+      }
+
+      // ── `rename` AND `swap`: NEITHER IS OWNED, each for its own
+      //    reason ─────────────────────────────────────────────────────
+      //
+      //   • `swap` HAS AN OWNER ALREADY. `route.ts`'s
+      //     `handleTeamSwapIfApplicable` / `handleColorSwapIfApplicable`
+      //     is a deterministic pre-peel that runs on the RAW BODY with no
+      //     verdict at all, so it survives the mega-prompt's deletion
+      //     untouched. Owning it here would put two deciders on one
+      //     message, which is the failure this file is organised to
+      //     prevent.
+      //   • `rename` IS NOT A GENERATE. Mapping it onto
+      //     generate-with-names would re-run the balancer over line-ups
+      //     an admin may have hand-swapped — 2026-06-18 (`c408649`), the
+      //     incident that split `show` from `generate` in the first
+      //     place. Renaming WITHOUT reshuffling is a `Match.teamLabels`
+      //     write this path does not model. Losing a rename costs one
+      //     message; the alternative costs the teams.
       degrade(
-        `team action "${facts.action}" is not implemented in the dry-run pipeline; ` +
-          `the existing balancer still owns it`,
+        `team action "${facts.action}" has no owner in the pipeline` +
+          (facts.action === "swap"
+            ? `; route.ts's deterministic swap pre-peel owns it on the raw body`
+            : `; renaming without reshuffling is not modelled, and generating instead ` +
+              `would re-run the balancer over an admin's manual swap (c408649)`),
       );
     }
 

@@ -114,7 +114,12 @@ import { extractForRoute } from "./extractors";
 import { extractorStubFromEnv } from "./extractor-stub";
 import { resolvePerson } from "./identity";
 import { anthropicModel, type PipelineModel } from "./llm";
-import { ANSWER_ENGINE_ROUTES, stepSevenOwnsRoute } from "./route-flags";
+import {
+  ANSWER_ENGINE_ROUTES,
+  ANSWER_TEAM_ACTIONS,
+  TEAM_OPS_TEAM_ACTIONS,
+  stepSevenOwnsRoute,
+} from "./route-flags";
 import type {
   EngineInput,
   EngineMessage,
@@ -615,14 +620,25 @@ export async function runAnswerBatch(args: {
         hand(`the teams extractor returned "${facts.kind}" facts`);
         continue;
       }
-      if (facts.action !== "show") {
+      if (!ANSWER_TEAM_ACTIONS.includes(facts.action)) {
         // 2026-06-18 (`c408649`): "show the teams again" re-ran the
         // balancer and destroyed an admin's manual swap. SHOWING is a
         // read and there is no branch here that can write; GENERATING
         // rewrites `TeamAssignment`, force-includes named players into
         // the squad, moves `Match.status` and runs the rating adjuster
         // (a second model call). None of that belongs on a read path.
-        hand(`team action "${facts.action}" still belongs to the balancer`);
+        //
+        // WHERE IT GOES INSTEAD CHANGED IN §10 STEP 8. It used to go to
+        // the mega-prompt, which still ran the balancer. `generate` now
+        // has a deterministic owner — `team-ops-engine-batch.ts`, on
+        // this same route, selected by this same FACT — and the two
+        // action lists live in `route-flags.ts` so they cannot drift
+        // into overlapping. `rename` and `swap` are owned by neither;
+        // that module's header says why for each.
+        const owner = TEAM_OPS_TEAM_ACTIONS.includes(facts.action)
+          ? "team-ops-engine-batch.ts owns it on this route"
+          : "no module owns it; see team-ops-engine-batch.ts's header";
+        hand(`team action "${facts.action}" is not a read (${owner})`);
         continue;
       }
       // NO CARVE-OUT FOR AN EMPTY `state.teams` ANY MORE, and that is a

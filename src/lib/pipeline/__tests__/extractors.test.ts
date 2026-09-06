@@ -320,6 +320,68 @@ describe("parseFacts (other routes)", () => {
       "wa-1",
     );
     expect(facts).toMatchObject({ kind: "teams", action: "show" });
+    // A response predating `pairings` parses to an EMPTY list, not to
+    // `undefined`: the engine iterates it unconditionally.
+    expect(facts).toMatchObject({ pairings: [] });
+  });
+
+  // ── §10 step 8's additions to the teams extractor ───────────────────
+
+  it("teams carries a PAIRING as a group of names, with no colour in it", () => {
+    // "put me and David on the same team" is RELATIVE. Before this field
+    // existed the only way to carry it was to make the model invent a
+    // colour — exactly the class of model-authored fact §6.4 removes.
+    const { facts } = parseFacts(
+      "teams",
+      '{"action":"generate","includeRefs":[],"teamNames":[],"swaps":[],' +
+        '"pairings":[["me","David"],["Sait","Abid"]]}',
+      "wa-1",
+    );
+    expect(facts).toMatchObject({
+      kind: "teams",
+      action: "generate",
+      pairings: [
+        ["me", "David"],
+        ["Sait", "Abid"],
+      ],
+    });
+  });
+
+  it("teams drops a pairing of fewer than two people", () => {
+    // A group of one constrains nothing; honouring it would pin somebody
+    // to an arbitrary colour on the strength of a stray array.
+    const { facts } = parseFacts(
+      "teams",
+      '{"action":"generate","includeRefs":[],"teamNames":[],"swaps":[],' +
+        '"pairings":[["me"],[],["Sait","Abid"]]}',
+      "wa-1",
+    );
+    expect(facts).toMatchObject({ pairings: [["Sait", "Abid"]] });
+  });
+
+  it("the teams schema requires pairings, so the model cannot omit it", () => {
+    const schema = factsSchemaFor("balancer") as {
+      required: string[];
+      properties: Record<string, unknown>;
+    };
+    expect(schema.required).toContain("pairings");
+    expect(schema.properties.pairings).toEqual({
+      type: "array",
+      items: { type: "array", items: { type: "string" } },
+    });
+  });
+
+  it("the teams prompt tells the model that generate wins over rename", () => {
+    // The measured shape: "@Match Time generate the teams now, come up
+    // with fun team names" must extract as `generate`, not `rename` —
+    // `rename` is handed back, and handing that message back would lose
+    // the club's most-used command to a wording detail.
+    const p = EXTRACTOR_PROMPTS.teams;
+    expect(p).toMatch(/If the line-ups have to be worked out again, it is "generate"/);
+    expect(p).toMatch(/"rename" is ONLY for a message that wants the SAME two line-ups/);
+    // …and it still never picks anything itself.
+    expect(p).toMatch(/You never pick the teams/);
+    expect(p).toMatch(/keep that word verbatim; do not guess their name/);
   });
 
   it("admin", () => {
@@ -413,8 +475,94 @@ describe("extractForRoute", () => {
     });
     const out = await extractForRoute(model, "self_att", MSG);
     expect(out.facts.kind).toBe("none");
-    expect(out.degradations[0].detail).toMatch(/overloaded/);
-    expect(out.degradations[0].stage).toBe("extractor");
+    expect(out.degradations.at(-1)!.detail).toMatch(/overloaded/);
+    expect(out.degradations.at(-1)!.stage).toBe("extractor");
+  });
+
+  // ── §10 STEP 8 — ONE RETRY, AND ONLY ON THE ATTENDANCE ROUTES ──────
+  //
+  // `llm.ts` already raises the SDK's retries to 4, and its comment says
+  // why: "the failure mode of a call that gives up is a player who said
+  // IN not being in the squad… It is the FIRST of two defences:
+  // `attendance-engine-batch.ts` hands a message whose extraction still
+  // failed BACK TO THE ANALYZER rather than letting it go silent."
+  //
+  // Step 8 deletes the second defence. There is no analyzer, so an
+  // extraction that fails now means silence plus an operator note — for
+  // a message the router already decided was attendance-shaped.
+  //
+  // The SDK's retries cover 408/409/429/5xx. They do NOT cover the other
+  // half: a response the strict schema rejects, or one `parseFacts`
+  // cannot read. That failure is non-deterministic in exactly the way a
+  // fresh call fixes, and §11.1's asymmetry prices it — "a false
+  // positive costs one extractor call (~$0.002); a false negative costs
+  // a player their slot."
+  //
+  // ONE retry, not two: past the second attempt the cause is almost
+  // certainly the message itself, and the honest answer is the operator
+  // note rather than a third bill and another two seconds.
+  describe("the attendance extractor retries once, and nothing else does", () => {
+    function flakyModel(failures: number, then: string): PipelineModel & { calls: number } {
+      let calls = 0;
+      const m = {
+        name: "flaky",
+        get calls() {
+          return calls;
+        },
+        async complete(): Promise<ModelResponse> {
+          calls++;
+          if (calls <= failures) throw new Error("529 Overloaded");
+          return {
+            text: then,
+            stopReason: "end_turn",
+            usage: { inputTokens: 900, outputTokens: 120, cacheReadTokens: 0, cacheWriteTokens: 0 },
+            costUsd: 0.0024,
+            ms: 2100,
+          };
+        },
+      };
+      return m as PipelineModel & { calls: number };
+    }
+
+    const GOOD = '{"claims":[],"affirmation":null,"sideRequests":[]}';
+
+    it.each(["self_att", "other_att", "offer", "unsure"] as const)(
+      "recovers a %s extraction that failed once",
+      async (route) => {
+        const model = flakyModel(1, GOOD);
+        const out = await extractForRoute(model, route, MSG);
+        expect(model.calls).toBe(2);
+        expect(out.facts.kind).toBe("attendance");
+      },
+    );
+
+    it("gives up after the second attempt and reports BOTH failures", async () => {
+      const model = flakyModel(2, GOOD);
+      const out = await extractForRoute(model, "self_att", MSG);
+      expect(model.calls).toBe(2);
+      expect(out.facts.kind).toBe("none");
+      // The operator sees that it was tried twice; "it failed" and "it
+      // failed twice in a row" are different signals about the same
+      // minute, and only the second one says the model is having a bad
+      // time rather than the message being odd.
+      expect(out.degradations.at(-1)!.detail).toMatch(/twice/i);
+    });
+
+    it.each(["question", "balancer", "score", "admin_ops"] as const)(
+      "does NOT retry %s — a missed answer is recoverable in one message",
+      async (route) => {
+        const model = flakyModel(1, GOOD);
+        const out = await extractForRoute(model, route, MSG);
+        expect(model.calls, `${route} retried; only the write path should`).toBe(1);
+        expect(out.facts.kind).toBe("none");
+      },
+    );
+
+    it("never retries a call that SUCCEEDED", async () => {
+      const model = flakyModel(0, GOOD);
+      await extractForRoute(model, "self_att", MSG);
+      expect(model.calls).toBe(1);
+    });
   });
 
   it("sends a strict JSON schema and a capped max_tokens", async () => {

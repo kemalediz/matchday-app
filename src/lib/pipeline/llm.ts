@@ -150,9 +150,22 @@ export function anthropicModel(opts?: { apiKey?: string }): PipelineModel {
       // The SDK retries 408/409/429/5xx with exponential backoff, which
       // is exactly this class. Four attempts rather than two costs a
       // few seconds on a bad minute and nothing at all on a good one.
-      // It is the FIRST of two defences: `attendance-engine-batch.ts`
-      // hands a message whose extraction still failed back to the
-      // analyzer rather than letting it go silent.
+      //
+      // ── THE SECOND DEFENCE CHANGED ON 2026-09-06 (§10 step 8) ──────
+      //
+      // This comment used to end: "It is the FIRST of two defences:
+      // `attendance-engine-batch.ts` hands a message whose extraction
+      // still failed back to the ANALYZER rather than letting it go
+      // silent." There is no analyzer. A failed extraction now means
+      // MatchTime says nothing and an admin gets a DM.
+      //
+      // So the second defence moved INTO the pipeline:
+      // `extractors.ts:extractForRoute` retries once, on the four routes
+      // that end in an attendance write and no others. It is a genuinely
+      // different retry from this one and both are needed — this one
+      // covers the transport class the SDK knows about, that one covers
+      // a response the strict schema rejects, which the SDK considers a
+      // successful call. Neither subsumes the other.
       const client = new Anthropic({ apiKey, maxRetries: 4 });
       const cacheAttempted = req.system.length >= MIN_CACHEABLE_CHARS;
       const t0 = Date.now();

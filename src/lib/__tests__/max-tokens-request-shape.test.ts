@@ -93,7 +93,7 @@ vi.mock("@/lib/match-history", () => ({
   formatRecentHistoryBlock: () => "",
 }));
 
-import { analyzeBatch, composeChaseText } from "@/lib/message-analyzer";
+import { composeChaseText } from "@/lib/message-analyzer";
 import { answerScopedQuestion } from "@/lib/dm-qa";
 
 beforeEach(() => {
@@ -124,75 +124,28 @@ describe("composeChaseText max_tokens", () => {
   });
 });
 
-describe("dropped-verdict re-prompt max_tokens", () => {
-  const batch = {
-    groupId: "g1",
-    messages: [
-      {
-        waMessageId: "wa-1",
-        body: "I'm in",
-        authorName: "Elvin",
-        authorPhone: "+447700900001",
-        timestamp: new Date("2026-08-31T11:59:00.000Z"),
-      },
-      {
-        waMessageId: "wa-2",
-        body: "me too",
-        authorName: "Mustafa",
-        authorPhone: "+447700900002",
-        timestamp: new Date("2026-08-31T11:59:30.000Z"),
-      },
-    ],
-    history: [],
-  };
-
-  it("issues a retry the SDK actually accepts, and recovers the verdict", async () => {
-    // 1st call omits wa-2 → the re-prompt path fires. 2nd call supplies it.
-    RESPONSES = [
-      JSON.stringify({
-        verdicts: [
-          {
-            waMessageId: "wa-1",
-            intent: "in",
-            confidence: 0.9,
-            reasoning: "in",
-            reply: null,
-            react: "✅",
-          },
-        ],
-      }),
-      JSON.stringify({
-        verdicts: [
-          {
-            waMessageId: "wa-2",
-            intent: "in",
-            confidence: 0.9,
-            reasoning: "also in",
-            reply: null,
-            react: "✅",
-          },
-        ],
-      }),
-    ];
-
-    const verdicts = await analyzeBatch(batch as never);
-
-    expect(create, "the re-prompt must actually be attempted").toHaveBeenCalledTimes(2);
-    expect(
-      captured[1].max_tokens,
-      `the re-prompt sent max_tokens=${captured[1]?.max_tokens}; the SDK ` +
-        `refuses anything above ${SDK_NONSTREAMING_LIMIT} on a non-streaming call`,
-    ).toBeLessThanOrEqual(SDK_NONSTREAMING_LIMIT);
-
-    // A retry covers a SUBSET of the batch, so it never needs more room
-    // than the main call.
-    expect(captured[1].max_tokens).toBeLessThanOrEqual(captured[0].max_tokens);
-
-    // The real symptom: the dropped verdict is recovered, no placeholder left.
-    const wa2 = verdicts.find((v) => v.waMessageId === "wa-2");
-    expect(wa2?.reasoning).not.toBe("Claude emitted no verdict for this id");
-  });
-});
+/**
+ * ── THE DROPPED-VERDICT RE-PROMPT DIED WITH `analyzeBatch` (step 8) ──
+ *
+ * The case that stood here asserted a retry the SDK would accept, after
+ * the site shipped at `max_tokens: 64000` and had therefore NEVER once
+ * succeeded since May. Both the re-prompt and the batch it re-prompted
+ * are gone.
+ *
+ * The regression it protected against is not gone, and it is not on
+ * trust: `pipeline/llm.ts` clamps EVERY pipeline call to
+ * `PIPELINE_MAX_TOKENS_CEILING` (4,096) at the call site rather than
+ * trusting the caller, and `pipeline/__tests__/max-tokens-derivation.test.ts`
+ * asserts that constant against `MAX_TOKENS_CEILING` here. A new stage
+ * cannot reintroduce the 64,000 bug by passing its own number, which is
+ * a stronger guarantee than a test per call site.
+ *
+ * The coverage it gave for the OTHER half — that a dropped id never
+ * becomes a silent no-op (§3.2 S1, the 2026-05-25 Ibrahim + Baki
+ * incident) — moved to `assertCoverage` in the pipeline and to
+ * `lib/__tests__/operator-note.test.ts`, which asserts that an id with
+ * no route at all is reported to a human rather than dropped.
+ */
 
 /**
  * TRUNCATION — the failure mode the max_tokens fix newly made reachable.

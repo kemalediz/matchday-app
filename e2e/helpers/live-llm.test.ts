@@ -11,20 +11,36 @@
  *
  * Four seconds, 8/47 cases, exit 0. Not one of the 141 "runs" reached
  * Anthropic: `buildTestEnv()` passes `ANTHROPIC_API_KEY: ""` through
- * when the orchestrator has no key, `getAnthropic()` returns null, and
- * every message gets `offlineVerdict(…, "ANTHROPIC_API_KEY not set")`.
+ * when the orchestrator has no key, `getAnthropic()` returned null, and
+ * every message got `offlineVerdict(…, "ANTHROPIC_API_KEY not set")`.
  * A green tick on a measurement that never happened.
  *
  * The first test in this file is the one that matters: it runs the real
  * orchestrator with an empty key and requires it to REFUSE. Everything
  * else pins the pieces.
+ *
+ * ── §10 STEP 8 (2026-09-06) ──────────────────────────────────────────
+ * `offlineVerdict` is deleted, so the string the original defect wrote
+ * cannot be written any more. The tests that feed it are KEPT, for the
+ * reason `src/lib/__tests__/seatbelt-deletion.test.ts` gives about the
+ * three safety nets: a classifier that stops recognising a failure it
+ * used to recognise is indistinguishable from one that never saw it.
+ * They are joined by tests for the shape the same misconfiguration takes
+ * NOW — a table full of `no owner: route=…` rows and a bot that said
+ * nothing — and by a drift test over all three models the pipeline
+ * calls, because probing one model stopped being sufficient the day the
+ * mega-prompt was replaced by a router on Haiku and extractors on
+ * Sonnet 5.
  */
 import { spawnSync } from "node:child_process";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
-  OFFLINE_FATAL_PREFIXES,
+  ENGINE_DEGRADED_PREFIXES,
+  OFFLINE_FATAL_SUBSTRINGS,
   PROBE_MODEL,
+  PROBE_MODELS,
+  UNOWNED_REASON_PREFIX,
   assertSeamMatchesMode,
   classifyReasoning,
   describeReach,
@@ -230,14 +246,44 @@ describe("probeAnthropic", () => {
   });
 });
 
-describe("PROBE_MODEL", () => {
-  it("is the model the analyzer actually calls", () => {
-    // A probe against a model the sweep does not use would prove the
-    // wrong thing — a key can have access to one and not the other.
+describe("PROBE_MODELS", () => {
+  // A probe against a model the sweep does not use would prove the wrong
+  // thing — a key can have access to one and not the other. Until §10
+  // step 8 there was one model to check; now there are three, on two
+  // families, and a key entitled to only one of them would pass a
+  // single-model probe and then fail every extractor call.
+  it("covers the model the surviving chase composer calls", () => {
     const src = readFileSync(path.join(REPO_ROOT, "src", "lib", "message-analyzer.ts"), "utf8");
     const m = /^const MODEL = "([^"]+)";$/m.exec(src);
     expect(m, "could not find `const MODEL = …` in src/lib/message-analyzer.ts").not.toBeNull();
     expect(m![1]).toBe(PROBE_MODEL);
+    expect(PROBE_MODELS).toContain(m![1]);
+  });
+
+  it("covers the router's and the extractors' models", () => {
+    const src = readFileSync(path.join(REPO_ROOT, "src", "lib", "pipeline", "llm.ts"), "utf8");
+    for (const name of ["ROUTER_MODEL", "EXTRACTOR_MODEL"]) {
+      const m = new RegExp(`^export const ${name} = "([^"]+)";$`, "m").exec(src);
+      expect(m, `could not find \`export const ${name} = …\` in src/lib/pipeline/llm.ts`).not.toBeNull();
+      expect(
+        PROBE_MODELS,
+        `${name} is ${m![1]}, which the live pre-flight never probes — a key without ` +
+          `access to it would pass the probe and then fail every call that uses it`,
+      ).toContain(m![1]);
+    }
+  });
+
+  it("probes nothing the pipeline does not call", () => {
+    const pipeline = readFileSync(path.join(REPO_ROOT, "src", "lib", "pipeline", "llm.ts"), "utf8");
+    const analyzer = readFileSync(path.join(REPO_ROOT, "src", "lib", "message-analyzer.ts"), "utf8");
+    for (const model of PROBE_MODELS) {
+      expect(
+        pipeline.includes(`"${model}"`) || analyzer.includes(`"${model}"`),
+        `${model} is probed but named nowhere in pipeline/llm.ts or message-analyzer.ts — ` +
+          `either it was retired and this list was not, or the probe is spending on a model ` +
+          `no sweep uses`,
+      ).toBe(true);
+    }
   });
 });
 
@@ -268,10 +314,93 @@ describe("classifyReasoning", () => {
     );
   });
 
-  it("has no fatal prefix that is a prefix of a tolerated one", () => {
-    for (const f of OFFLINE_FATAL_PREFIXES) {
+  it("has no fatal marker that is a prefix of a tolerated one", () => {
+    for (const f of OFFLINE_FATAL_SUBSTRINGS) {
       expect(classifyReasoning(`${f} — trailing detail`, "llm")).toBe("offline-fatal");
     }
+  });
+
+  // ── §10 step 8: the same faults, wearing an engine's prefix ────────
+
+  it("sees a configuration fault WRAPPED in an engine degradation", () => {
+    // `offlineVerdict` put the reason at the front of the string; the
+    // engines put their own marker there and the reason after it. A
+    // prefix test would have silently stopped matching all of these.
+    expect(
+      classifyReasoning(
+        "attendance-engine: degraded — sim-9: ANTHROPIC_API_KEY not set",
+        "attendance-engine",
+      ),
+    ).toBe("offline-fatal");
+    expect(
+      classifyReasoning("team-ops-engine: degraded — state load failed (ECONNREFUSED)", "llm"),
+    ).toBe("offline-fatal");
+  });
+
+  it("tolerates a plain engine degradation — that is an overloaded API, not config", () => {
+    // 27 × 529 and 3 × 500 across 10 of 177 messages on §10 step 6's
+    // first live sweep, after the SDK's four retries. Real, occasional,
+    // and rate-limited by DEFAULT_MAX_OFFLINE_RATE rather than fatal.
+    for (const p of ENGINE_DEGRADED_PREFIXES) {
+      expect(classifyReasoning(`${p} sim-1: 529 Overloaded`, "llm")).toBe("offline");
+    }
+  });
+
+  it("counts a routed message nobody owned, instead of calling it model reach", () => {
+    // THE STEP-8 FAILURE SHAPE. Under the old classifier this fell
+    // through to the default and was reported as a message that reached
+    // the model, so the most likely misconfiguration in the new
+    // architecture rendered as a 100%-reach sweep.
+    expect(classifyReasoning(`${UNOWNED_REASON_PREFIX}self_att`, "ignored")).toBe("unowned");
+    expect(classifyReasoning(`${UNOWNED_REASON_PREFIX}question`, "ignored")).toBe("unowned");
+  });
+
+  it("does NOT count `none` as unowned — banter nobody owned is the design", () => {
+    // 69.3% of real traffic. `composeOperatorNote` drops it too.
+    expect(classifyReasoning(`${UNOWNED_REASON_PREFIX}none`, "ignored")).toBe("gated");
+    expect(classifyReasoning(`${UNOWNED_REASON_PREFIX}none`, "router-gate")).toBe("gated");
+  });
+
+  it("a config fault still wins over the unowned prefix", () => {
+    expect(
+      classifyReasoning(
+        `${UNOWNED_REASON_PREFIX}self_att — attendance-engine: degraded — ANTHROPIC_API_KEY not set`,
+        "ignored",
+      ),
+    ).toBe("offline-fatal");
+  });
+
+  it("the engine prefixes it classifies are the ones src actually writes", () => {
+    // Duplicated rather than imported (those modules pull in Prisma), so
+    // the copy has to be checked. A prefix renamed in `src/` without
+    // this list following would silently stop being recognised, which is
+    // the "a guard that quietly stopped guarding" shape this whole file
+    // is about.
+    const sources = [
+      "attendance-engine.ts",
+      "score-engine.ts",
+      "admin-ops-engine.ts",
+      "team-ops-engine.ts",
+    ].map((f) => readFileSync(path.join(REPO_ROOT, "src", "lib", f), "utf8"));
+    sources.push(
+      readFileSync(path.join(REPO_ROOT, "src", "lib", "pipeline", "answer-batch.ts"), "utf8"),
+    );
+    const all = sources.join("\n");
+    for (const p of ENGINE_DEGRADED_PREFIXES) {
+      expect(all, `no module in src/ writes "${p}" any more`).toContain(p);
+    }
+  });
+
+  it("the unowned prefix is the one the analyze route actually writes", () => {
+    const route = readFileSync(
+      path.join(REPO_ROOT, "src", "app", "api", "whatsapp", "analyze", "route.ts"),
+      "utf8",
+    );
+    expect(
+      route,
+      `the route no longer writes "${UNOWNED_REASON_PREFIX}" — the step-8 silence is ` +
+        `invisible to the reach guard again`,
+    ).toContain(UNOWNED_REASON_PREFIX);
   });
 });
 
@@ -321,6 +450,58 @@ describe("liveReachFailure", () => {
       ...rows(50, "Claude emitted no verdict for this id"),
     ]);
     expect(liveReachFailure(flood)).toMatch(/never reached the model/i);
+  });
+
+  it("fails a sweep that decided almost nothing — step 8's own failure shape", () => {
+    // Every route flag off: the router (or nothing at all) answers, no
+    // owner claims anything, the bot is silent, and every case scores
+    // whatever a silent bot scores. No error verdict anywhere.
+    const s = summariseReach([
+      ...rows(2, "attendance-engine (self_att): registered"),
+      ...Array.from({ length: 40 }, () => ({
+        reasoning: "no owner: route=self_att",
+        handledBy: "ignored",
+      })),
+    ]);
+    expect(s.unowned).toBe(40);
+    expect(s.model).toBe(2);
+    expect(liveReachFailure(s)).toMatch(/DECIDED ALMOST NOTHING/);
+  });
+
+  it("passes a healthy sweep that hands a few messages back", () => {
+    // `rename` and `swap` are handed back on purpose, so a handful of
+    // unowned rows is normal and must not fail the run.
+    const s = summariseReach([
+      ...rows(40, "attendance-engine (self_att): registered"),
+      ...Array.from({ length: 3 }, () => ({
+        reasoning: "no owner: route=balancer",
+        handledBy: "ignored",
+      })),
+    ]);
+    expect(s.unowned).toBe(3);
+    expect(liveReachFailure(s)).toBeNull();
+  });
+
+  it("banter nobody owned never counts against the sweep", () => {
+    const s = summariseReach([
+      ...rows(10, "attendance-engine (self_att): registered"),
+      ...Array.from({ length: 90 }, () => ({
+        reasoning: "no owner: route=none",
+        handledBy: "ignored",
+      })),
+    ]);
+    expect(s.gated).toBe(90);
+    expect(s.unowned).toBe(0);
+    expect(s.attributable).toBe(10);
+    expect(liveReachFailure(s)).toBeNull();
+  });
+
+  it("says how many were owned by nobody rather than hiding them", () => {
+    const s = summariseReach([
+      { reasoning: "attendance-engine (self_att): registered", handledBy: "attendance-engine" },
+      { reasoning: "no owner: route=score", handledBy: "ignored" },
+    ]);
+    expect(describeReach(s)).toContain("owned by nobody");
   });
 
   it("ignores fast-path rows when judging reach", () => {

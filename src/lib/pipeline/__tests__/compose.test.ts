@@ -437,7 +437,7 @@ describe("showing teams that do not exist (2026-09-06 sweep)", () => {
         body: "@Match Time show me the teams",
         route: "balancer",
         tagged: true,
-        facts: { kind: "teams", action: "show", includeRefs: [], teamNames: null, swaps: [] },
+        facts: { kind: "teams", action: "show", includeRefs: [], teamNames: null, swaps: [], pairings: [] },
       }),
     ]);
     const text = out.utterances[0].text;

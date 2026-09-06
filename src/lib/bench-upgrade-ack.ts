@@ -1,4 +1,30 @@
 /**
+ * ⚠️ NO PRODUCTION CALLER SINCE §10 STEP 8 (2026-09-06). READ THIS FIRST.
+ *
+ * This module rewrote a reply the MODEL had already written, after the
+ * server discovered the database disagreed with it. `analyze/route.ts`
+ * was its only caller and the call went with `executeVerdict`.
+ *
+ * The failure it corrected is now unrepresentable rather than merely
+ * corrected. `pipeline/compose.ts` renders every utterance from the
+ * PROJECTED state AFTER the engine has decided, so a reply announcing a
+ * bench move can only exist if a bench move was proposed. §6.4 states
+ * the property: "because the composer runs after the write and reads its
+ * outcome, it is IMPOSSIBLE to tell a player they are in when the write
+ * threw."
+ *
+ * It is KEPT rather than deleted, deliberately and for one reason: the
+ * house rule it encodes — the bot never announces something the database
+ * disagrees with — is still the rule, and this file plus its tests are
+ * the clearest statement of it anywhere in the repo. It is pure, it
+ * costs nothing, and `lib/attendance-write-outcome.ts` (which IS live,
+ * on both the engine path and the DM path) is its sibling.
+ *
+ * If you are about to call this from new code, stop and ask why your
+ * composer is writing a sentence before it knows what happened.
+ *
+ * ─────────────────────────────────────────────────────────────────────
+ *
  * The reply for a BENCH-shaped verdict that landed as a CONFIRMED write.
  *
  * A standing-offer conditional ("I'll be the 14th if you're short") is

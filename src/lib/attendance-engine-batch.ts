@@ -63,7 +63,7 @@ import { extractorStubFromEnv } from "./pipeline/extractor-stub";
 import { anthropicModel, type PipelineModel } from "./pipeline/llm";
 import { compose } from "./pipeline/compose";
 import { decide } from "./pipeline/engine";
-import { engineOwnsRoute, isAttendanceEngineEnabled } from "./pipeline/gate";
+import { engineOwnsRoute } from "./pipeline/gate";
 import { loadSquadState } from "./pipeline/load-state";
 import type {
   AttendanceFacts,
@@ -218,14 +218,28 @@ export async function runAttendanceEngineBatch(args: {
    * describing.
    */
   expectedMatchId: string | null;
-  /** The flag, resolved by the caller (which also knows about the
-   *  test-only per-request override). Defaults to reading the env, so
-   *  no caller can accidentally get an engine it did not ask for. */
-  enabled?: boolean;
+  /**
+   * REQUIRED SINCE §10 STEP 8, AND ALWAYS `true` IN PRODUCTION.
+   *
+   * It used to be optional and default to `isAttendanceEngineEnabled()`,
+   * i.e. `ATTENDANCE_ENGINE_ENABLED`, "so no caller can accidentally get
+   * an engine it did not ask for". That flag is DELETED
+   * (`pipeline/gate.ts` carries the argument): its off position meant
+   * "the analyzer handles attendance instead", and with `analyzeBatch`
+   * gone it would have meant nobody handles attendance at all - a kill
+   * switch for the product's core write path wearing the name of a
+   * tuning flag. There is no env var behind this any more and no default
+   * to fall back to, so the caller must say what it wants.
+   *
+   * WHAT IT IS STILL FOR: `__tests__/attendance-engine-batch.test.ts`
+   * passes it explicitly, and "run nothing" must stay expressible
+   * without deleting the call site.
+   */
+  enabled: boolean;
   deps: EngineBatchDeps;
 }): Promise<EngineBatchResult> {
   const { orgId, now, messages, history, expectedMatchId, deps } = args;
-  if (!(args.enabled ?? isAttendanceEngineEnabled())) return empty();
+  if (!args.enabled) return empty();
 
   const candidates = messages.filter((m) => !m.gated && engineOwnsRoute(m.route));
   if (candidates.length === 0) return empty();

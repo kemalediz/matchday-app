@@ -52,7 +52,19 @@ export const E2E = {
   WHATSAPP_API_KEY: "mt-e2e-whatsapp-key",
   CRON_SECRET: "mt-e2e-cron-secret",
 
-  /** The LLM stub file the server reads fresh on every analyzeBatch. */
+  /**
+   * `MT_TEST_LLM_STUB_FILE`'s path.
+   *
+   * ⚠️ ITS CONTENTS HAVE HAD NO READER SINCE §10 STEP 8. It was the file
+   * `analyzeBatch` read verdicts out of; `analyzeBatch` is deleted. What
+   * survives is the ENV VAR, because `src/lib/dm-qa.ts:180` keys its own
+   * stub off `!!process.env.MT_TEST_LLM_STUB_FILE` — a truthiness test,
+   * never a read — and that stub is what makes the DM-Q&A no-leak
+   * assertions structural rather than a model's opinion. Setting a path
+   * nobody opens is the cheapest way to keep that flag honest; see
+   * `helpers/stub.ts`'s header for the full account and for the list of
+   * specs still waiting to be ported off the dead half.
+   */
   LLM_STUB_FILE: path.join(REPO_ROOT, ".e2e", "llm-stub.json"),
 
   /** The ROUTER stub file (§10 step 5). Carries the router's answer AND
@@ -117,11 +129,12 @@ export function assertSafeTestDbUrl(url: string | undefined): asserts url is str
 export function buildTestEnv(): Record<string, string> {
   // Opt-in "live LLM" seam: when MT_SIM_LIVE_LLM=1, the group-simulator
   // harness exercises the real Anthropic model instead of the deterministic
-  // stub. This omits MT_TEST_LLM_STUB_FILE (so message-analyzer.ts falls
-  // through to getAnthropic()), passes the real ANTHROPIC_API_KEY from the
-  // orchestrator's env, and propagates the flag into the Playwright workers
-  // (where group.ts runs). When the flag is OFF (the default), the returned
-  // env is byte-identical to the original stubbed configuration.
+  // stubs. It pins all three stub-file vars empty (so the router, the
+  // extractors and dm-qa all fall through to a real model), passes the real
+  // ANTHROPIC_API_KEY from the orchestrator's env, and propagates the flag
+  // into the Playwright workers (where group.ts runs). When the flag is OFF
+  // (the default), the returned env is byte-identical to the original
+  // stubbed configuration.
   const live = process.env.MT_SIM_LIVE_LLM === "1";
   const env: Record<string, string> = {
     // Pin the resolved ports for every child process (Playwright and its
@@ -165,8 +178,15 @@ export function buildTestEnv(): Record<string, string> {
     // removes it from the overlay — an MT_TEST_LLM_STUB_FILE already in
     // the orchestrator's own environment survived into the dev server
     // and the "live" sweep ran entirely off the stub. An empty string
-    // overrides it, and analyzeBatch's check is a plain truthiness test.
+    // overrides it, and every reader's check is a plain truthiness test.
     // helpers/live-llm.ts asserts the result rather than trusting it.
+    //
+    // SINCE §10 STEP 8 THIS PINS ONE READER, NOT TWO. `analyzeBatch` is
+    // deleted, so the only thing still keyed off this variable is
+    // `dm-qa.ts`'s scoped-answer stub — which is exactly the thing a
+    // live run must not be reading, since a "live" DM-Q&A sweep that
+    // echoed the scoped context back would prove nothing about the
+    // model. The two seams that decide a WRITE are pinned below.
     env.MT_TEST_LLM_STUB_FILE = "";
     // Same reasoning, for the router: a "live" sweep must not be able to
     // read a canned route out of a file, and must not be able to have
@@ -196,10 +216,23 @@ export function buildTestEnv(): Record<string, string> {
     // with the engine deciding and WRITING" is the evidence that step
     // is judged by, and it needs the real router, the real extractor
     // and the real apply path all at once.
+    //
+    // STEP 7'S FOUR JOINED THE LIST WITH §10 STEP 8. They were reachable
+    // only through the per-request `x-mt-engine-routes` header before,
+    // which no live spec sends, so "the corpus with `question` and
+    // `score` owned by their engines" was not a runnable sweep — and
+    // with the mega-prompt deleted, leaving them off is no longer
+    // "measure the incumbent instead", it is "measure silence". Still
+    // forwarded ONLY when the operator set them, so an unmodified
+    // `npm run test:corpus:live` is unchanged.
     for (const flag of [
       "ROUTER_GATE_ENABLED",
       "ROUTER_GATE_FLOOR_ENABLED",
       "ATTENDANCE_ENGINE_ENABLED",
+      "QUESTION_ENGINE_ENABLED",
+      "BALANCER_ENGINE_ENABLED",
+      "SCORE_ENGINE_ENABLED",
+      "ADMIN_OPS_ENGINE_ENABLED",
     ]) {
       if (process.env[flag]) env[flag] = process.env[flag]!;
     }

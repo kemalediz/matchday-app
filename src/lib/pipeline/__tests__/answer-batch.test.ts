@@ -472,12 +472,21 @@ describe("a shape the composer cannot answer well goes to the analyzer", () => {
     expect([...res.ownedIds]).toHaveLength(1);
   });
 
-  it.each(["generate", "rename", "swap"])(
-    "hands back a `%s` team request — only showing is a read",
-    async (action) => {
+  it.each([
+    // §10 step 8 gave `generate` an owner of its own on this same route
+    // — `team-ops-engine-batch.ts`, selected by this same FACT. What
+    // does NOT change is that this module owns none of the three: it is
+    // a read path with no apply layer, and the degradation now names
+    // where each one actually goes.
+    ["generate", /team-ops-engine-batch\.ts owns it/],
+    ["rename", /no module owns it/],
+    ["swap", /no module owns it/],
+  ] as const)(
+    "hands a `%s` team request on — only showing is a read",
+    async (action, expected) => {
       const body = "@Match Time do the teams";
       const { model } = stubModel({
-        [body]: { action, includeRefs: [], teamNames: [], swaps: [] },
+        [body]: { action, includeRefs: [], teamNames: [], swaps: [], pairings: [] },
       });
       const res = await run({
         messages: [msg({ body, route: "balancer" })],
@@ -485,7 +494,7 @@ describe("a shape the composer cannot answer well goes to the analyzer", () => {
         worldOpts: { confirmed: ELEVEN, teams: { kemal: "RED", elvin: "YELLOW" } },
       });
       expect([...res.ownedIds]).toEqual([]);
-      expect(res.degradations.join(" ")).toMatch(/balancer|generate|analyzer/i);
+      expect(res.degradations.join(" ")).toMatch(expected);
     },
   );
 

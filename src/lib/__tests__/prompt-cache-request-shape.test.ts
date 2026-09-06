@@ -71,7 +71,7 @@ vi.mock("@/lib/org-features", () => ({
   getOrgFeatures: async () => ({ attendance: true, statsQa: false }),
 }));
 
-import { analyzeBatch, composeChaseText } from "@/lib/message-analyzer";
+import { composeChaseText } from "@/lib/message-analyzer";
 
 /** Every content block that carries a cache_control marker. */
 function cachedTexts(args: CreateArgs): string[] {
@@ -129,46 +129,21 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-describe("analyzeBatch cache breakpoints", () => {
-  const batch = {
-    groupId: "g1",
-    messages: [
-      {
-        waMessageId: "wa-1",
-        body: "I'm in",
-        authorName: "Elvin",
-        authorPhone: "+447700900001",
-        timestamp: new Date("2026-08-31T11:59:00.000Z"),
-      },
-    ],
-    history: [],
-  };
-
-  it("puts no clock-derived value in any cached block", async () => {
-    RESPONSE_TEXT = VERDICTS;
-    await analyzeBatch(batch as never);
-    expect(create).toHaveBeenCalledTimes(1);
-    const cached = cachedUserTexts(captured[0]).join("\n");
-    for (const v of VOLATILE) expect(cached, `cached block must not contain "${v}"`).not.toContain(v);
-  });
-
-  it("still hands the model the countdown, proximity and roster header", async () => {
-    RESPONSE_TEXT = VERDICTS;
-    await analyzeBatch(batch as never);
-    const fresh = freshTexts(captured[0]).join("\n");
-    expect(fresh).toMatch(/\d+\.\dh until kickoff/);
-    expect(fresh).toContain("proximity=");
-    expect(fresh).toContain("Use roster header:");
-  });
-
-  it("sends a byte-identical cached prefix 20 minutes later", async () => {
-    RESPONSE_TEXT = VERDICTS;
-    await analyzeBatch(batch as never);
-    vi.setSystemTime(new Date("2026-08-31T12:20:00.000Z"));
-    await analyzeBatch(batch as never);
-    expect(cachedTexts(captured[1])).toEqual(cachedTexts(captured[0]));
-  });
-});
+/**
+ * ── THE `analyzeBatch` HALF DIED WITH THE PROMPT (§10 step 8) ────────
+ *
+ * These three cases proved §8.1 bug 1 stayed fixed on the analyzer: the
+ * `kickoffHint` cache-buster, which changed every six minutes inside a
+ * 1-hour-TTL cached block and cost ~$0.0121 per call in cache WRITES.
+ *
+ * `composeChaseText` below is the OTHER call site with the identical
+ * defect, and it is still live and still tested. `pipeline/llm.ts` is
+ * structurally immune rather than tested-immune: it only attaches
+ * `cache_control` to `req.system`, the stable prefix, and every
+ * clock-derived value reaches a stage through `req.user`, which is
+ * never cached. There is no block for a countdown to be put in by
+ * mistake.
+ */
 
 describe("composeChaseText cache breakpoints", () => {
   it("puts no clock-derived value in any cached block", async () => {

@@ -35,6 +35,24 @@
  * If this test fails: LOWER the number. Do NOT raise the ceiling and do
  * NOT switch the call to streaming to "fix" it — none of these calls
  * need minutes of runtime; the number was simply set wrong.
+ *
+ * ─────────────────────────────────────────────────────────────────────
+ * SITE LIST UPDATED 2026-09-06 (§10 step 8). THE SCAN IS NOT WEAKENED.
+ * ─────────────────────────────────────────────────────────────────────
+ *
+ * Step 8 deleted `analyzeBatch`, its 19,850-token `SYSTEM_PROMPT` and
+ * the dropped-verdict re-prompt from `message-analyzer.ts`, and retired
+ * the shadow window-analyzer entirely. Two of the three incidents above
+ * happened at call sites that no longer exist.
+ *
+ * THE INCIDENT LIST STAYS AS IT IS. It is the reason the guard exists,
+ * not an inventory of live code, and "that call site is gone" is exactly
+ * the argument that would eventually delete the guard itself. What
+ * changed is only the enumeration of files below and the counts in the
+ * companion guard's prose — the scan still reads every `.ts`/`.tsx` file
+ * under `src/`, still bounds every `max_tokens` expression it finds, and
+ * still fails on one it cannot bound. A call site added tomorrow is
+ * caught exactly as before.
  */
 import { describe, it, expect } from "vitest";
 import fs from "node:fs";
@@ -147,17 +165,26 @@ function upperBound(
  * such protection — a truncated chase gets posted to a customer's
  * WhatsApp group, a truncated DM answer gets sent to a player.
  *
- * Rather than demand a `stop_reason` check everywhere (9 of 11 sites do
- * not need one, so that would be mostly false positives), every file
- * with a `messages.create` must EITHER check `stop_reason` OR be listed
- * below with the reason its truncation already fails closed. A new call
- * site forces a deliberate choice instead of a default of "nothing".
+ * Rather than demand a `stop_reason` check everywhere (most sites do not
+ * need one, so that would be mostly false positives), every file with a
+ * `messages.create` must EITHER check `stop_reason` OR be listed below
+ * with the reason its truncation already fails closed. A new call site
+ * forces a deliberate choice instead of a default of "nothing".
  *
- * Known limitation: this is file-level, not call-level. `message-analyzer.ts`
- * has three call sites (two JSON, one free text) and passes because the
- * free-text one is guarded. That is the intended trade — a call-level
- * check needs real dataflow analysis, and a guard people learn to
- * silence is worse than one they trust.
+ * As of 2026-09-06 that is nine files: three check `stop_reason`
+ * (`lib/dm-qa.ts`, `lib/message-analyzer.ts`, `lib/pipeline/llm.ts` —
+ * every one of them hands raw model text to a human) and six are listed
+ * below as fail-closed.
+ *
+ * Known limitation: this is file-level, not call-level. It bit hardest
+ * on `message-analyzer.ts`, which used to hold three call sites (two
+ * JSON, one free text) and passed on the strength of the free-text one
+ * being guarded. Step 8 left it with one — the scheduled-chase composer,
+ * which is the free-text one and is guarded — so the limitation is
+ * currently dormant rather than fixed. It is stated because the next
+ * file to gain a second call site inherits it. That remains the intended
+ * trade: a call-level check needs real dataflow analysis, and a guard
+ * people learn to silence is worse than one they trust.
  */
 const TRUNCATION_FAILS_CLOSED: Record<string, string> = {
   "lib/squad-from-list.ts":
@@ -171,8 +198,16 @@ const TRUNCATION_FAILS_CLOSED: Record<string, string> = {
   "lib/match-availability-classifier.ts":
     "parse() fails → UNCLEAR verdict, which is the safe default.",
   "lib/roster-survey-classifier.ts": "parse() fails → the caller's fallback classification.",
-  "lib/window-analyzer.ts":
-    "Shadow analysis only — off by default (#28), telemetry, never user-facing.",
+  // ── `lib/window-analyzer.ts` REMOVED FROM THIS LIST (§10 step 8) ──
+  //
+  //   Its exemption read "Shadow analysis only — off by default (#28),
+  //   telemetry, never user-facing." The file no longer contains a
+  //   `messages.create` call at all: the shadow window-analyzer was
+  //   retired on 2026-09-06 and what is left of that module is the
+  //   `WindowVerdict` payload types. The exemption was not relaxed, it
+  //   became inapplicable — and the "has no stale exemptions" case below
+  //   is what forced this edit rather than letting the list rot into a
+  //   rubber stamp. That case is doing its job; leave it alone.
 };
 
 describe("truncation coverage (companion guard)", () => {
@@ -182,6 +217,12 @@ describe("truncation coverage (companion guard)", () => {
   );
 
   it("finds the known messages.create files (the scanner still works)", () => {
+    // Exactly nine as of 2026-09-06, down from ten when the shadow
+    // window-analyzer was retired. The floor stays at nine rather than
+    // being lowered to match: if it drops again, either a real call site
+    // was deleted (in which case its exemption above must go too, and
+    // the stale-exemption case will say so) or the scanner regex has
+    // rotted and every check in this file is vacuously passing.
     expect(callSites.length).toBeGreaterThanOrEqual(9);
   });
 
@@ -254,9 +295,17 @@ describe("max_tokens ceiling (recurrence guard)", () => {
 
   it("finds the known call sites (the scanner itself still works)", () => {
     const sites = files.flatMap(maxTokensSites);
-    // If this drops to ~0 the regex has rotted and the guard below is
-    // vacuously passing — which is exactly how a guard stops guarding.
+    // Nine as of 2026-09-06 (was ten; the shadow window-analyzer's
+    // `max_tokens: 4096` went with it). If this drops to ~0 the regex
+    // has rotted and the guard below is vacuously passing — which is
+    // exactly how a guard stops guarding.
     expect(sites.length).toBeGreaterThanOrEqual(8);
+    // `message-analyzer.ts` still has one, and this pins it: §10 step 8
+    // deleted `analyzeBatch` and the dropped-verdict re-prompt from that
+    // file, leaving the scheduled-chase composer — the site of the
+    // 2026-08-31 incident, where `max_tokens: 64000` meant every chase
+    // had ALWAYS silently used the static fallback text. It is the last
+    // place anyone would expect a regression, which is why it is named.
     expect(sites.some((s) => s.file === ANALYZER)).toBe(true);
   });
 
