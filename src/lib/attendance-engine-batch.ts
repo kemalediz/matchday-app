@@ -136,7 +136,7 @@
  * message" true across the split.
  */
 import type { AttendanceWriteFailure } from "./attendance-write-outcome";
-import { parsePastedRoster } from "./pasted-roster";
+import { clampPastedRosterFacts } from "./pasted-roster-registration";
 import { extractForRoute } from "./pipeline/extractors";
 import { extractorStubFromEnv } from "./pipeline/extractor-stub";
 import { anthropicModel, type PipelineModel } from "./pipeline/llm";
@@ -288,6 +288,25 @@ export interface EngineBatchDeps extends EngineApplyDeps {
   /** Users with an unresolved bench prompt open on the active match.
    *  See the carve-out below. */
   openBenchPromptUserIds: (matchId: string) => Promise<string[]>;
+  /**
+   * Claim the once-per-player-per-match unnamed-guest name ask, by
+   * writing the `SentNotification` row `load-state.ts` reads back as
+   * `SquadState.guestAskedUserIds`. `true` when this batch got the slot,
+   * `false` when the row already existed.
+   *
+   * REQUIRED, not optional, and that is the whole point of it existing
+   * here. `guest-name-ask.ts` promises "at most ONE ask per player per
+   * match, forever"; §10 step 8 moved the READER (`load-state.ts:183`)
+   * and the DECIDER (`engine.ts:481`) out of the route and left the
+   * WRITER behind, so `alreadyAsked` was permanently false and MatchTime
+   * asked again every single time. A dep with a default would have let
+   * the next caller lose it the same way, silently.
+   *
+   * Called between `decide()` and `compose()` — claim BEFORE anything
+   * says the words, so a sent ask cannot fail to be recorded. That is
+   * PR #29's original ordering, one layer down.
+   */
+  claimGuestNameAsk: (args: { matchId: string; userId: string }) => Promise<boolean>;
   /** Injected so tests can drive the whole batch without a key. */
   model?: PipelineModel;
   /** Injected so tests can load a state without a database. */
@@ -421,36 +440,40 @@ export async function runAttendanceEngineBatch(args: {
 
   const owned = candidates.filter((m) => {
     if (m.senderUserId && promptedUserIds.has(m.senderUserId)) return false;
-    // ── PR #39's pasted-roster clamp is NOT reimplemented here ───────
+    // ── A PASTED ROSTER IS OWNED FOR ONE THING ONLY: THE SENDER'S OUT ─
     //
-    // A pasted numbered roster is a message shape with its own solved
-    // handling in the analyze route: `reconcilePastedRoster` computes
-    // the appended names ARITHMETICALLY when the paste restates our own
-    // roster post (S26), and `clampRosterDerivedWrites` registers
-    // NOBODY off any other list. That exists because PR #35's
-    // self-replay measured the same paste registering a DIFFERENT
-    // SUBSET on each run — `Nabeel` one time, `Adam, Amir, Ehtisham,
-    // Martin` the next.
-    //
-    // The engine has no equivalent, and a fourteen-line roster routed
+    // WHAT THIS USED TO BE, and why it changed on 2026-09-07. It was
+    // `if (parsePastedRoster(m.body)) return false;` — refuse the SHAPE
+    // outright — with the reasoning that "a fourteen-line roster routed
     // `other_att` is fourteen third-party IN claims it would happily
-    // apply. Rather than reimplement a shipped guard on the one step
-    // that can put a player at a pitch with no slot, the shape is
-    // simply not owned. The test is on the SHAPE and never on who is
-    // named, so it cannot be steered by content.
+    // apply", and that `route.ts` peeled the shape before the router ran
+    // anyway. Both halves were true. Together they made a message that
+    // was BOTH a list and its sender's own drop lose the drop: Pat
+    // writes "can't make it lads, someone take my spot" above the list
+    // and stays CONFIRMED. The squad reads full, the vacated slot is
+    // never offered, and the club is a player short.
     //
-    // WHERE IT GOES INSTEAD, corrected 2026-09-06. This used to read
-    // "it goes to the analyzer, where both rules already run", and that
-    // was true until §10 step 8 deleted the analyzer. The refusal is
-    // only safe while SOMETHING still applies the two rules, so step 8
-    // moved them out rather than losing them:
-    // `lib/pasted-roster-registration.ts` is a pure module carrying
-    // `reconcilePastedRoster`'s arithmetic and `clampRosterDerivedWrites`'s
-    // outcome, and `route.ts:909` peels the shape BEFORE the router
-    // runs. Read that module's header for the one behaviour that DID
-    // change — the `offList` residue, "here's the list, also adding
-    // Kieran", is gone with `verdict.registerFor`.
-    if (parsePastedRoster(m.body)) return false;
+    // The refusal is now a CLAMP ON THE FACTS rather than on the
+    // message: `clampPastedRosterFacts` (applied after extraction,
+    // below) keeps the sender's own OUT claims and discards everything
+    // else — third-party claims, the sender's own IN, the affirmation
+    // and the side requests. Read that function's header for the
+    // argument; the short form is that a paste can only ever ADD lines,
+    // so an OUT beside one has no other owner, while an IN read off a
+    // list is precisely the non-deterministic write PR #39 exists to
+    // stop (PR #35: the same paste, the same world, `Nabeel` one run and
+    // `Adam, Amir, Ehtisham, Martin` the next).
+    //
+    // WHAT STILL OWNS THE LIST ITSELF: nothing here. The arithmetic —
+    // `reconcilePastedRoster`, "which appended lines are new" — is
+    // `lib/pasted-roster-registration.ts`, applied in `route.ts`'s
+    // pasted-roster section, which no longer peels the message out of
+    // the batch on its way past. That guard is not reimplemented here
+    // and must not be.
+    //
+    // SHAPE, NEVER CONTENT, unchanged: the test is `parsePastedRoster`
+    // on the envelope and `subject`/`polarity` on the claim, so nothing
+    // about who is named can steer it.
     // ── A SHARED CONTACT CARD IS NOT AN ATTENDANCE MESSAGE ───────────
     //
     // Found by the §10 step 6 replay sweep, adjudicated `old_right`:
@@ -614,6 +637,48 @@ export async function runAttendanceEngineBatch(args: {
     );
   }
   for (const id of failedIds) ownedIds.delete(id);
+
+  // ── Stage 2b: THE PASTED-ROSTER CLAMP ───────────────────────────────
+  //
+  // The successor to the blanket `if (parsePastedRoster(m.body)) return
+  // false;` in the ownership filter above — see the essay there. A
+  // roster-shaped message keeps ONLY its sender's own OUT claims;
+  // everything else the extractor read off a list is discarded before
+  // `decide()` ever sees it, so no rule downstream can act on it.
+  //
+  // A message left with nothing is UNOWNED, which is byte-identical to
+  // what the old refusal did: no facts, no outcome, no reply, and
+  // `route.ts`'s pasted-roster section reports the message instead. That
+  // is why this is a `delete` from `ownedIds` and not a `noop` outcome —
+  // an outcome here would be a second owner for a message the route is
+  // already reporting.
+  //
+  // NOT a degradation. An ordinary paste reaching this line and losing
+  // every claim is the normal, correct case; putting it on the operator
+  // DM would page a human for a list being posted.
+  for (const m of owned) {
+    if (!ownedIds.has(m.waMessageId)) continue;
+    const before = factsById.get(m.waMessageId);
+    if (!before) continue;
+    const clamped = clampPastedRosterFacts(m.body, before.facts);
+    if (clamped.facts === before.facts) continue; // not a roster at all
+    if (clamped.facts.kind === "none") {
+      console.warn(
+        `[attendance-engine] pasted roster ${m.waMessageId}: ${clamped.dropped} claim(s) read off ` +
+          `a list, none of them the sender's own drop — owning nothing. The list itself is ` +
+          `arithmetic (lib/pasted-roster-registration.ts), never a reading.`,
+      );
+      ownedIds.delete(m.waMessageId);
+      factsById.set(m.waMessageId, { facts: clamped.facts, degraded: before.degraded });
+      continue;
+    }
+    console.warn(
+      `[attendance-engine] pasted roster ${m.waMessageId}: keeping the sender's own drop and ` +
+        `discarding ${clamped.dropped} other claim(s) read off the list.`,
+    );
+    factsById.set(m.waMessageId, { facts: clamped.facts, degraded: before.degraded });
+  }
+
   // Carrying `degradations` matters here: this is the branch where
   // EVERY extraction failed, and returning the bare empty result would
   // throw away the only record of why the engine went quiet.
@@ -670,6 +735,69 @@ export async function runAttendanceEngineBatch(args: {
   }
   for (const d of result.degradations) {
     degradations.push(`${d.stage} ${d.messageId ?? "batch"}: ${d.detail}`);
+  }
+
+  // ── Stage 3a: CLAIM THE GUEST-NAME-ASK SLOT, BEFORE ANYTHING SAYS IT ─
+  //
+  //   `guest-name-ask.ts`'s third gate: "at most ONE ask per player per
+  //   match, forever, whatever they say afterwards". `engine.ts` reads
+  //   it (`alreadyAsked` from `SquadState.guestAskedUserIds`); this
+  //   writes it. Between the two, nothing had, since §10 step 8 —
+  //   `grep -rn guestNameAskKey src/` found the definition, the reader
+  //   and a commented-out import — so the gate was inert and the bot
+  //   nagged.
+  //
+  //   ORDER MATTERS AND IS THE POINT. The claim happens before
+  //   `compose()`, and an ask whose claim LOSES (a concurrent batch got
+  //   there first, or the row already existed) has its speech act
+  //   removed rather than its row skipped. Under-asking is a no-op;
+  //   double-asking is the nagging this feature was built to avoid. That
+  //   is PR #29's exact ordering, moved rather than re-invented:
+  //   "Claim the one-ask slot BEFORE handing the reply back. The unique
+  //   key makes a concurrent batch lose the race and stay silent, which
+  //   is the right way round."
+  //
+  //   Only OWNED messages with a resolved sender can produce one. An
+  //   unresolved sender cannot have a dedupe key at all, which is
+  //   `shouldAskForGuestName`'s fourth gate, so it never reaches here.
+  const askSpeech = result.speech.filter((sp) => sp.kind === "guest_name_ask");
+  if (askSpeech.length > 0) {
+    const senderOf = new Map(messages.map((m) => [m.waMessageId, m.senderUserId]));
+    const lost = new Set<string>();
+    for (const sp of askSpeech) {
+      if (!ownedIds.has(sp.messageId)) {
+        lost.add(sp.messageId);
+        continue;
+      }
+      const userId = senderOf.get(sp.messageId) ?? null;
+      if (!userId) {
+        lost.add(sp.messageId);
+        continue;
+      }
+      let claimed = false;
+      try {
+        claimed = await deps.claimGuestNameAsk({ matchId, userId });
+      } catch (err) {
+        // A dedupe row that could not be written must not become an ask
+        // nobody recorded — that is the nag, one batch later.
+        console.error(`[attendance-engine] guest-name-ask claim threw for ${userId}:`, err);
+      }
+      if (!claimed) {
+        console.warn(
+          `[attendance-engine] guest-name-ask: ${userId} already has the slot on match ${matchId} ` +
+            `(or lost the race) — staying silent rather than asking twice`,
+        );
+        lost.add(sp.messageId);
+      }
+    }
+    if (lost.size > 0) {
+      result = {
+        ...result,
+        speech: result.speech.filter(
+          (sp) => !(sp.kind === "guest_name_ask" && lost.has(sp.messageId)),
+        ),
+      };
+    }
   }
 
   // ── Stage 3b: APPLY. Only writes from owned messages. ──────────────

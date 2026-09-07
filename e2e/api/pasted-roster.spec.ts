@@ -316,54 +316,45 @@ test("the sender appending their OWN name registers them, not a third party", as
 });
 
 /* ══════════════════════════════════════════════════════════════════════
- * KNOWN DEFECT, FOUND BY THIS PORT (2026-09-06). NOT A WEAKENED TEST.
+ * FIXED 2026-09-07. This was `test.fail()` — the fourth instance of the
+ * "terminal short-circuit skips every guard below" class recorded in
+ * MEMORY.md, and the block that documented it is deleted here as its own
+ * comment instructed.
  * ══════════════════════════════════════════════════════════════════════
  *
- * `test.fail()` says "this must currently fail". The assertions below are
- * the CORRECT behaviour and are unchanged from the version that passed
- * before §10 step 8. When it is fixed this test starts failing for the
- * opposite reason ("expected to fail but passed"), which is the tripwire
- * telling whoever fixed it to delete this block.
- *
- * THE DEFECT. `analyze/route.ts`'s pasted-roster section calls
+ * WHAT WAS WRONG. `analyze/route.ts`'s pasted-roster section called
  * `decidePastedRosterRegistration` on every message and, for ANY message
- * it calls a roster — of record or not — does `statsRequestIds.add(...)`
- * and `continue`s. That short-circuit peels the WHOLE message off the
- * batch, so the sender's own OUT, sitting in the same message as the
- * paste, is never extracted, never decided and never written. Pat says
- * "can't make it lads, someone take my spot", pastes the list, and stays
- * down as playing.
+ * it called a roster, did `statsRequestIds.add(...)` — which peels the
+ * WHOLE message out of `fresh` before the router ever runs. The sender's
+ * own OUT, sitting in the same message as the paste, was never routed,
+ * never extracted, never decided and never written. Pat said "can't make
+ * it lads, someone take my spot", pasted the list, and stayed down as
+ * playing: the squad reads full, the vacated slot is never offered, and
+ * the club turns up short.
  *
- * The old `clampRosterDerivedWrites` could not do this: it removed
- * ADDITIONS the list mentioned and left everything else on the verdict,
- * which is exactly what this test's original title says — "the clamp
- * never eats a drop".
+ * WHAT FIXED IT. The paste branch now owns the LIST, not the MESSAGE. It
+ * still does the arithmetic (`reconcilePastedRoster`) and still registers
+ * the appended names, but it leaves the message in the batch and defers
+ * its own row/reply until after the owners have run. The engine's blanket
+ * refusal of the shape (`attendance-engine-batch.ts`) narrowed in the same
+ * change: a roster-shaped message may now carry exactly ONE thing, the
+ * SENDER'S OWN DROP (`clampPastedRosterFacts`). Everything else the model
+ * reads off a list — third-party INs, and the sender's own IN — is still
+ * discarded, which is what keeps the two readings below landing in the
+ * same place.
  *
- * WHY IT IS NOT THE SAME AS THE ACCEPTED LOSS ABOVE. That one is a
- * missed ADD, and `route.ts` cites §13 in terms: "a missed add is
- * recoverable in one message". A missed DROP is the other direction —
- * the squad reads full, the slot is never offered to the bench, and the
- * club is a player short on the night. §13's own asymmetry argues
- * against it rather than for it, and the route's comment does not claim
- * this case at all.
- *
- * IT IS ALSO THE THIRD INSTANCE OF ONE BUG CLASS. `MEMORY.md`'s
- * "terminal short-circuits skip every guard below" records three
- * incidents in two days from the same shape in this same file: a
- * `continue` that silently deletes everything beneath it. This is a
- * fourth, introduced where the paste handling moved above the engine.
- *
- * WHY IT IS NOT FIXED IN THIS PR. The fix is in
- * `src/app/api/whatsapp/analyze/route.ts` — peel the paste's
- * REGISTRATIONS without peeling the message — and this PR is a test
- * migration with another change in flight in the same area. Written up
- * in the PR body.
+ * WHY A DROP AND NOT AN IN. A paste can never REMOVE anyone by
+ * arithmetic, so an OUT beside a paste has no other owner; and PR #35
+ * measured that an IN read off a list is exactly the non-deterministic
+ * write PR #39 existed to stop. §13's asymmetry points the same way: "a
+ * missed add is recoverable in one message; a wrong registration on a
+ * paid match is not" — and a missed DROP is neither of those, it is the
+ * club a player short on the night.
  * ══════════════════════════════════════════════════════════════════════ */
 test("the peel never eats a drop — an OUT beside a paste still fires", async ({
   request,
   db,
 }) => {
-  test.fail();
   resetDb();
   const before = await db.one<{ status: string }>(
     `SELECT status FROM "Attendance" WHERE "matchId" = $1 AND "userId" = $2`,
@@ -390,4 +381,65 @@ test("the peel never eats a drop — an OUT beside a paste still fires", async (
     [MATCH.upcoming, U.player],
   );
   expect(after?.status).toBe("DROPPED");
+});
+
+test("an OF-RECORD paste that ALSO carries the sender's drop does BOTH", async ({
+  request,
+  db,
+}) => {
+  // The other half of the fix. The peel-never-eats-a-drop case above is
+  // a list that is NOT of record, where the branch registers nobody and
+  // the only thing at stake is the drop. This one is the shape where the
+  // branch really acts: the paste restates the squad in Match Context
+  // order and appends Ian, AND its sender says he is out in the same
+  // message.
+  //
+  // Two owners write for one message — section 4 of `analyze/route.ts`
+  // registers Ian arithmetically, the engine drops Pat — and exactly one
+  // of them speaks. That is the same shape as PR #33's "a recruit ask
+  // alongside a drop must do BOTH", and it is the property a peel cannot
+  // have.
+  resetDb();
+  const id = msgId();
+  const body = `${OF_RECORD_PASTE}\n\nI can't make it myself though lads`;
+  engineOn({ [body]: { route: "self_att", facts: selfIn({ polarity: "out" }) } });
+  await postAnalyze(request, [
+    {
+      waMessageId: id,
+      body,
+      authorPhone: PHONE.player,
+      authorName: "Pat Player",
+    },
+  ]);
+
+  const s = await squad(db);
+  // The list's arithmetic still ran…
+  expect(s, "the appended name is still registered from the list").toContain(
+    "Ian Innes:CONFIRMED",
+  );
+  // …and the sender's own drop was not swallowed by it.
+  expect(s, "the sender's own drop must not be eaten by the paste").toContain(
+    "Pat Player:DROPPED",
+  );
+  // Nobody else off the list moved: Alex, Colin and Tom were already
+  // confirmed and stay exactly as they were, once each.
+  expect(s.filter((r) => r.startsWith("Alex Admin:"))).toEqual(["Alex Admin:CONFIRMED"]);
+  expect(s.filter((r) => r.startsWith("Tom Third:"))).toEqual(["Tom Third:CONFIRMED"]);
+});
+
+test("a drop with no list in it is completely unaffected by the paste branch", async ({
+  request,
+  db,
+}) => {
+  // The control. Section 4 has no opinion about a message
+  // `parsePastedRoster` does not recognise, and the clamp passes those
+  // facts through by identity.
+  resetDb();
+  const id = msgId();
+  const body = "can't make it lads, someone take my spot";
+  engineOn({ [body]: { route: "self_att", facts: selfIn({ polarity: "out" }) } });
+  await postAnalyze(request, [
+    { waMessageId: id, body, authorPhone: PHONE.player, authorName: "Pat Player" },
+  ]);
+  expect(await squad(db)).toContain("Pat Player:DROPPED");
 });

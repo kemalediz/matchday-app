@@ -113,15 +113,25 @@ const SELF_IN = {
 function deps(over: Partial<EngineBatchDeps> = {}): EngineBatchDeps & {
   registered: string[];
   cancelled: string[];
+  guestAsksClaimed: Array<{ matchId: string; userId: string }>;
 } {
   const registered: string[] = [];
   const cancelled: string[] = [];
+  // The once-per-player-per-match guest-name-ask row. A test fake that
+  // always grants the slot; the specs that care about losing the race
+  // override it.
+  const guestAsksClaimed: Array<{ matchId: string; userId: string }> = [];
   return {
     registered,
     cancelled,
+    guestAsksClaimed,
     model: modelReturning(SELF_IN),
     loadState: async () => state(),
     openBenchPromptUserIds: async () => [],
+    async claimGuestNameAsk(args) {
+      guestAsksClaimed.push(args);
+      return true;
+    },
     async registerAttendance(userId) {
       registered.push(userId);
       return {
@@ -140,16 +150,30 @@ function deps(over: Partial<EngineBatchDeps> = {}): EngineBatchDeps & {
       return { userId: `new-real:${name}` };
     },
     ...over,
-  } as EngineBatchDeps & { registered: string[]; cancelled: string[] };
+  } as EngineBatchDeps & {
+    registered: string[];
+    cancelled: string[];
+    guestAsksClaimed: Array<{ matchId: string; userId: string }>;
+  };
 }
 
 async function run(messages: EngineBatchMessage[], d = deps(), enabled = true) {
+  return runOn("match-1", messages, d, enabled);
+}
+
+/** …against a named registration match, for the per-match assertions. */
+async function runOn(
+  expectedMatchId: string,
+  messages: EngineBatchMessage[],
+  d = deps(),
+  enabled = true,
+) {
   return runAttendanceEngineBatch({
     orgId: "org-1",
     now: new Date("2026-09-03T12:00:00Z"),
     messages,
     history: [],
-    expectedMatchId: "match-1",
+    expectedMatchId,
     enabled,
     deps: d,
   });
@@ -307,16 +331,49 @@ describe("every failure owns nothing — which since §10 step 8 means silence +
     warn.mockRestore();
   });
 
-  it("the message is a pasted numbered roster — PR #39's shape, and its guard is in the route", async () => {
-    // `reconcilePastedRoster` + `clampRosterDerivedWrites` are the
-    // shipped handling for this shape, and PR #35 measured why: the
-    // same paste registered a DIFFERENT SUBSET on each run. The engine
-    // has no equivalent and would read fourteen lines as fourteen
-    // third-party INs, so it does not own the shape at all.
+  it("the message is a pasted numbered roster — PR #39's shape, owned for nothing", async () => {
+    // `reconcilePastedRoster` is the shipped handling for this shape,
+    // and PR #35 measured why: the same paste registered a DIFFERENT
+    // SUBSET on each run. Who a list registers is arithmetic, done in
+    // the route, never a reading — so the model's SELF_IN here (the
+    // sender's own name is slot 1) buys nothing.
+    //
+    // 2026-09-07: the refusal is a clamp on the FACTS rather than on the
+    // message (`clampPastedRosterFacts`), because refusing the whole
+    // message also threw away the sender's own drop — see the case
+    // below. From outside, an ordinary paste behaves exactly as it did.
     const d = deps();
     const roster =
       "1. Pete Power\n2. Dan Drummer\n3. Alice Admin\n4. Someone Else\n5. Another Name";
     const r = await run([msg({ body: roster })], d);
+    expect(r.ownedIds.size).toBe(0);
+    expect(r.outcomes.size).toBe(0);
+    expect(d.registered).toEqual([]);
+  });
+
+  it("…and a THIRD-PARTY read off that list is refused however the router routed it", async () => {
+    const d = deps({
+      model: modelReturning({
+        claims: [
+          {
+            subject: "other",
+            personRef: "Dan Drummer",
+            personNamed: true,
+            polarity: "in",
+            contingent: false,
+            conditionOn: "none",
+            tense: "present",
+            reported: false,
+            confidence: 0.95,
+          },
+        ],
+        affirmation: "none",
+        sideRequests: [],
+      }),
+    });
+    const roster =
+      "1. Pete Power\n2. Dan Drummer\n3. Alice Admin\n4. Someone Else\n5. Another Name";
+    const r = await run([msg({ body: roster, route: "other_att" })], d);
     expect(r.ownedIds.size).toBe(0);
     expect(d.registered).toEqual([]);
   });
@@ -777,5 +834,209 @@ describe("tentativeUserId — conditional_in flavour (b) survives the move", () 
 
   it("does NOT record one for an unresolved sender", () => {
     expect(tentativeUserId(att({ claims: [selfClaim()] }), null, [])).toBeNull();
+  });
+});
+
+/* ══════════════════════════════════════════════════════════════════════
+ * THE ONE THING A PASTED ROSTER MAY ALSO SAY (2026-09-07)
+ * ══════════════════════════════════════════════════════════════════════
+ *
+ * The defect, found by PR #55's port and marked `test.fail()` there: the
+ * route peeled ANY roster-shaped message out of the batch before the
+ * router ran, and this file refused the same shape independently. So a
+ * message that was BOTH a list and its sender's own drop lost the drop.
+ * Pat writes "can't make it lads, someone take my spot" above the list
+ * and stays CONFIRMED — the squad reads full, the vacated slot is never
+ * offered to the bench, and the club is a player short.
+ *
+ * The refusal is now `clampPastedRosterFacts` over the facts, and its
+ * two directions are asserted here at the level that owns them.
+ */
+describe("a roster-shaped message keeps exactly one thing: the sender's own drop", () => {
+  const ROSTER =
+    "1. Pete Power\n2. Dan Drummer\n3. Alice Admin\n4. Someone Else\n5. Another Name";
+
+  const SELF_OUT_PLUS_LIST = {
+    claims: [
+      {
+        subject: "sender",
+        personRef: "",
+        personNamed: false,
+        polarity: "out",
+        contingent: false,
+        conditionOn: "none",
+        tense: "present",
+        reported: false,
+        confidence: 0.95,
+      },
+      // …and two names the extractor read off the list, which is exactly
+      // what PR #35 measured as a coin flip between runs.
+      {
+        subject: "other",
+        personRef: "Dan Drummer",
+        personNamed: true,
+        polarity: "in",
+        contingent: false,
+        conditionOn: "none",
+        tense: "present",
+        reported: false,
+        confidence: 0.95,
+      },
+      {
+        subject: "other",
+        personRef: "Alice Admin",
+        personNamed: true,
+        polarity: "in",
+        contingent: false,
+        conditionOn: "none",
+        tense: "present",
+        reported: false,
+        confidence: 0.95,
+      },
+    ],
+    affirmation: "none",
+    sideRequests: [],
+  };
+
+  /** Pete is in the squad, so there is a row to drop. */
+  const withPeteIn = () =>
+    state({ rows: [{ userId: "u-pete", status: "CONFIRMED" as const, position: 1 }] });
+
+  it("the drop LANDS, and it is the only write", async () => {
+    const d = deps({
+      model: modelReturning(SELF_OUT_PLUS_LIST),
+      loadState: async () => withPeteIn(),
+    });
+    const r = await run(
+      [msg({ body: `can't make it lads, someone take my spot\n${ROSTER}` })],
+      d,
+    );
+    expect([...r.ownedIds]).toEqual(["wa-1"]);
+    expect(d.cancelled).toEqual(["u-pete"]);
+    // Not one name off the list — that is the direction that puts a
+    // player at a pitch with no slot.
+    expect(d.registered).toEqual([]);
+    expect(r.outcomes.get("wa-1")).toMatchObject({ intent: "out", action: "OUT" });
+  });
+
+  it("the same message with no drop in it owns nothing at all", async () => {
+    // Byte-identical to the pre-2026-09-07 refusal, and this is the case
+    // that keeps an ordinary posted list silent.
+    const d = deps({
+      model: modelReturning({
+        claims: SELF_OUT_PLUS_LIST.claims.filter((c) => c.subject === "other"),
+        affirmation: "none",
+        sideRequests: [],
+      }),
+      loadState: async () => withPeteIn(),
+    });
+    const r = await run([msg({ body: ROSTER })], d);
+    expect(r.ownedIds.size).toBe(0);
+    expect(d.registered).toEqual([]);
+    expect(d.cancelled).toEqual([]);
+  });
+
+  it("a drop with NO list in it is untouched by any of this", async () => {
+    const d = deps({
+      model: modelReturning({
+        claims: [SELF_OUT_PLUS_LIST.claims[0]],
+        affirmation: "none",
+        sideRequests: [],
+      }),
+      loadState: async () => withPeteIn(),
+    });
+    const r = await run([msg({ body: "sorry lads can't make it tonight" })], d);
+    expect([...r.ownedIds]).toEqual(["wa-1"]);
+    expect(d.cancelled).toEqual(["u-pete"]);
+  });
+});
+
+/* ══════════════════════════════════════════════════════════════════════
+ * THE GUEST-NAME-ASK SLOT — A READER THAT FINALLY HAS A WRITER
+ * ══════════════════════════════════════════════════════════════════════
+ *
+ * `guest-name-ask.ts`'s third gate is "at most ONE ask per player per
+ * match, forever". `load-state.ts` reads the `SentNotification` row and
+ * `engine.ts` decides on it; between §10 step 8 and 2026-09-07 NOTHING
+ * WROTE IT, so `alreadyAsked` was permanently false and MatchTime asked
+ * again on every offer. The write is a dep so that this file can assert
+ * the ORDER, which is the part that matters: claim, then speak.
+ */
+describe("the unnamed-guest name ask claims its once-per-match slot before it speaks", () => {
+  const OFFER = "my brother can play if needed";
+  const UNNAMED_GUEST = {
+    claims: [
+      {
+        subject: "other",
+        personRef: "my brother",
+        personNamed: false,
+        polarity: "in",
+        contingent: true,
+        conditionOn: "squad",
+        tense: "future",
+        reported: false,
+        confidence: 0.9,
+      },
+    ],
+    affirmation: "none",
+    sideRequests: [],
+  };
+
+  const offerDeps = (over: Partial<EngineBatchDeps> = {}) =>
+    deps({ model: modelReturning(UNNAMED_GUEST), ...over });
+
+  it("asks, and RECORDS the ask against this player and this match", async () => {
+    const d = offerDeps();
+    const r = await run([msg({ body: OFFER, route: "offer" })], d);
+    expect(r.outcomes.get("wa-1")?.reply).toMatch(/what(?:'s| is| are) their names?\?/i);
+    expect(d.guestAsksClaimed).toEqual([{ matchId: "match-1", userId: "u-pete" }]);
+  });
+
+  it("does NOT ask when the state already carries the row — the shipped gate", async () => {
+    const d = offerDeps({ loadState: async () => state({ guestAskedUserIds: ["u-pete"] }) });
+    const r = await run([msg({ body: OFFER, route: "offer" })], d);
+    expect(r.outcomes.get("wa-1")?.reply).toBeNull();
+    // Nothing was said, so nothing was claimed.
+    expect(d.guestAsksClaimed).toEqual([]);
+  });
+
+  it("asks AGAIN on a different match — the key is per match, not per player", async () => {
+    const d = offerDeps({
+      // Same player, same `guestAskedUserIds` read, different match: the
+      // rows are looked up `where kind AND matchId`, so a row on last
+      // week's match cannot silence this week's ask.
+      loadState: async () => state({ matchId: "match-2", guestAskedUserIds: [] }),
+    });
+    const r = await runOn("match-2", [msg({ body: OFFER, route: "offer" })], d);
+    expect(r.outcomes.get("wa-1")?.reply).toMatch(/what(?:'s| is| are) their names?\?/i);
+    expect(d.guestAsksClaimed).toEqual([{ matchId: "match-2", userId: "u-pete" }]);
+  });
+
+  it("LOSES the race → says nothing, rather than asking twice", async () => {
+    // A concurrent batch got the row first. Under-asking is a no-op;
+    // double-asking is the nagging the gate exists to prevent, which is
+    // why the claim happens before composition and not after the send.
+    const d = offerDeps({ claimGuestNameAsk: async () => false });
+    const r = await run([msg({ body: OFFER, route: "offer" })], d);
+    expect(r.outcomes.get("wa-1")?.reply).toBeNull();
+  });
+
+  it("a claim that THROWS is treated as lost — silence, never an unrecorded ask", async () => {
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    const d = offerDeps({
+      claimGuestNameAsk: async () => {
+        throw new Error("db down");
+      },
+    });
+    const r = await run([msg({ body: OFFER, route: "offer" })], d);
+    expect(r.outcomes.get("wa-1")?.reply).toBeNull();
+    err.mockRestore();
+  });
+
+  it("never writes an attendance row either way", async () => {
+    const d = offerDeps();
+    await run([msg({ body: OFFER, route: "offer" })], d);
+    expect(d.registered).toEqual([]);
+    expect(d.cancelled).toEqual([]);
   });
 });

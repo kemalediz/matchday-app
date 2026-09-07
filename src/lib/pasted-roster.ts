@@ -31,7 +31,7 @@
  * analyze route has none of that state, which is exactly why it must
  * not guess.
  */
-import { normaliseName } from "./squad-from-list";
+import { normaliseName } from "./name-normalise";
 
 export interface RosterEntry {
   /** Slot number as written; null for a bulleted entry. */

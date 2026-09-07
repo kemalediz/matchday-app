@@ -159,50 +159,47 @@ test.describe("unnamed-guest name ask — server behaviour (routes + facts)", ()
   });
 
   /* ══════════════════════════════════════════════════════════════════
-   * KNOWN DEFECT, FOUND BY THIS PORT (2026-09-06). NOT A WEAKENED TEST.
+   * FIXED 2026-09-07. This was `test.fail()`, and the block that
+   * documented the defect is deleted here as its own comment instructed.
    * ══════════════════════════════════════════════════════════════════
    *
-   * `test.fail()` says "this must currently fail". The assertions below
-   * are the CORRECT behaviour, stated in full and unmodified from the
-   * version that passed before §10 step 8. When the defect is fixed this
-   * test starts failing for the opposite reason ("expected to fail but
-   * passed"), which is the tripwire that tells whoever fixes it to
-   * delete this block and fold the case back into the test above.
-   *
-   * THE DEFECT. `guest-name-ask.ts` promises ONE ask per player per
+   * WHAT WAS WRONG. `guest-name-ask.ts` promises ONE ask per player per
    * match, forever, keyed by a `SentNotification` row
    * (`guest-name-ask:<matchId>:<userId>`). `pipeline/load-state.ts:183`
-   * READS those rows into `SquadState.guestAskedUserIds` and
-   * `pipeline/engine.ts:481` passes them to `shouldAskForGuestName` as
-   * `alreadyAsked`.
+   * READ those rows into `SquadState.guestAskedUserIds` and
+   * `pipeline/engine.ts:481` passed them to `shouldAskForGuestName` as
+   * `alreadyAsked` — and NOTHING WROTE THEM. The writer went with the
+   * route's terminal ask branch in §10 step 8 and did not arrive
+   * anywhere else, so `alreadyAsked` was permanently false and MatchTime
+   * asked again on every unnamed offer the same player made.
    *
-   * NOTHING WRITES THEM. `grep -rn guestNameAskKey src/` finds the
-   * definition, the reader, and — at `analyze/route.ts:150` — a
-   * COMMENTED-OUT import, in the tombstone list of things §10 step 8
-   * moved out of the route. The writer went with the ask branch and did
-   * not arrive anywhere else, so `alreadyAsked` is permanently false and
-   * MatchTime asks again on every unnamed offer the same player makes.
-   *
-   * MEASURED, not inferred: with the world below, the second and third
-   * offers both come back with "Nice one Amir 🙌 What's their name?".
-   *
-   * WHY IT IS NOT FIXED IN THIS PR. The fix belongs beside
-   * `recordTentativeForUserId` — a field on `EngineMessageOutcome` that
-   * the route executes — which means `src/lib/attendance-engine-batch.ts`
-   * and `src/app/api/whatsapp/analyze/route.ts`. This PR is a test
-   * migration and another change is in flight in the same area; a
-   * product fix hidden inside it is the wrong shape of PR. It is written
-   * up in the PR body.
-   *
-   * WHAT IT COSTS LIVE: the bot nags. Sutton FC is muted right now, so
-   * nobody is being nagged today.
+   * WHAT FIXED IT. `attendance-engine-batch.ts` CLAIMS the slot between
+   * `decide()` and `compose()`, through an injected `claimGuestNameAsk`
+   * dep (`owner-deps.ts`), and drops the `guest_name_ask` speech act
+   * when the claim loses the race. That is the original PR #29 ordering
+   * restored — claim before speaking, so a sent ask cannot fail to be
+   * recorded — one layer down, beside the writes it now sits with.
    * ══════════════════════════════════════════════════════════════════ */
   test("asks ONCE per player per match, however many times they offer", async ({ request, db }) => {
-    test.fail();
     const grp = (await mkGroup(request, db)).attach(request);
 
     const first = await grp.post("amir", "my brother can play if needed", vague());
     expect(first.reply!).toMatch(ASK_RE);
+
+    // THE ROW, not just the silence. The gate is a `SentNotification`
+    // that `pipeline/load-state.ts` reads back on the next batch, and
+    // for one day this assertion was the whole defect: the reader
+    // existed, the decider existed, nothing wrote it. Asserting the
+    // silence alone would pass again the moment a future change swapped
+    // the dedupe for an in-memory one that does not survive the request.
+    const rows = await db.all<{ key: string; kind: string; targetUser: string | null }>(
+      `SELECT key, kind, "targetUser" FROM "SentNotification"
+        WHERE kind = 'guest-name-ask' AND "matchId" = $1`,
+      [grp.matchId],
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0].key).toBe(`guest-name-ask:${grp.matchId}:${grp.player("amir").userId}`);
+    expect(rows[0].targetUser).toBe(grp.player("amir").userId);
 
     const second = await grp.post(
       "amir",
@@ -216,6 +213,48 @@ test.describe("unnamed-guest name ask — server behaviour (routes + facts)", ()
       tag: true,
     });
     expect(third.reply, "not even when tagged — one ask, then silence").toBeNull();
+
+    // Still ONE row after three offers: the ask that never happened
+    // never claimed a slot either. Scoped to THIS match — the file
+    // reseeds once, so other groups' rows share the table.
+    const after = await db.one<{ n: string }>(
+      `SELECT COUNT(*)::text AS n FROM "SentNotification"
+        WHERE kind = 'guest-name-ask' AND "matchId" = $1`,
+      [grp.matchId],
+    );
+    expect(after!.n).toBe("1");
+  });
+
+  test("…but a DIFFERENT match gets its own ask — the key is per match", async ({
+    request,
+    db,
+  }) => {
+    // "One ask per player per MATCH, forever" is two words, and the
+    // second one is load-bearing: a player who offered a guest last
+    // Tuesday must still be asked this Tuesday. The key carries the
+    // match id and `load-state.ts` filters the rows by it, so this is
+    // the assertion that stops a future "one ask per player" shortcut.
+    const grp = (await mkGroup(request, db)).attach(request);
+
+    const first = await grp.post("amir", "my brother can play if needed", vague());
+    expect(first.reply!).toMatch(ASK_RE);
+
+    // Last week is over; next week is the registration match now.
+    await db.run(`UPDATE "Match" SET status = 'COMPLETED' WHERE id = $1`, [grp.matchId]);
+    await grp.addMatch({ daysFromNow: 9 });
+
+    const nextWeek = await grp.post("amir", "my brother can play if needed", vague());
+    expect(nextWeek.reply, "a new match is a new ask").toMatch(ASK_RE);
+
+    const rows = await db.all<{ key: string }>(
+      `SELECT n.key FROM "SentNotification" n
+         JOIN "Match" m ON m.id = n."matchId"
+        WHERE n.kind = 'guest-name-ask' AND m."activityId" = $1
+        ORDER BY n.key`,
+      [grp.activityId],
+    );
+    expect(rows, "one row per match, both of them Amir's").toHaveLength(2);
+    expect(new Set(rows.map((r) => r.key)).size, "two DIFFERENT keys").toBe(2);
   });
 
   // ── Squad full ──────────────────────────────────────────────────────

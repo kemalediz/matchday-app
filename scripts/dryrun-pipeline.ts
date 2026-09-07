@@ -80,7 +80,10 @@
  * availability / standing-offer boundary. S1–S3 / A1–A5 / R1–R5 are §10
  * step 7 part 2's two writing routes — the score report, the payment
  * credit, the reminder and the recruit blast Kemal asked about on
- * 2026-09-06. Q1–Q24 (`QUESTIONS=1`) are tagged questions; T1–T7
+ * 2026-09-06. X1–X3 and G1 are the two defects PR #55's port found and
+ * marked `test.fail()`: a pasted roster swallowing its sender's drop,
+ * and the guest-name-ask dedupe that had a reader and no writer.
+ * Q1–Q24 (`QUESTIONS=1`) are tagged questions; T1–T7
  * (`TEAMS=1`) are the generate-teams phrasings measured over 120 days of
  * the live group, where `generate_teams_request` is the single most
  * common tagged command. Each carries an `expect`
@@ -122,6 +125,14 @@ type Case = {
   squadIncludes?: string[];
   /** Who the fill parks on the bench. Defaults to `FULL_SQUAD_BENCH`. */
   benched?: string;
+  /** Put this case's sender in `SquadState.guestAskedUserIds` — the row
+   *  `lib/guest-name-ask.ts`'s third gate reads ("at most ONE ask per
+   *  player per match, forever"). IN MEMORY, on the cloned state: no
+   *  `SentNotification` is written and nothing here can write one. It
+   *  exists because that gate had a reader and no writer until
+   *  2026-09-07, and a gate this harness cannot exercise is a gate
+   *  nobody checks. */
+  alreadyAskedForGuestName?: boolean;
   expect: string;
 };
 
@@ -151,6 +162,37 @@ const CASES: Case[] = [
   { id: "C14", who: "Zair", body: "Najib is out. We need one more player. Can someone pls come forward", fullSquad: true, expect: "the 1 Sept incident replayed at a FULL squad. Must not reply 'squad is already full' and ignore the OUT" },
   { id: "C15", who: "Amir", body: "I can't come. Matchtime put my name down as reserve without my confirm", expect: "treat as OUT/grievance; must not silently confirm him" },
   { id: "C15b", who: "Amir", body: "I can't come. Matchtime put my name down as reserve without my confirm", fullSquad: true, expect: "Amir IS on the bench here. Expect he is taken OFF, not left on it" },
+
+  // ── X: a pasted roster that ALSO says something (2026-09-07) ──────
+  //
+  // The defect PR #55 marked `test.fail()`: the analyze route peeled ANY
+  // roster-shaped message out of the batch, so a message that was BOTH a
+  // list and its sender's own drop lost the drop. Pat stays CONFIRMED,
+  // the squad reads full, the vacated slot is never offered and the club
+  // turns up short.
+  //
+  // These are the extraction-dependent half — whether the model reads a
+  // drop out of a message with fourteen names under it. The clamp itself
+  // (`clampPastedRosterFacts`) is deterministic and unit-tested; run
+  // these with REPEAT to see whether the EXTRACTOR is stable on the
+  // shape.
+  //
+  // NOTE: this harness is `runPipeline`, not the route, so what it shows
+  // for a paste is the ENGINE's half only. The route's arithmetic
+  // (`reconcilePastedRoster`, which registers the appended names) has no
+  // model in it and is not modelled here.
+  { id: "X1", who: "Wasim", body: "can't make it lads, someone take my spot\n1. Kemal\n2. Mustafa\n3. Wasim\n4. Idris\n5. Burak\n6. David\n7. Ali\n8. Mojib", expect: "DROP Wasim (he is in the squad) and NOT ONE name off the list. Before 2026-09-07 the whole message was peeled and the drop was lost" },
+  { id: "X2", who: "Wasim", body: "1. Kemal\n2. Mustafa\n3. Wasim\n4. Idris\n5. Burak\n6. David\n7. Ali\n8. Mojib", expect: "the same list with NOTHING else in it: no writes at all, silent. C12's rule, unchanged" },
+  { id: "X3", who: "Wasim", body: "I'm in\n1. Kemal\n2. Mustafa\n3. Wasim\n4. Idris\n5. Burak\n6. David\n7. Ali\n8. Mojib", expect: "NO write. A sender's own IN read off a message containing a list is the coin flip PR #39 fixed; only a DROP survives the clamp" },
+
+  // ── G: the guest-name-ask gate that had a reader and no writer ─────
+  //
+  // C7 is the ask itself. G1 is the third gate — "at most ONE ask per
+  // player per match, forever" — which was inert from §10 step 8 until
+  // 2026-09-07 because nothing wrote the `SentNotification` row
+  // `load-state.ts` reads. With the row present the whole pipeline must
+  // go silent on the SAME message C7 answers.
+  { id: "G1", who: "Amir", body: "@Kemal Ediz my brother can play if needed", alreadyAskedForGuestName: true, expect: "SILENT — this player has already been asked on this match. Same message as C7, opposite outcome, and the only difference is the dedupe row" },
 
   // ── D: the same third-party OUT, phrased three ways ───────────────
   { id: "D1", who: "Zair", body: "Najib is out", fullSquad: true, expect: "bare third-party OUT, Najib in squad -> DROP Najib" },
@@ -1028,6 +1070,7 @@ async function main(): Promise<void> {
             c.benched ?? FULL_SQUAD_BENCH,
           )
         : structuredClone(base);
+      if (c.alreadyAskedForGuestName) state.guestAskedUserIds = [sender.userId];
       let r;
       try {
         r = await runPipeline({

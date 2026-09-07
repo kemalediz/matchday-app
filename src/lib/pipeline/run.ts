@@ -31,6 +31,7 @@
  *
  * The router is the only SERIAL dependency; extractors fan out (§11.4).
  */
+import { clampPastedRosterFacts } from "../pasted-roster-registration";
 import { compose, type ComposedOutput } from "./compose";
 import { decide } from "./engine";
 import { extractForRoute, extractorFor } from "./extractors";
@@ -157,7 +158,37 @@ export async function runPipeline(input: PipelineInput): Promise<PipelineResult>
     }),
   );
 
-  const factsById = new Map(extractions.map((e) => [e.messageId, e]));
+  // ── THE PASTED-ROSTER CLAMP, so the dry run tells the truth ────────
+  //
+  //   ADDED 2026-09-07, and it is a fix to this harness rather than a
+  //   new rule. `attendance-engine-batch.ts` has always refused to let
+  //   the engine read names off a pasted list (PR #39, PR #35's measured
+  //   non-determinism: the same paste, the same world, a different squad
+  //   each run). This module never applied it, so `scripts/
+  //   dryrun-pipeline.ts` printed writes for case C12 — "1. Kemal / 2.
+  //   Mustafa / …" — that production would never make, and its own
+  //   expectation line says "CLAMPED — must not rewrite the squad
+  //   wholesale (PR #39)". A dry run that disagrees with production on
+  //   the shape it is being used to investigate is worse than no dry
+  //   run.
+  //
+  //   `clampPastedRosterFacts` is the single source of that rule and
+  //   both callers use it, so the two cannot drift. What it keeps is the
+  //   sender's own OUT and nothing else — read its header for why that
+  //   one claim and no other.
+  //
+  //   WHAT IS STILL NOT MODELLED HERE, said plainly: the route's own
+  //   pasted-roster arithmetic (`reconcilePastedRoster`, which registers
+  //   the appended names) and the vCard refusal. This module is router →
+  //   extractors → engine → composer, not the route, and neither of
+  //   those lives in it.
+  const clamped = extractions.map((e) => {
+    const m = input.messages.find((x) => x.id === e.messageId);
+    const c = clampPastedRosterFacts(m?.body, e.facts);
+    return c.facts === e.facts ? e : { ...e, facts: c.facts };
+  });
+
+  const factsById = new Map(clamped.map((e) => [e.messageId, e]));
 
   // ── Stage 3 ────────────────────────────────────────────────────────
   const engineMessages: EngineMessage[] = input.messages.map((m) => {
@@ -184,7 +215,10 @@ export async function runPipeline(input: PipelineInput): Promise<PipelineResult>
 
   return {
     routes: routed.routes,
-    facts: extractions.map((e) => ({ messageId: e.messageId, facts: e.facts })),
+    // The CLAMPED facts, deliberately: this array is what the harness
+    // prints, and printing a claim the engine was never shown is how a
+    // dry run misleads the person reading it.
+    facts: clamped.map((e) => ({ messageId: e.messageId, facts: e.facts })),
     engine,
     composed,
     degradations,
