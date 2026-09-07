@@ -125,6 +125,17 @@ type Case = {
   squadIncludes?: string[];
   /** Who the fill parks on the bench. Defaults to `FULL_SQUAD_BENCH`. */
   benched?: string;
+  /** Force these roster members CONFIRMED on the CLONED state before the
+   *  run. IN MEMORY ONLY — like every other knob here, it edits the
+   *  structuredClone this iteration throws away, never the database.
+   *
+   *  It exists because a drop case can only test anything if its target
+   *  is actually in the squad, and the live squad moves: Shahrokh was
+   *  CONFIRMED when the 2026-09-07 incident happened and is DROPPED now,
+   *  because the row was corrected by hand. `fullSquad` cannot do it —
+   *  its fill SKIPS anyone who already has a row of any status, so a
+   *  DROPPED target stays dropped and the replay silently tests nothing. */
+  confirm?: string[];
   /** Put this case's sender in `SquadState.guestAskedUserIds` — the row
    *  `lib/guest-name-ask.ts`'s third gate reads ("at most ONE ask per
    *  player per match, forever"). IN MEMORY, on the cloned state: no
@@ -305,6 +316,40 @@ const CASES: Case[] = [
   { id: "R8", who: "Kemal", body: "come on lads we need more players", tagged: false, expect: "NO recruit_blast — a chase nudge is the scheduler's job, never a mass DM (router: none 20/20)" },
   { id: "R9", who: "Kemal", body: "Najib is out. We need one more player", fullSquad: true, expect: "DROP Najib untagged (PR #33 side-request path, UNTOUCHED by the blast tag gate). No recruit_blast write here — the side request is reported by attendance-engine-batch, not the engine. MEASURED 13/15; the other 2 extract `chase` instead of `recruit` and the drop is then suppressed — a PRE-EXISTING extractor wobble, see the note above" },
   { id: "R10", who: "Kemal", body: "@Match Time come on lads we need more players", tagged: true, expect: "NO recruit_blast — a tag does not turn a nudge into a bulk-DM command" },
+
+  // ── W: the 2026-09-07 incident — an admin's UNTAGGED third-party OUT
+  //
+  // Kemal posted "@Shahrokh🐔 Sutton Football Club is out due to
+  // unforeseen issue at work" at 21:11 with Shahrokh CONFIRMED at
+  // position 10, and MatchTime did nothing: a third-party OUT required a
+  // tag, and that message tags no BOT — the "@" in it is on the PLAYER.
+  // The squad read 13/14 with a player in it who was not coming.
+  // `ADMIN_REPORTED_OUT_IS_TAG_FREE` is the fix.
+  //
+  // ⚠️ EVERY CASE HERE CARRIES `confirm: ["Shahrokh"]` because the live
+  // row has since been corrected BY HAND and he is DROPPED in prod. On
+  // the real state a drop case would pass by doing nothing.
+  //
+  // W1–W4 are the acceptance cases and W5–W8 are the controls; the
+  // controls are the half that matters, because this change makes it
+  // possible to remove a player without tagging the bot, so a false
+  // positive now costs somebody their place.
+  { id: "W1", who: "Kemal", body: "@Shahrokh🐔 Sutton Football Club is out due to unforeseen issue at work", confirm: ["Shahrokh"], expect: "THE 7 SEPT INCIDENT, VERBATIM. Admin, no BOT tag => DROP Shahrokh" },
+  { id: "W2", who: "Kemal", body: "Shahrokh can't make it", confirm: ["Shahrokh"], expect: "DROP Shahrokh — the shortest natural phrasing" },
+  { id: "W3", who: "Kemal", body: "Shahrokh is out tomorrow", confirm: ["Shahrokh"], expect: "DROP Shahrokh — 'tomorrow' is the match, not a future fixture" },
+  { id: "W4", who: "Kemal", body: "@Wasim is out", confirm: ["Wasim"], expect: "DROP Wasim — a player @-mention with nothing else in the message" },
+  // ── the controls ──────────────────────────────────────────────────
+  { id: "W5", who: "Kemal", body: "Shahrokh was unreal last week, best player on the pitch", confirm: ["Shahrokh"], expect: "THE BANTER CONTROL. Names a player, reports nobody out => NO write, silent. A drop here is the failure this whole change risks" },
+  { id: "W5b", who: "Kemal", body: "Shahrokh is out of form at the moment", confirm: ["Shahrokh"], expect: "THE ADVERSARIAL CONTROL: contains the literal words 'Shahrokh is out' inside a sentence that means the opposite of an absence. NO write" },
+  { id: "W6", who: "Wasim", body: "@Shahrokh🐔 Sutton Football Club is out due to unforeseen issue at work", confirm: ["Shahrokh"], expect: "THE LIMIT. The same message from a NON-admin => NO write. Only Kemal holds an OWNER/ADMIN seat on this org" },
+  { id: "W7", who: "Kemal", body: "put Shahrokh on the bench", confirm: ["Shahrokh"], expect: "BENCH is NOT waived => NO write. The waiver covers removal, never a demote" },
+  { id: "W8", who: "Kemal", body: "Shahrokh is out, Rashad can take his spot", confirm: ["Shahrokh"], expect: "the SWAP shape: DROP Shahrokh and register Rashad. The OUT half is waived, the IN half was already tag-free" },
+  // W9/W10 are the pair that pins the guard the waiver had to move.
+  // `banterRefusal` used to exempt every ADMIN from its joke-marker
+  // refusal, which was only safe while an admin's drop necessarily
+  // carried a tag. Now the exemption hangs off THE TAG.
+  { id: "W9", who: "Kemal", body: "Shahrokh is out 😂😂 vote him out lads", confirm: ["Shahrokh"], expect: "NO write. Untagged + banter markers => refused, even from the owner (the moved banterRefusal)" },
+  { id: "W10", who: "Kemal", body: "@Match Time Shahrokh is out 😂 gutted for him", tagged: true, confirm: ["Shahrokh"], expect: "DROP Shahrokh. The SAME markers WITH a tag are still honoured — unchanged behaviour, and the control for W9" },
 ];
 
 /**
@@ -553,6 +598,26 @@ function memberByName(roster: Member[], name: string): Member {
  *
  * Purely in-memory — `state` is structuredCloned and never persisted.
  */
+/**
+ * Put named roster members in the squad on the CLONED state. In memory
+ * only — see the `confirm` field on `Case` for why it exists and why
+ * `fullSquad` cannot stand in for it.
+ */
+function forceConfirmed(s: SquadState, names: string[]): void {
+  for (const n of names) {
+    const m = memberByName(s.roster, n);
+    const row = s.rows.find((r) => r.userId === m.userId);
+    if (row) {
+      row.status = "CONFIRMED";
+      continue;
+    }
+    if (s.rows.filter((r) => r.status === "CONFIRMED").length >= s.maxPlayers) {
+      throw new Error(`confirm: no room for "${n}" — the squad is already ${s.maxPlayers}/${s.maxPlayers}`);
+    }
+    s.rows.push({ userId: m.userId, status: "CONFIRMED", position: s.rows.length + 1 });
+  }
+}
+
 function fillSquad(state: SquadState, include: string[], benchName: string): SquadState {
   const s = structuredClone(state);
   const taken = new Set(s.rows.map((r) => r.userId));
@@ -1071,6 +1136,7 @@ async function main(): Promise<void> {
           )
         : structuredClone(base);
       if (c.alreadyAskedForGuestName) state.guestAskedUserIds = [sender.userId];
+      if (c.confirm) forceConfirmed(state, c.confirm);
       let r;
       try {
         r = await runPipeline({

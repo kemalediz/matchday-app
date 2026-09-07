@@ -17,6 +17,7 @@ import { describe, it, expect } from "vitest";
 import { decide } from "../engine";
 import {
   NOW,
+  SUTTON,
   attendanceFacts,
   benchCount,
   claim,
@@ -2125,9 +2126,19 @@ describe("PR#33 · an admin's recruit command addresses MatchTime", () => {
     expect(r.outcomes[0].reasons.join(" ")).toMatch(/tag/i);
   });
 
-  it("does NOT widen the gate for an admin with no recruit ask", () => {
-    // "Whether THAT should change is a separate decision and is not taken
-    // here" — recruit-request.ts, on Wasim's 10:09 message the same day.
+  // ⚠️ UPDATED 2026-09-07 — THIS TEST USED TO ASSERT THE OPPOSITE, and
+  // the flip is deliberate rather than a fix to a broken test.
+  //
+  // It read "does NOT widen the gate for an admin with no recruit ask",
+  // quoting `recruit-request.ts`: "Whether THAT should change is a
+  // separate decision and is not taken here". That decision HAS now been
+  // taken. On 2026-09-07 the owner posted "@Shahrokh🐔 Sutton Football
+  // Club is out due to unforeseen issue at work" — an admin OUT with no
+  // recruit clause and no bot tag, i.e. exactly this shape — and
+  // MatchTime did nothing while the squad read 13/14 with a player in it
+  // who was not coming. `ADMIN_REPORTED_OUT_IS_TAG_FREE` is what changed,
+  // and the two waivers stay separate constants so either reverts alone.
+  it("an admin OUT with NO recruit ask is ALSO waived now (2026-09-07)", () => {
     const r = decide({
       now: NOW,
       state: world10(),
@@ -2143,7 +2154,31 @@ describe("PR#33 · an admin's recruit command addresses MatchTime", () => {
         }),
       ],
     });
+    expect(statusOf(r.nextState, "najib")).toBe("DROPPED");
+    // …and it says WHICH waiver did it, not the recruit one.
+    expect(r.outcomes[0].reasons.join(" ")).toMatch(/ADMIN_REPORTED_OUT_IS_TAG_FREE/);
+    expect(r.outcomes[0].reasons.join(" ")).not.toMatch(/recruit command addresses/i);
+  });
+
+  it("a NON-admin OUT with no recruit ask is still suppressed", () => {
+    // The half of the old assertion that does NOT change.
+    const r = decide({
+      now: NOW,
+      state: world10(),
+      messages: [
+        msg({
+          from: "zair",
+          body: "Najib has hurt his foot unfortunately",
+          route: "other_att",
+          tagged: false,
+          facts: attendanceFacts([
+            claim({ subject: "other", personRef: "Najib", personNamed: true, polarity: "out" }),
+          ]),
+        }),
+      ],
+    });
     expect(statusOf(r.nextState, "najib")).toBe("CONFIRMED");
+    expect(r.outcomes[0].reasons.join(" ")).toMatch(/requires an @Match Time tag/);
   });
 });
 
@@ -2420,6 +2455,393 @@ describe("S16 · a fixture question is answered, not shrugged at", () => {
     expect(r.outcomes[0].disposition).toBe("acted");
     expect(r.degradations).toHaveLength(0);
     expect(r.writes).toHaveLength(0);
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════
+// 2026-09-07 · THE SHAHROKH INCIDENT — an admin reporting a player out,
+// with no @Match Time tag.
+//
+// Kemal posted to the live Sutton FC group, the day before kickoff:
+//
+//     "@Shahrokh🐔 Sutton Football Club is out due to unforeseen issue
+//      at work"
+//
+// Shahrokh was CONFIRMED at position 10. MatchTime did nothing: the
+// verdict is a third-party OUT, `actionRequiresTag` said yes, and the
+// message tags no bot. The squad kept reading 13/14 with a player in it
+// who was not coming, and the row was corrected by hand.
+//
+// ⚠️ THE TRAP: the message DOES contain an "@" — of the PLAYER. Tagged
+// in this codebase means the BOT was mentioned. A player @-mention has
+// never been a tag and still is not one.
+//
+// The fix is `ADMIN_REPORTED_OUT_IS_TAG_FREE`, and it is deliberately
+// scoped to OWNER/ADMIN senders: a member of the group must still tag
+// the bot to remove anybody, or the group can drop each other by typing
+// a sentence.
+// ══════════════════════════════════════════════════════════════════════
+
+describe("2026-09-07 · an admin's untagged third-party OUT (Shahrokh)", () => {
+  const INCIDENT = "@Shahrokh🐔 Sutton Football Club is out due to unforeseen issue at work";
+
+  /** 13/14 with Shahrokh in the squad — the state that message landed in. */
+  const squad = () =>
+    world({
+      players: [...SUTTON, "shahrokh"],
+      maxPlayers: 14,
+      confirmed: [...FULL_14.slice(0, 12), "shahrokh"],
+    });
+
+  const dropShahrokh = () =>
+    attendanceFacts([
+      claim({ subject: "other", personRef: "Shahrokh", personNamed: true, polarity: "out" }),
+    ]);
+
+  it("THE INCIDENT: admin, no bot tag → Shahrokh is DROPPED", () => {
+    const r = decide({
+      now: NOW,
+      state: squad(),
+      messages: [
+        msg({ from: "kemal", body: INCIDENT, route: "other_att", facts: dropShahrokh() }),
+      ],
+    });
+    expect(statusOf(r.nextState, "shahrokh")).toBe("DROPPED");
+    expect(confirmedCount(r.nextState)).toBe(12);
+    expect(attWrites(r.writes)).toHaveLength(1);
+    expect(r.outcomes[0].disposition).toBe("acted");
+    expect(r.degradations).toHaveLength(0);
+  });
+
+  it("THE LIMIT: the same message from a NON-admin writes nothing", () => {
+    const r = decide({
+      now: NOW,
+      state: squad(),
+      messages: [
+        // Zair is an ordinary member. Removing someone who never
+        // consented is still an explicit, tagged op for him.
+        msg({ from: "zair", body: INCIDENT, route: "other_att", facts: dropShahrokh() }),
+      ],
+    });
+    expect(statusOf(r.nextState, "shahrokh")).toBe("CONFIRMED");
+    expect(r.writes).toHaveLength(0);
+    expect(r.outcomes[0].reasons.join(" ")).toMatch(/requires an @Match Time tag/);
+  });
+
+  it("a TAGGED non-admin drop still works (the tag is the other route in)", () => {
+    const r = decide({
+      now: NOW,
+      state: squad(),
+      messages: [
+        msg({
+          from: "zair",
+          body: "@Match Time Shahrokh is out",
+          tagged: true,
+          route: "other_att",
+          facts: dropShahrokh(),
+        }),
+      ],
+    });
+    expect(statusOf(r.nextState, "shahrokh")).toBe("DROPPED");
+  });
+
+  it("an admin's untagged third-party IN is unchanged (already tag-free)", () => {
+    const r = decide({
+      now: NOW,
+      state: squad(),
+      messages: [
+        msg({
+          from: "kemal",
+          body: "Najib is playing tomorrow",
+          route: "other_att",
+          facts: attendanceFacts([
+            claim({ subject: "other", personRef: "Najib", personNamed: true, polarity: "in" }),
+          ]),
+        }),
+      ],
+    });
+    expect(statusOf(r.nextState, "najib")).toBe("CONFIRMED");
+  });
+
+  it("an admin's own untagged OUT is unchanged (already tag-free)", () => {
+    const r = decide({
+      now: NOW,
+      state: squad(),
+      messages: [
+        msg({
+          from: "kemal",
+          body: "can't make it lads",
+          route: "self_att",
+          facts: attendanceFacts([claim({ polarity: "out" })]),
+        }),
+      ],
+    });
+    expect(statusOf(r.nextState, "kemal")).toBe("DROPPED");
+    expect(statusOf(r.nextState, "shahrokh")).toBe("CONFIRMED");
+  });
+
+  // ── The waiver must never GUESS who was named ─────────────────────
+  it("an admin naming someone who is not a member drops nobody", () => {
+    const r = decide({
+      now: NOW,
+      state: squad(),
+      messages: [
+        msg({
+          from: "kemal",
+          body: "Ronaldo is out",
+          route: "other_att",
+          facts: attendanceFacts([
+            claim({ subject: "other", personRef: "Ronaldo", personNamed: true, polarity: "out" }),
+          ]),
+        }),
+      ],
+    });
+    expect(r.writes).toHaveLength(0);
+    expect(confirmedCount(r.nextState)).toBe(13);
+    expect(r.outcomes[0].reasons.join(" ")).toMatch(/not a member/);
+  });
+
+  it("an AMBIGUOUS name from an admin bails loudly and drops nobody", () => {
+    const state = squad();
+    // Two Amirs on the roster. "Amir is out" identifies neither.
+    state.roster.push({ userId: "u-amir2", name: "Amir Khan", isAdmin: false, hasPhone: true });
+    const r = decide({
+      now: NOW,
+      state,
+      messages: [
+        msg({
+          from: "kemal",
+          body: "Amir is out",
+          route: "other_att",
+          facts: attendanceFacts([
+            claim({ subject: "other", personRef: "Amir", personNamed: true, polarity: "out" }),
+          ]),
+        }),
+      ],
+    });
+    expect(r.writes).toHaveLength(0);
+    expect(r.degradations).toHaveLength(1);
+    expect(r.degradations[0].detail).toMatch(/ambiguous/i);
+  });
+
+  it("a low-confidence claim from an admin is still below the floor", () => {
+    const r = decide({
+      now: NOW,
+      state: squad(),
+      messages: [
+        msg({
+          from: "kemal",
+          body: "not sure but I think Shahrokh might be out?",
+          route: "other_att",
+          facts: attendanceFacts([
+            claim({
+              subject: "other",
+              personRef: "Shahrokh",
+              personNamed: true,
+              polarity: "out",
+              confidence: 0.5,
+            }),
+          ]),
+        }),
+      ],
+    });
+    expect(r.writes).toHaveLength(0);
+    expect(statusOf(r.nextState, "shahrokh")).toBe("CONFIRMED");
+  });
+
+  // ── BENCH and SWAP, pinned both ways ──────────────────────────────
+  it("an admin's untagged BENCH of another player is NOT waived", () => {
+    const r = decide({
+      now: NOW,
+      state: squad(),
+      messages: [
+        msg({
+          from: "kemal",
+          body: "put Shahrokh on the bench",
+          route: "other_att",
+          facts: attendanceFacts([
+            claim({ subject: "other", personRef: "Shahrokh", personNamed: true, polarity: "bench" }),
+          ]),
+        }),
+      ],
+    });
+    expect(statusOf(r.nextState, "shahrokh")).toBe("CONFIRMED");
+    expect(r.writes).toHaveLength(0);
+    expect(r.outcomes[0].reasons.join(" ")).toMatch(/requires an @Match Time tag/);
+  });
+
+  it("the same BENCH, TAGGED, still works", () => {
+    const r = decide({
+      now: NOW,
+      state: squad(),
+      messages: [
+        msg({
+          from: "kemal",
+          body: "@Match Time put Shahrokh on the bench",
+          tagged: true,
+          route: "other_att",
+          facts: attendanceFacts([
+            claim({ subject: "other", personRef: "Shahrokh", personNamed: true, polarity: "bench" }),
+          ]),
+        }),
+      ],
+    });
+    expect(statusOf(r.nextState, "shahrokh")).toBe("BENCH");
+  });
+
+  it("an admin's untagged SWAP (OUT + IN) IS waived — both halves already are", () => {
+    const r = decide({
+      now: NOW,
+      state: squad(),
+      messages: [
+        msg({
+          from: "kemal",
+          body: "Shahrokh is out, Najib can take his spot",
+          route: "other_att",
+          facts: attendanceFacts([
+            claim({ subject: "other", personRef: "Shahrokh", personNamed: true, polarity: "out" }),
+            claim({ subject: "other", personRef: "Najib", personNamed: true, polarity: "in" }),
+          ]),
+        }),
+      ],
+    });
+    expect(statusOf(r.nextState, "shahrokh")).toBe("DROPPED");
+    expect(statusOf(r.nextState, "najib")).toBe("CONFIRMED");
+    expect(confirmedCount(r.nextState)).toBe(13);
+  });
+
+  it("a NON-admin's untagged SWAP is still suppressed entirely", () => {
+    const r = decide({
+      now: NOW,
+      state: squad(),
+      messages: [
+        msg({
+          from: "zair",
+          body: "Shahrokh is out, Najib can take his spot",
+          route: "other_att",
+          facts: attendanceFacts([
+            claim({ subject: "other", personRef: "Shahrokh", personNamed: true, polarity: "out" }),
+            claim({ subject: "other", personRef: "Najib", personNamed: true, polarity: "in" }),
+          ]),
+        }),
+      ],
+    });
+    expect(r.writes).toHaveLength(0);
+    expect(statusOf(r.nextState, "shahrokh")).toBe("CONFIRMED");
+    expect(statusOf(r.nextState, "najib")).toBe("ABSENT");
+  });
+
+  // ── THE APPLY PATH IS THE SAME ONE ────────────────────────────────
+  //
+  // A drop opens a slot, and the slot is offered to the bench by the
+  // apply layer (`attendance.ts:cancelAttendance` →
+  // `requestBenchConfirmationOnDrop`), which reads the write the engine
+  // proposes. So the property that matters here is that a WAIVED drop
+  // and a TAGGED drop produce the SAME write, byte for byte apart from
+  // the message id — anything else and the offer chain would see a
+  // different object on the untagged path.
+  it("a waived drop proposes exactly the write a tagged drop proposes", () => {
+    const run = (tagged: boolean) =>
+      decide({
+        now: NOW,
+        state: squad(),
+        messages: [
+          msg({
+            id: tagged ? "wa-tagged" : "wa-waived",
+            from: "kemal",
+            body: tagged ? "@Match Time Shahrokh is out" : INCIDENT,
+            tagged,
+            route: "other_att",
+            facts: dropShahrokh(),
+          }),
+        ],
+      });
+    const waived = attWrites(run(false).writes).map((w) => ({ ...w, sourceMessageId: "-" }));
+    const tagged = attWrites(run(true).writes).map((w) => ({ ...w, sourceMessageId: "-" }));
+    expect(waived).toHaveLength(1);
+    expect(waived).toEqual(tagged);
+    expect(waived[0].status).toBe("DROPPED");
+  });
+
+  it("the freed slot is offered: a bench player is still there to take it", () => {
+    // The engine does not open the offer (the apply layer does), but it
+    // must leave the state the offer is computed from: a bench holder
+    // and one fewer confirmed player.
+    const state = world({
+      players: [...SUTTON, "shahrokh"],
+      maxPlayers: 14,
+      confirmed: [...FULL_14.slice(0, 13), "shahrokh"],
+      bench: ["najib"],
+    });
+    const r = decide({
+      now: NOW,
+      state,
+      messages: [
+        msg({ from: "kemal", body: INCIDENT, route: "other_att", facts: dropShahrokh() }),
+      ],
+    });
+    expect(statusOf(r.nextState, "shahrokh")).toBe("DROPPED");
+    expect(statusOf(r.nextState, "najib")).toBe("BENCH"); // nobody is auto-promoted
+    expect(confirmedCount(r.nextState)).toBe(13); // one slot open, 14 max
+  });
+
+  // ── The banter guard had to move with the waiver ──────────────────
+  //
+  // `banterRefusal` exempted ADMINS from the joke-marker refusal, and
+  // that was safe only because an admin's third-party drop necessarily
+  // carried a tag: a tag is a deliberate act. The waiver removes that,
+  // so the exemption now hangs off the TAG rather than the seat.
+  it("an admin's untagged drop with banter markers is REFUSED", () => {
+    const r = decide({
+      now: NOW,
+      state: squad(),
+      messages: [
+        msg({
+          from: "kemal",
+          body: "Shahrokh is out 😂😂 vote him out lads",
+          route: "other_att",
+          facts: dropShahrokh(),
+        }),
+      ],
+    });
+    expect(statusOf(r.nextState, "shahrokh")).toBe("CONFIRMED");
+    expect(r.writes).toHaveLength(0);
+    expect(r.outcomes[0].reasons.join(" ")).toMatch(/banter/i);
+  });
+
+  it("the same banter markers WITH a tag are still honoured (unchanged)", () => {
+    const r = decide({
+      now: NOW,
+      state: squad(),
+      messages: [
+        msg({
+          from: "kemal",
+          body: "@Match Time Shahrokh is out 😂 he's gutted",
+          tagged: true,
+          route: "other_att",
+          facts: dropShahrokh(),
+        }),
+      ],
+    });
+    expect(statusOf(r.nextState, "shahrokh")).toBe("DROPPED");
+  });
+
+  it("the target contradicting it in the same window still wins", () => {
+    const r = decide({
+      now: NOW,
+      state: squad(),
+      messages: [
+        msg({ from: "kemal", body: INCIDENT, route: "other_att", facts: dropShahrokh() }),
+        msg({
+          from: "shahrokh",
+          body: "what? I'm in lads",
+          route: "self_att",
+          facts: attendanceFacts([claim({ polarity: "in" })]),
+        }),
+      ],
+    });
+    expect(statusOf(r.nextState, "shahrokh")).toBe("CONFIRMED");
+    expect(r.outcomes[0].reasons.join(" ")).toMatch(/contradict|corrobor/i);
   });
 });
 
