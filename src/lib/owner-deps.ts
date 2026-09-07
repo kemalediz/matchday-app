@@ -49,6 +49,7 @@ import type { AdminOpsApplyDeps, PaidState } from "./admin-ops-engine";
 import type { TeamOpsApplyDeps } from "./team-ops-engine";
 import { recordAttendanceEvent } from "./attendance-events";
 import { generateTeamsForMatch } from "./team-generation";
+import { guestNameAskKey, GUEST_NAME_ASK_KIND } from "./guest-name-ask";
 
 /** The Prisma surface these deps touch. Typed as the real client by
  *  default; widened only so a unit test can hand in a stub without a
@@ -307,5 +308,52 @@ export function buildTeamOpsApplyDeps(args: {
     },
 
     generateTeams: (matchId, opts) => generateTeamsForMatch(matchId, opts),
+  };
+}
+
+/**
+ * THE UNNAMED-GUEST NAME ASK'S ONE-PER-PLAYER-PER-MATCH SLOT.
+ *
+ * `attendance-engine-batch.ts` calls this between `decide()` and
+ * `compose()`; `pipeline/load-state.ts` reads the rows back into
+ * `SquadState.guestAskedUserIds` and `pipeline/engine.ts` passes them to
+ * `shouldAskForGuestName` as `alreadyAsked`.
+ *
+ * ── Why it is here and not in `pipeline/` ────────────────────────────
+ * Same reason as everything else in this file: it is a WRITE, and
+ * `pipeline/__tests__/zero-writes.test.ts` scans that directory for
+ * mutations on every build.
+ *
+ * ── Why `create` and not `upsert` ────────────────────────────────────
+ * `SentNotification.key` is `@unique`, so the database — not a
+ * read-then-write in application code — decides who got the slot. A
+ * loser gets a constraint violation, returns `false`, and the caller
+ * drops the ask. An `upsert` would report success to both batches and
+ * both would speak, which is the nagging this whole gate exists to
+ * prevent. It is the same reasoning, and the same shape, as the row PR
+ * #29 wrote from the route before §10 step 8 lost the writer.
+ *
+ * Key and kind are `guest-name-ask.ts`'s own exports, never strings
+ * typed here: the reader matches on both, and a typo would be a gate
+ * that silently never closes — which is exactly the bug this restores.
+ */
+export function buildClaimGuestNameAsk(args: { db?: Db } = {}) {
+  const db = args.db ?? defaultDb;
+  return async ({ matchId, userId }: { matchId: string; userId: string }): Promise<boolean> => {
+    try {
+      await db.sentNotification.create({
+        data: {
+          key: guestNameAskKey(matchId, userId),
+          kind: GUEST_NAME_ASK_KIND,
+          matchId,
+          targetUser: userId,
+        },
+      });
+      return true;
+    } catch {
+      // The unique key did its job, or the write failed. Either way this
+      // batch does not have the slot and must not speak.
+      return false;
+    }
   };
 }

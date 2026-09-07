@@ -115,6 +115,7 @@ import {
   buildScoreApplyDeps,
   buildAdminOpsApplyDeps,
   buildTeamOpsApplyDeps,
+  buildClaimGuestNameAsk,
 } from "@/lib/owner-deps";
 import { loadOpenQuestion } from "@/lib/pipeline/load-awaiting-answer";
 import { ENGINE_HANDLED_BY } from "@/lib/attendance-engine";
@@ -143,22 +144,60 @@ import { getOrgFeatures } from "@/lib/org-features";
 //     actionRequiresTag            still the policy, applied inside each
 //                                    owner (`engine.ts`, `answer-batch`)
 //                                    rather than over a verdict here
-//     isVagueGuestOfferVerdict     → `personNamed`
-//     stripPlaceholderGuests,
+//     isVagueGuestOfferVerdict,
+//     stripPlaceholderGuests       DEAD, and the entry above was wrong
+//                                    to file them with the ask. Both
+//                                    take a `GuestOfferVerdict` and are
+//                                    called by nothing but each other
+//                                    and their tests; `personNamed` on
+//                                    the claim replaced them, which is
+//                                    what the `→` was pointing at. Kept
+//                                    and tested like
+//                                    `buildBenchUpgradeReply` below,
+//                                    called by nothing.
 //     shouldAskForGuestName,
-//     renderGuestNameAsk,
-//     guestNameAskKey,
-//     GUEST_NAME_ASK_KIND          the whole unnamed-guest ask, moved
-//                                    intact: `load-state.ts:183` reads
-//                                    the once-per-player dedupe row,
-//                                    `engine.ts:470` decides, and
-//                                    `compose.ts:298` renders the SAME
+//     renderGuestNameAsk           live: `engine.ts:476` decides and
+//                                    `compose.ts:321` renders the SAME
 //                                    copy from the same module
-//     clampRosterDerivedWrites,
+//     guestNameAskKey,
+//     GUEST_NAME_ASK_KIND          ⚠️ THIS ENTRY SAID "moved intact" AND
+//                                    WAS FALSE FOR A DAY. `load-state.ts`
+//                                    READ the once-per-player dedupe row
+//                                    and NOTHING WROTE IT, so
+//                                    `alreadyAsked` was permanently
+//                                    false and MatchTime asked for a
+//                                    guest's name on every single offer.
+//                                    Fixed 2026-09-07: the writer is
+//                                    `buildClaimGuestNameAsk`
+//                                    (`owner-deps.ts`), injected into
+//                                    the engine batch below and called
+//                                    between `decide()` and `compose()`
+//                                    so the slot is claimed before
+//                                    anything says the words.
+//                                    A READER WITH NO WRITER IS THE
+//                                    FAILURE SHAPE THIS WHOLE LIST
+//                                    EXISTS TO CATCH: "we deleted a
+//                                    guard" and "we deleted a guard
+//                                    whose failure is now
+//                                    unrepresentable" are different
+//                                    claims — and so is "we kept a guard
+//                                    and unplugged its input".
+//     clampRosterDerivedWrites     DEAD by construction, and documented
+//                                    as such in
+//                                    `pasted-roster-registration.ts`'s
+//                                    header: with no model there are no
+//                                    list-derived writes to clamp. It
+//                                    and `rosterMentions` are called
+//                                    only from `pasted-roster.ts` and
+//                                    the tests.
 //     parsePastedRoster,
 //     reconcilePastedRoster,
-//     rosterMentions, sameName     → `pasted-roster-registration.ts`,
-//                                    peeled above before the router
+//     sameName                     → `pasted-roster-registration.ts`.
+//                                    The LIST is reconciled above,
+//                                    before the router; since 2026-09-07
+//                                    the MESSAGE is not peeled with it,
+//                                    so its sender's own drop still
+//                                    reaches the engine. See section 4.
 //     isPromoteFromBenchAuthorized  → `engine.ts`, unchanged in meaning
 //     computeEloDeltas,
 //     generateTeamsForMatch,
@@ -941,28 +980,85 @@ async function handleAnalyzeRequest(request: Request) {
     }
   }
 
-  // ── 4. THE PASTED ROSTER ───────────────────────────────────────────
-  //
-  //   `attendance-engine-batch.ts` refuses any message
-  //   `parsePastedRoster` recognises, because "a fourteen-line roster
-  //   routed `other_att` is fourteen third-party IN claims it would
-  //   happily apply". The shipped handling lived in the per-message loop
-  //   and read the model's `registerFor`.
+  // ── 4. THE PASTED ROSTER — THIS BRANCH OWNS THE LIST, NOT THE MESSAGE ─
   //
   //   THE ARITHMETIC WAS NEVER THE MODEL'S. `reconcilePastedRoster`
   //   decides whether the paste restates our own roster post in Match
   //   Context order and, if it does, COMPUTES which lines are new. The
   //   old code took the model's picks off the list and threw all of them
-  //   away, replacing them with that computation. So the peel loses only
-  //   the residue — names the model found that the LIST does not
+  //   away, replacing them with that computation. So this branch loses
+  //   only the residue — names the model found that the LIST does not
   //   mention, i.e. prose travelling alongside a paste ("here's the
-  //   list, also adding Kieran"). Kieran now needs one more message,
-  //   which is §13's stated trade: "a missed add is recoverable in one
+  //   list, also adding Kieran"). Kieran needs one more message, which
+  //   is §13's stated trade: "a missed add is recoverable in one
   //   message; a wrong registration on a paid match is not."
   //
   //   Anything that is NOT of record registers NOBODY — the clamp's
   //   outcome, reached by construction rather than by subtraction, since
   //   with no model there are no list-derived writes to clamp.
+  //
+  //   ═════════════════════════════════════════════════════════════════
+  //   IT IS NO LONGER TERMINAL (2026-09-07) — AND THAT IS THE FIX
+  //   ═════════════════════════════════════════════════════════════════
+  //
+  //   It used to do `statsRequestIds.add(m.waMessageId)`, which peels
+  //   the WHOLE message out of `fresh` before the router runs. So a
+  //   message that was BOTH a list and its sender's own drop lost the
+  //   drop: Pat writes "can't make it lads, someone take my spot" above
+  //   the list, and stays CONFIRMED. The squad reads full, the vacated
+  //   slot is never offered to the bench, and the club is a player short
+  //   on the night. It is the FOURTH instance of one bug class in this
+  //   file — a terminal branch that silently deletes every guard below
+  //   it — after the recruit fast path (2026-09-01), PR #29's
+  //   guest-name-ask branch, and step 6's engine short-circuit.
+  //
+  //   The message now stays in the batch. This branch still applies the
+  //   arithmetic, and `attendance-engine-batch.ts`'s clamp
+  //   (`clampPastedRosterFacts`) lets the engine take exactly one thing
+  //   off a roster-shaped message: THE SENDER'S OWN DROP. Nothing about
+  //   drop handling is reimplemented here — the drop goes to the owner
+  //   whose rules already cover it, which is what MEMORY.md's note on
+  //   this bug class asks for ("prefer NOT OWNING a shape over
+  //   reimplementing a shipped guard inside the new branch").
+  //
+  //   WHAT NOT PEELING EXPOSES THE MESSAGE TO, and what covers each:
+  //
+  //     • THE ROUTER. It now costs one line of a batched Haiku call and
+  //       one attendance-extractor call per paste. Real money, a few
+  //       times a week, and the clamp above discards everything the
+  //       extractor reads off the list.
+  //     • THE ATTENDANCE ENGINE. Clamped to the sender's own OUT, per
+  //       above. It can no longer read fourteen third-party INs off a
+  //       list, which was the original reason for refusing the shape.
+  //     • THE FOUR STEP-7 OWNERS (`question`, `balancer`, `score`,
+  //       `admin_ops`). Explicitly excluded — `ownerBase` filters
+  //       `pastedRosterIds` out. A misrouted list must not be answered
+  //       as a question or read as a score, and that exposure is new
+  //       with this change, so it is closed here rather than argued
+  //       about.
+  //     • THE "NOBODY OWNED IT" BRANCH. A paste the engine does not own
+  //       would otherwise land there: an `ignored`/`noise` row and a
+  //       line on the operator DM, replacing this branch's own
+  //       `pasted_roster` row. So the row and the reply are DEFERRED
+  //       into `pastedRosterReports` and emitted in that same loop, one
+  //       result per message, only when no owner spoke.
+  //
+  //   ONE OWNER PER MESSAGE STILL HOLDS. Two things can WRITE for one
+  //   paste (this branch registers the appended names; the engine drops
+  //   the sender), which is the same shape as PR #33's "a recruit ask
+  //   alongside a drop must do BOTH". Only one of them ever SPEAKS:
+  //   whoever owns the message in the loop below.
+  const pastedRosterIds = new Set<string>();
+  const pastedRosterReports = new Map<
+    string,
+    {
+      handledBy: ActionForBot["handledBy"];
+      action: string;
+      reasoning: string;
+      react: string | null;
+      reply: string | null;
+    }
+  >();
   if (nextMatchForReply) {
     const confirmedNames = nextMatchForReply.attendances.map((a) => a.user.name ?? "");
     for (const m of fresh) {
@@ -974,7 +1070,10 @@ async function handleAnalyzeRequest(request: Request) {
         senderNames: [sender.name, m.authorName],
       });
       if (decision.kind === "not_a_roster") continue;
-      statsRequestIds.add(m.waMessageId);
+      // NOT `statsRequestIds` — that set is what the splice below reads,
+      // and peeling the message is the defect this section's header is
+      // about. This one only says "the list has been dealt with".
+      pastedRosterIds.add(m.waMessageId);
 
       if (decision.kind === "not_of_record") {
         console.warn(
@@ -983,15 +1082,12 @@ async function handleAnalyzeRequest(request: Request) {
             `A re-paste is a restatement, not a registration; org ${org.id} should use ` +
             `featureSquadFromList if it maintains its squad this way.`,
         );
-        await recordAnalysis({
-          orgId: org.id, groupId: body.groupId, msg: m,
-          handledBy: "fast-path", intent: "pasted_roster", action: "none",
-          confidence: 1, reasoning: `pasted roster, not of record (${decision.reason}) — nobody registered`,
-          authorUserId: sender.userId, authorName: m.authorName ?? null,
-        });
-        results.push({
-          waMessageId: m.waMessageId, handledBy: "fast-path",
-          intent: "pasted_roster", react: null, reply: null,
+        pastedRosterReports.set(m.waMessageId, {
+          handledBy: "fast-path",
+          action: "none",
+          reasoning: `pasted roster, not of record (${decision.reason}) — nobody registered`,
+          react: null,
+          reply: null,
         });
         continue;
       }
@@ -1036,25 +1132,16 @@ async function handleAnalyzeRequest(request: Request) {
           `name(s) [${decision.additions.join(", ")}] are new. Computed from the squad, not from ` +
           `anyone's reading of the list.`,
       );
-      await recordAnalysis({
-        orgId: org.id, groupId: body.groupId, msg: m,
-        handledBy: failures.length > 0 ? "error" : "fast-path",
-        intent: "pasted_roster",
-        action: registered.length > 0 ? `register:${registered.length}` : "none",
-        confidence: 1,
-        reasoning:
-          `pasted roster of record — registered [${registered.join(", ")}]` +
-          (failures.length > 0 ? `; FAILED for [${failures.join(", ")}]` : ""),
-        authorUserId: sender.userId, authorName: m.authorName ?? null,
-      });
       // The honest ack: nothing cheerful is said about a write that
       // threw, and the squad post below is composed from the DATABASE
       // after every write in this request has landed, so it shows what
       // actually happened either way (9f19040, §3.2 S7).
-      results.push({
-        waMessageId: m.waMessageId,
+      pastedRosterReports.set(m.waMessageId, {
         handledBy: failures.length > 0 ? "error" : "fast-path",
-        intent: "pasted_roster",
+        action: registered.length > 0 ? `register:${registered.length}` : "none",
+        reasoning:
+          `pasted roster of record — registered [${registered.join(", ")}]` +
+          (failures.length > 0 ? `; FAILED for [${failures.join(", ")}]` : ""),
         react: failures.length > 0 ? null : registered.length > 0 ? "✅" : null,
         reply: registered.length > 0 ? SQUAD_POST_MARKER : null,
       });
@@ -1233,6 +1320,12 @@ async function handleAnalyzeRequest(request: Request) {
                   select: { userId: true },
                 })
               ).map((p) => p.userId),
+            // The once-per-player-per-match guest-name-ask row. Its
+            // READER (`pipeline/load-state.ts`) and its DECIDER
+            // (`pipeline/engine.ts`) both moved out of this file in §10
+            // step 8 and the WRITER did not arrive anywhere — see the
+            // tombstone comment at the top of this file, now corrected.
+            claimGuestNameAsk: buildClaimGuestNameAsk(),
           },
         })
       : null;
@@ -1312,19 +1405,29 @@ async function handleAnalyzeRequest(request: Request) {
   // loud anyway: a double claim is the one defect whose symptom is the
   // bot replying twice in a customer's group, and it must not be
   // something only a code reading can rule out.
-  const ownerBase = fresh.map((m) => {
-    const s = senderById.get(m.waMessageId)!;
-    return {
-      waMessageId: m.waMessageId,
-      body: m.body,
-      authorName: m.authorName,
-      senderUserId: s.userId,
-      senderName: s.name,
-      tagged: messageTagsBot(m),
-      route: gateRouteById.get(m.waMessageId),
-      gated: gatedIds.has(m.waMessageId),
-    };
-  });
+  //
+  // AND ONE EXCLUSION, added 2026-09-07 with the pasted-roster change
+  // above. A list is no longer peeled out of `fresh`, so for the first
+  // time a step-7 owner could see one. None of them should: a misrouted
+  // fourteen-line list must not be answered as a question, read as a
+  // score, or taken as a team instruction. The attendance engine sees it
+  // (clamped to the sender's own drop) because that is the whole point
+  // of not peeling; the other four do not.
+  const ownerBase = fresh
+    .filter((m) => !pastedRosterIds.has(m.waMessageId))
+    .map((m) => {
+      const s = senderById.get(m.waMessageId)!;
+      return {
+        waMessageId: m.waMessageId,
+        body: m.body,
+        authorName: m.authorName,
+        senderUserId: s.userId,
+        senderName: s.name,
+        tagged: messageTagsBot(m),
+        route: gateRouteById.get(m.waMessageId),
+        gated: gatedIds.has(m.waMessageId),
+      };
+    });
   const ownerHistory = history.map((h) => ({ author: h.authorName, body: h.body }));
   const now = new Date();
 
@@ -1719,6 +1822,49 @@ async function handleAnalyzeRequest(request: Request) {
         react: writeFailed ? null : stepSeven.react,
         reply,
         reasoning: stepSeven.reasoning,
+      });
+      continue;
+    }
+
+    // ── THE PASTED ROSTER, WHEN NO OWNER SPOKE ──────────────────────
+    //
+    //   Section 4 above applied the list's arithmetic before the router
+    //   ran and deferred its row and its reply to here, because it no
+    //   longer peels the message out of the batch (read that section's
+    //   header for why — a peel loses the sender's own drop).
+    //
+    //   Reached only when nothing above claimed the message, so the
+    //   "one result per message" invariant holds without any
+    //   reconciliation: if the engine took the sender's drop it has
+    //   already `continue`d with its own row and its own words, and this
+    //   report is dropped on the floor. The WRITES from section 4 stand
+    //   either way — two owners may write for one message (PR #33's "a
+    //   recruit ask alongside a drop must do BOTH"), only one speaks.
+    //
+    //   Deliberately NOT `unowned.push(...)`: this message was handled,
+    //   by arithmetic, and putting a posted squad list on the operator
+    //   DM as "nobody handled this" would page a human for the most
+    //   ordinary message a football group sends.
+    const rosterReport = pastedRosterReports.get(msg.waMessageId);
+    if (rosterReport) {
+      await recordAnalysis({
+        orgId: org.id,
+        groupId: body.groupId,
+        msg,
+        handledBy: rosterReport.handledBy,
+        intent: "pasted_roster",
+        action: rosterReport.action,
+        confidence: 1,
+        reasoning: rosterReport.reasoning,
+        authorUserId: sender.userId,
+        authorName: msg.authorName ?? null,
+      });
+      results.push({
+        waMessageId: msg.waMessageId,
+        handledBy: rosterReport.handledBy,
+        intent: "pasted_roster",
+        react: rosterReport.react,
+        reply: rosterReport.reply,
       });
       continue;
     }

@@ -19,7 +19,12 @@
  * fake can answer and a live database cannot without a fixture per case.
  */
 import { describe, expect, it, vi } from "vitest";
-import { buildScoreApplyDeps, buildAdminOpsApplyDeps } from "../owner-deps";
+import {
+  buildScoreApplyDeps,
+  buildAdminOpsApplyDeps,
+  buildClaimGuestNameAsk,
+} from "../owner-deps";
+import { guestNameAskKey, GUEST_NAME_ASK_KIND } from "../guest-name-ask";
 
 describe("the score apply deps", () => {
   it("records the score AND moves the match to COMPLETED in one update", async () => {
@@ -160,5 +165,56 @@ describe("the admin-ops apply deps", () => {
       orgId: "org1",
     });
     expect(await deps.loadPhone("u1")).toBeNull();
+  });
+});
+
+/**
+ * THE GUEST-NAME-ASK SLOT.
+ *
+ * The row `pipeline/load-state.ts` reads back as
+ * `SquadState.guestAskedUserIds`. It had no writer at all between §10
+ * step 8 and 2026-09-07, so `guest-name-ask.ts`'s "one ask per player
+ * per match, forever" gate was inert and MatchTime nagged on every
+ * offer. These pin the two things a reimplementation gets wrong: the KEY
+ * (the reader rebuilds it and compares exactly, so a typo is a gate that
+ * never closes) and the failure DIRECTION.
+ */
+describe("the guest-name-ask claim", () => {
+  it("writes the row the reader looks for — key, kind, match and player", async () => {
+    const create = vi.fn(async (_a: unknown) => ({}));
+    const claim = buildClaimGuestNameAsk({
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      db: { sentNotification: { create } } as any,
+    });
+    await expect(claim({ matchId: "m1", userId: "u1" })).resolves.toBe(true);
+    expect(create.mock.calls[0][0]).toEqual({
+      data: {
+        key: guestNameAskKey("m1", "u1"),
+        kind: GUEST_NAME_ASK_KIND,
+        matchId: "m1",
+        targetUser: "u1",
+      },
+    });
+    // Stated separately and on purpose: `load-state.ts` rebuilds this
+    // exact string per roster member and compares it to the stored
+    // `key`, so the format is a contract between two files.
+    expect(guestNameAskKey("m1", "u1")).toBe("guest-name-ask:m1:u1");
+  });
+
+  it("a lost unique-key race returns false, so the caller stays silent", async () => {
+    const claim = buildClaimGuestNameAsk({
+      db: {
+        sentNotification: {
+          create: async () => {
+            throw new Error("Unique constraint failed on the fields: (key)");
+          },
+        },
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } as any,
+    });
+    // It never throws into the batch: the ask is dropped, the batch is
+    // not. Under-asking is a no-op; a thrown claim would have taken the
+    // whole attendance batch down with it.
+    await expect(claim({ matchId: "m1", userId: "u1" })).resolves.toBe(false);
   });
 });

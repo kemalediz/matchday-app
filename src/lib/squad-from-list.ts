@@ -44,6 +44,8 @@ import Anthropic from "@anthropic-ai/sdk";
 import { db } from "./db";
 import { recordAttendanceEvent } from "./attendance-events";
 import { normalisePhone } from "./phone";
+import { normaliseName } from "./name-normalise";
+export { normaliseName };
 
 const MODEL = "claude-sonnet-4-5";
 
@@ -144,23 +146,11 @@ function getAnthropic(): Anthropic | null {
   return key ? new Anthropic({ apiKey: key }) : null;
 }
 
-/** Normalise a name for diffing / alias storage:
- *   - NFD + drop combining diacritics
- *   - lowercase
- *   - drop zero-width / word-joiner / non-breaking space (whatsapp
- *     copy-paste emits U+2060 / U+00A0 / U+200B liberally)
- *   - collapse whitespace
- *   - strip leading "~" (whatsapp prefixes pushnames of unsaved contacts) */
-export function normaliseName(s: string): string {
-  return s
-    .normalize("NFD")
-    .replace(/[̀-ͯ]/g, "")
-    .replace(/[ ​-‏‪-‮⁠﻿]/g, " ")
-    .replace(/^~+\s*/, "")
-    .toLowerCase()
-    .trim()
-    .replace(/\s+/g, " ");
-}
+// `normaliseName` MOVED to `lib/name-normalise.ts` (2026-09-07) and is
+// re-exported at the top of this file so every existing importer is
+// untouched. It is pure; this file is not (Prisma + the Anthropic SDK),
+// and `pasted-roster.ts` wanted the folding rule without the database.
+// Read that module's header for the failure that forced it.
 
 /** Deterministic backstop for the "Reserves: / Subs: / Standby:" block
  *  the LLM sometimes splits off or drops. Reads the message body
