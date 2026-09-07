@@ -318,10 +318,35 @@ export function decide(input: EngineInput): EngineResult {
         RECRUIT_COMMAND_IMPLIES_ADDRESSED &&
         senderIsAdmin &&
         facts.sideRequests.includes("recruit");
+      //
+      // …and the contract's SECOND deliberate widening, from 2026-09-07:
+      // an OWNER/ADMIN reporting another player OUT needs no tag either
+      // (`ADMIN_REPORTED_OUT_IS_TAG_FREE`, which carries the incident,
+      // the argument and the scope). It is passed INTO
+      // `actionRequiresTag` rather than OR-ed beside it, because it is a
+      // property of the verdict plus the seat and belongs with the rest
+      // of the policy — and because a second boolean beside the gate is
+      // how the recruit waiver leaked onto the bulk-DM path.
+      // `senderIsAdmin` is the ROSTER's answer, never the model's.
       const gate = toGateVerdict(claims, facts);
-      if (actionRequiresTag(gate) && !msg.tagged && !addressedByRecruit) {
+      const needsTag = actionRequiresTag(gate, { senderIsAdmin });
+      /** True only when the admin-OUT waiver is the thing carrying this
+       *  message: the gate says yes for anyone else and no for this
+       *  sender. Implies `senderIsAdmin` by construction. */
+      const waivedByAdminOut = !needsTag && actionRequiresTag(gate);
+      if (needsTag && !msg.tagged && !addressedByRecruit) {
         out.reasons.push("requires an @Match Time tag (interaction contract)");
         return;
+      }
+      if (waivedByAdminOut && !msg.tagged) {
+        // Name WHICH waiver let an untagged roster change through. The
+        // reason trail is the only place a wrong drop can be traced back
+        // to a policy rather than to a model, and there are now two
+        // waivers that can carry the same message.
+        out.reasons.push(
+          "untagged, but an admin may report another player OUT without one " +
+            "(ADMIN_REPORTED_OUT_IS_TAG_FREE)",
+        );
       }
       if (addressedByRecruit && !msg.tagged) {
         out.reasons.push(
@@ -1538,9 +1563,21 @@ export function parsePendingSet(lastBotPost: string | null): string[] {
  *
  * Two refusals, both narrow:
  *   1. the target is speaking in this same window and says the opposite;
- *   2. a non-admin drops someone else amid laughing emoji.
- * An admin's uncontested instruction is always honoured — that is the
- * control case, and losing it would be its own incident.
+ *   2. someone drops another player amid laughing emoji, without having
+ *      DELIBERATELY addressed MatchTime.
+ * A TAGGED admin's uncontested instruction is always honoured — that is
+ * the control case, and losing it would be its own incident.
+ *
+ * ⚠️ (2) MOVED ON 2026-09-07 AND THE MOVE IS LOAD-BEARING. It used to
+ * exempt every ADMIN, and that was safe only because an admin's
+ * third-party drop necessarily carried a tag — a tag is a deliberate
+ * act, and someone who typed one meant the drop however the sentence
+ * reads. `ADMIN_REPORTED_OUT_IS_TAG_FREE` removes that guarantee, so
+ * the exemption now hangs off THE TAG rather than off the seat.
+ * Otherwise "Shahrokh is out 😂 vote him out lads" from the owner —
+ * a sentence this group genuinely sends — would take his place off him.
+ * Non-admins are unaffected: they were refused with or without a tag
+ * before and they still are.
  */
 function banterRefusal(
   msg: EngineMessage,
@@ -1559,8 +1596,9 @@ function banterRefusal(
   if (contradicts) {
     return `${target.name} contradicts this in the same window; refusing the drop (corroboration)`;
   }
-  if (!senderIsAdmin && /😂|🤣|lol\b/i.test(msg.body)) {
-    return `banter markers in a non-admin drop of ${target.name}; refusing without corroboration`;
+  if (!(senderIsAdmin && msg.tagged) && /😂|🤣|lol\b/i.test(msg.body)) {
+    const who = senderIsAdmin ? "an untagged admin" : "a non-admin";
+    return `banter markers in ${who} drop of ${target.name}; refusing without corroboration`;
   }
   return null;
 }

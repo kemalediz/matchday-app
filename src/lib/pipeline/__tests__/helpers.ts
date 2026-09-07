@@ -66,6 +66,10 @@ const FULL_NAMES: Record<string, string> = {
   enayem: "Enayem Rashid",
   amir: "Amir Ahmadi",
   zeeshan: "Zeeshan Khan",
+  // One name, no surname — which is how he appears in the live group
+  // ("Shahrokh🐔 Sutton Football Club") and how the 2026-09-07 incident
+  // message refers to him.
+  shahrokh: "Shahrokh",
   ayoub: "Ayoub Benali",
   salman: "Salman Shelly",
   talha: "Talha Younis",

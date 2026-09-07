@@ -305,14 +305,28 @@ test.describe("third-party adds tag-free; drops/swaps still tagged", () => {
     expect(await grp.attendanceOf("greg"), "sender must not be auto-joined").toBeNull();
   });
 
-  test('untagged third-party DROP ("Pete can\'t make it") is SUPPRESSED (still needs a tag)', async ({
+  // ⚠️ SENDER CHANGED 2026-09-07, and the change is the point.
+  //
+  // This case used to be sent by `alice`, who is an ADMIN. It asserted
+  // that her untagged drop of Pete was suppressed, and that is no longer
+  // true: `ADMIN_REPORTED_OUT_IS_TAG_FREE` waives the tag for the
+  // OWNER/ADMIN seats, because on 2026-09-07 the owner posted
+  // "@Shahrokh🐔 Sutton Football Club is out due to unforeseen issue at
+  // work" and MatchTime did nothing while the squad read 13/14 with a
+  // player in it who was not coming.
+  //
+  // The RULE this case exists for is unchanged and is the reason the
+  // waiver is not for everybody: an ordinary member must not be able to
+  // remove a player by typing a sentence. So the sender is now `dan`, a
+  // PLAYER, and the admin's side of the same message is the test below.
+  test('untagged third-party DROP from a PLAYER ("Pete can\'t make it") is SUPPRESSED', async ({
     request,
     db,
   }) => {
     const grp = (await mkGroup(request, db)).attach(request);
     const before = await grp.confirmed();
     expect(before).toContain("Pete Power");
-    const r = await grp.post("alice", "Pete can't make it tonight", {
+    const r = await grp.post("dan", "Pete can't make it tonight", {
       route: "other_att",
       facts: otherFacts("Pete Power", "out"),
     });
@@ -322,6 +336,21 @@ test.describe("third-party adds tag-free; drops/swaps still tagged", () => {
     expect(r.reply).toBeNull();
     expect(await grp.confirmed()).toContain("Pete Power");
     expect(await grp.dropped()).not.toContain("Pete Power");
+  });
+
+  test("the SAME untagged drop from an ADMIN takes effect (2026-09-07)", async ({
+    request,
+    db,
+  }) => {
+    const grp = (await mkGroup(request, db)).attach(request);
+    expect(await grp.confirmed()).toContain("Dan Drummer");
+    const r = await grp.post("alice", "Dan can't make it tonight", {
+      route: "other_att",
+      facts: otherFacts("Dan Drummer", "out"),
+    });
+    expect(r.react).toBe("👍");
+    expect(await grp.dropped()).toContain("Dan Drummer");
+    expect(await grp.confirmed()).not.toContain("Dan Drummer");
   });
 
   test('TAGGED third-party add behaves exactly as before (still registers)', async ({
@@ -334,6 +363,56 @@ test.describe("third-party adds tag-free; drops/swaps still tagged", () => {
     const att = await attendanceByName(grp, "Rashad");
     expect(att, "Rashad must be registered when tagged too").not.toBeNull();
     expect(["CONFIRMED", "BENCH"]).toContain(att!.status);
+  });
+});
+
+// ── An admin's untagged drop goes down the ORDINARY apply path ───────
+//
+// The gate is the only thing `ADMIN_REPORTED_OUT_IS_TAG_FREE` moves, so
+// everything a drop normally triggers must still happen. The one that
+// matters to a real club is the bench-offer chain: dropping a confirmed
+// player frees a slot, and `attendance.ts:cancelAttendance` →
+// `requestBenchConfirmationOnDrop` offers it to the bench. A waived drop
+// that quietly skipped that would leave the club a player short with
+// somebody sitting on the bench waiting to be asked.
+test.describe("an admin's untagged drop still opens the bench offer", () => {
+  test("drop by an untagged ADMIN → slot freed AND offered to the bench", async ({
+    request,
+    db,
+  }) => {
+    const grp = (
+      await createGroup(request, db, {
+        maxPlayers: 5,
+        attendance: [
+          { key: "owner", status: "CONFIRMED" },
+          { key: "alice", status: "CONFIRMED" },
+          { key: "pete", status: "CONFIRMED" },
+          { key: "dan", status: "CONFIRMED" },
+          { key: "felix", status: "CONFIRMED" },
+          { key: "greg", status: "BENCH" },
+        ],
+      })
+    ).attach(request);
+
+    // No tag anywhere in this message. The "@" is on the PLAYER, exactly
+    // as in the 2026-09-07 incident wording.
+    const r = await grp.post("owner", "@Pete Power is out due to an issue at work", {
+      route: "other_att",
+      facts: otherFacts("Pete Power", "out"),
+    });
+
+    expect(r.react).toBe("👍");
+    expect(await grp.dropped()).toContain("Pete Power");
+    expect((await grp.counts()).confirmed).toBe(4);
+    // The whole point: the freed slot is offered, and to the bench.
+    const offers = await grp.openOffers();
+    expect(offers).toHaveLength(1);
+
+    // And the offer is claimable, so the chain really is the normal one.
+    const claim = await grp.dm("greg", "YES");
+    expect(claim.json.result).toBe("confirmed");
+    expect((await grp.attendanceOf("greg"))?.status).toBe("CONFIRMED");
+    expect(await grp.openOffers()).toHaveLength(0);
   });
 });
 

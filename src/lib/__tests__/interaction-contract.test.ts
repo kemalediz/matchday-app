@@ -18,6 +18,7 @@
  */
 import { describe, it, expect } from "vitest";
 import {
+  ADMIN_REPORTED_OUT_IS_TAG_FREE,
   messageTagsBot,
   actionRequiresTag,
   isSelfAttendanceVerdict,
@@ -254,6 +255,138 @@ describe("actionRequiresTag — the act-without-tag vs require-tag split", () =>
     expect(
       actionRequiresTag({ intent: "noise", registerAttendance: null, registerFor: null }),
     ).toBe(false);
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════
+// ADMIN_REPORTED_OUT_IS_TAG_FREE — the 2026-09-07 Shahrokh incident.
+//
+// The owner posted, in the live group, the day before the match:
+//
+//     "@Shahrokh🐔 Sutton Football Club is out due to unforeseen issue
+//      at work"
+//
+// Shahrokh was CONFIRMED at position 10 and MatchTime did nothing,
+// because the message carries a third-party OUT and no @Match Time tag.
+// The squad read 13/14 with a player in it who was not coming, and Kemal
+// corrected the row by hand.
+//
+// ⚠️ THE TRAP IN THE WORDING, because it confused everyone who looked at
+// it: that message DOES contain an "@" mention. It mentions the PLAYER.
+// "Tagged" in this codebase means THE BOT was mentioned
+// (`messageTagsBot`), and nothing in that sentence mentions the bot.
+// A player @-mention is not a tag and never has been.
+// ══════════════════════════════════════════════════════════════════════
+describe("actionRequiresTag — an ADMIN reporting another player OUT", () => {
+  const admin = { senderIsAdmin: true };
+  const player = { senderIsAdmin: false };
+
+  const dropShahrokh: GateVerdict = {
+    intent: "out",
+    registerAttendance: null,
+    registerFor: [{ name: "Shahrokh", action: "OUT" }],
+  };
+
+  it("THE INCIDENT: an admin's third-party OUT is tag-free", () => {
+    expect(actionRequiresTag(dropShahrokh, admin)).toBe(false);
+  });
+
+  it("the SAME verdict from a non-admin STILL requires a tag", () => {
+    // The reason the old rule existed, and it is unchanged for everyone
+    // outside the OWNER/ADMIN seats: otherwise anyone in the group
+    // removes a player by typing a sentence.
+    expect(actionRequiresTag(dropShahrokh, player)).toBe(true);
+  });
+
+  it("no options at all is treated as NOT an admin (fail closed)", () => {
+    expect(actionRequiresTag(dropShahrokh)).toBe(true);
+    expect(actionRequiresTag(dropShahrokh, {})).toBe(true);
+  });
+
+  it("an admin's SWAP (OUT + IN) is tag-free — both halves already are", () => {
+    // "Shahrokh is out, Amir can take his spot". The OUT half is waived
+    // by this rule and the IN half has been tag-free for EVERYONE since
+    // the third-party-add change, so the pair adds no capability neither
+    // half has on its own. Refusing it would lose the drop in the
+    // commonest real phrasing of the incident.
+    expect(
+      actionRequiresTag(
+        {
+          intent: "out",
+          registerAttendance: null,
+          registerFor: [
+            { name: "Shahrokh", action: "OUT" },
+            { name: "Amir", action: "IN" },
+          ],
+        },
+        admin,
+      ),
+    ).toBe(false);
+  });
+
+  it("a BENCH from an admin STILL requires a tag (the waiver is OUT-only)", () => {
+    expect(
+      actionRequiresTag(
+        {
+          intent: "out",
+          registerAttendance: null,
+          registerFor: [{ name: "Pete", action: "BENCH" }],
+        },
+        admin,
+      ),
+    ).toBe(true);
+  });
+
+  it("an admin's OUT mixed with a BENCH STILL requires a tag", () => {
+    expect(
+      actionRequiresTag(
+        {
+          intent: "out",
+          registerAttendance: null,
+          registerFor: [
+            { name: "Shahrokh", action: "OUT" },
+            { name: "Pete", action: "BENCH" },
+          ],
+        },
+        admin,
+      ),
+    ).toBe(true);
+  });
+
+  it("being an admin does NOT waive the tag on anything else", () => {
+    for (const intent of [
+      "question",
+      "generate_teams_request",
+      "show_teams_request",
+      "reminder_request",
+      "bulk_payment_credit",
+      "bring_guests_vague",
+    ]) {
+      expect(
+        actionRequiresTag({ intent, registerAttendance: null, registerFor: null }, admin),
+        `${intent} must still require a tag for an admin`,
+      ).toBe(true);
+    }
+  });
+
+  it("an admin's third-party IN is unchanged (already tag-free)", () => {
+    expect(
+      actionRequiresTag(
+        { intent: "in", registerAttendance: null, registerFor: [{ name: "Rashad", action: "IN" }] },
+        admin,
+      ),
+    ).toBe(false);
+  });
+
+  it("an admin's OWN out is unchanged (already tag-free)", () => {
+    expect(
+      actionRequiresTag({ intent: "out", registerAttendance: "OUT", registerFor: null }, admin),
+    ).toBe(false);
+  });
+
+  it("the constant is a boolean and is ON", () => {
+    expect(typeof ADMIN_REPORTED_OUT_IS_TAG_FREE).toBe("boolean");
+    expect(ADMIN_REPORTED_OUT_IS_TAG_FREE).toBe(true);
   });
 });
 
