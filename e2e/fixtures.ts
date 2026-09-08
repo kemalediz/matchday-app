@@ -85,6 +85,11 @@ export async function postAnalyze(
     authorName: string | null;
     /** Simulate an @Match Time tag (interaction-contract gate signal). */
     botMentioned?: boolean;
+    /** Raw WhatsApp mention JIDs, exactly as the Pi forwards them. */
+    mentions?: string[];
+    /** Per-JID display names the Pi's contact lookup produced. UNVERIFIED
+     *  — the route checks each against the org roster. */
+    mentionNames?: Array<{ jid: string; name: string }>;
   }>,
 ) {
   const res = await request.post("/api/whatsapp/analyze", {

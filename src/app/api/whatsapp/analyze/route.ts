@@ -241,6 +241,10 @@ import { messageTagsBot } from "@/lib/interaction-contract";
 import { mergeRecruitReply } from "@/lib/recruit-request";
 import { readBenchPromptAnswer } from "@/lib/bench-prompt-answer";
 import { decidePastedRosterRegistration } from "@/lib/pasted-roster-registration";
+import {
+  describeMentionOutcomes,
+  resolveMentionNames,
+} from "@/lib/pipeline/mention-names";
 
 interface InboundMessage {
   waMessageId: string;
@@ -251,6 +255,16 @@ interface InboundMessage {
   /** Raw WhatsApp mention JIDs (e.g. "447700900123@c.us", "…@lid"),
    *  forwarded UNCHANGED for the onboarding admin parser. */
   mentions?: string[];
+  /**
+   * The display name the Pi's contact lookup saw for each mentioned JID.
+   * UNVERIFIED — it is the mentioned person's own WhatsApp pushname, not
+   * the club's name for them, and it is a string that person controls.
+   * Used ONLY as a lookup key against the org roster by
+   * `nameMentionsFromRoster` below; it never becomes body text on its
+   * own. Absent from Pi builds before 2026-09-08 (which pasted the
+   * pushname into `body` themselves — see that function's header).
+   */
+  mentionNames?: Array<{ jid: string; name: string }>;
   /** Did this message @-mention the bot's own JID? Computed on the Pi
    *  (only it knows the bot's selfId) and forwarded as a structured
    *  signal. PRIMARY input to the @Match Time interaction-contract gate;
@@ -342,6 +356,13 @@ async function handleAnalyzeRequest(request: Request) {
   if (!org) {
     return NextResponse.json({ ok: true, ignored: "unknown-or-disabled-group", results: [] });
   }
+
+  // Name every @-mention the roster can vouch for BEFORE anything reads a
+  // body: the squad-from-list archive, the dedupe's empty-body check, the
+  // stats fast path, the router, the extractor and the `AnalyzedMessage`
+  // row then all see the SAME text. An unresolvable mention keeps its raw
+  // "@<digits>" token — nothing here invents a name.
+  body.messages = await nameMentionsFromRoster(org.id, body.messages);
 
   // ── Skip the LLM entirely when no message-driven feature is on ───
   //   MoM + player-rating are post-match / poll / scheduler driven —
@@ -2465,6 +2486,98 @@ function isRawDigitName(raw: string): boolean {
     .replace(/@?lid$/i, "")
     .replace(/[@\s+().-]/g, "");
   return /^\d{5,}$/.test(cleaned);
+}
+
+/**
+ * NAME EVERY @-MENTION THE ORG ROSTER CAN VOUCH FOR — and only those.
+ *
+ * ── WHY THIS MOVED HERE (prod, measured 2026-09-08) ─────────────────
+ *
+ * The Pi used to do it. It resolved each mentioned JID with
+ * `client.getContactById()` and pasted the contact's pushname straight
+ * into the body the analyzer reads. Two real messages from the live
+ * Sutton FC group, as the owner typed them versus as stored in
+ * `AnalyzedMessage.body`:
+ *
+ *   "@Shahrokh🐔 Sutton Football Club is out due to unforeseen issue at work"
+ *   → "@DÇ  is out due to unforeseen issue at work"
+ *
+ *   "@David David 67 and @~Najib out"
+ *   → "@割::::.̸̢̤̋̃̓̉͗̏̾̃̌̚͘̕.̵͆͂ and @Najib out"
+ *
+ * Both drops were silently lost, and the owner had been reporting for
+ * weeks that MatchTime could not understand his messages.
+ *
+ * ⚠️ NOTHING WAS CORRUPT AND NO WRONG CONTACT WAS RETURNED. That second
+ * string occurs 13 times in this org's `AnalyzedMessage.authorName` — it
+ * is David's OWN pushname, reported identically whenever David himself
+ * speaks, and `UserAlias["割::::.."] → David` was ALREADY in the
+ * database. WhatsApp renders a mention to each reader out of the
+ * READER's address book; the bot only ever sees the mentioned person's
+ * self-chosen profile name. When the two agree the substitution looks
+ * perfect — "@Mojib Jalali" and "@Najib" resolved correctly in the very
+ * same message — and when they do not, the model reads a name nobody in
+ * the club uses.
+ *
+ * The pushname is therefore (a) not an identity and (b) a string the
+ * mentioned person controls. The roster is neither of those things. So
+ * the Pi now forwards the raw "@<digits>" token plus the pushname as
+ * explicitly-untrusted `mentionNames`, and the naming happens HERE,
+ * against `Membership` and `UserAlias`. See
+ * `lib/pipeline/mention-names.ts` for the order of trust.
+ *
+ * Cost: at most two extra queries per batch, and only for a batch that
+ * actually carries an unresolved "@<digits>" token.
+ *
+ * Compatible in BOTH directions, which matters because the server ships
+ * on merge and the Pi is deployed by hand:
+ *   • OLD Pi → new server: the body arrives already substituted, so it
+ *     holds no "@<digits>" tokens and every replace is a no-op.
+ *   • NEW Pi → old server: `mentionNames` is an unread key and the raw
+ *     tokens reach the analyzer, which refuses them as people
+ *     (`pipeline/identity.ts`). Worse than the fix, better than a
+ *     fabricated name.
+ */
+async function nameMentionsFromRoster(
+  orgId: string,
+  messages: InboundMessage[],
+): Promise<InboundMessage[]> {
+  const RAW_TOKEN = /@\d{5,}/;
+  const relevant = messages.some(
+    (m) => (m?.mentions?.length ?? 0) > 0 && RAW_TOKEN.test(m?.body ?? ""),
+  );
+  if (!relevant) return messages;
+
+  const [members, aliases] = await Promise.all([
+    db.membership.findMany({
+      where: { orgId },
+      select: { user: { select: { id: true, name: true, phoneNumber: true } } },
+    }),
+    db.userAlias.findMany({ where: { orgId }, select: { alias: true, userId: true } }),
+  ]);
+  // Soft-removed members are INCLUDED. Naming someone correctly is not a
+  // write, and whether they may actually play is decided later by code
+  // that reads `leftAt` for itself.
+  const roster = members
+    .map((m) => m.user)
+    .filter((u) => !!u?.name)
+    .map((u) => ({ userId: u.id, name: u.name as string, phone: u.phoneNumber }));
+
+  return messages.map((m) => {
+    if (!m?.mentions?.length || !RAW_TOKEN.test(m.body ?? "")) return m;
+    const { body, outcomes } = resolveMentionNames({
+      body: m.body,
+      mentions: m.mentions,
+      mentionNames: m.mentionNames,
+      roster,
+      aliases,
+    });
+    const described = describeMentionOutcomes(outcomes);
+    // One line per message that carried a mention. A run of "LEFT RAW"
+    // is the signal that a player's pushname needs a `UserAlias`.
+    if (described) console.log(`[analyze] mentions ${m.waMessageId}: ${described}`);
+    return body === m.body ? m : { ...m, body };
+  });
 }
 
 async function resolveSender(orgId: string, msg: InboundMessage): Promise<ResolvedSender> {

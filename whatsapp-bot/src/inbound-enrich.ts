@@ -14,8 +14,15 @@
  * must be allowed to fail loudly and degrade, never to abort the pipeline.
  */
 
+import type { MentionName } from "./mentions.js";
+
 export interface InboundEnrichment {
-  /** Mention-resolved message body. Falls back to the raw body. */
+  /**
+   * The message body with the BOT's own @-mention rewritten to
+   * "@Match Time". Every other mention keeps its raw "@<digits>" token —
+   * see `mentions.ts` for why the Pi no longer names players. Falls back
+   * to the raw body.
+   */
   body: string;
   /** WhatsApp pushname / contact name, or null when it couldn't be resolved. */
   authorName: string | null;
@@ -31,6 +38,15 @@ export interface InboundEnrichment {
   authorPhone: string;
   /** Was the bot itself @-mentioned? */
   botMentioned: boolean;
+  /**
+   * Display names the contact lookup gave for the OTHER mentions, keyed
+   * by JID. UNVERIFIED — forwarded as structured data for the server to
+   * check against the org roster, and never pasted into `body` here.
+   *
+   * Empty on the degraded path: an @-mention we could not look up gets
+   * no name at all, which is the honest answer.
+   */
+  mentionNames: MentionName[];
 }
 
 /**
@@ -69,6 +85,7 @@ export async function enrichOrDegrade(
         : null,
     authorPhone: typeof fallback?.authorPhone === "string" ? fallback.authorPhone : "",
     botMentioned: fallback?.botMentioned === true,
+    mentionNames: Array.isArray(fallback?.mentionNames) ? fallback.mentionNames : [],
   };
   try {
     const e = await enrich();
@@ -83,6 +100,10 @@ export async function enrichOrDegrade(
           ? e.authorPhone
           : base.authorPhone,
       botMentioned: e?.botMentioned === true || base.botMentioned,
+      // Not merged with the fallback: the fallback has no mention names
+      // (they only exist behind a contact lookup), so an empty enrichment
+      // result and an empty fallback mean the same thing — no names.
+      mentionNames: Array.isArray(e?.mentionNames) ? e.mentionNames : base.mentionNames,
     };
   } catch (err) {
     try {
