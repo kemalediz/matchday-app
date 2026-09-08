@@ -240,6 +240,12 @@ import { selectRegistrationMatch } from "@/lib/registration-match-select";
 import { messageTagsBot } from "@/lib/interaction-contract";
 import { mergeRecruitReply } from "@/lib/recruit-request";
 import { readBenchPromptAnswer } from "@/lib/bench-prompt-answer";
+import {
+  decideSwap,
+  parseSwapNames,
+  resolveSwapSide,
+  type SwapCandidate,
+} from "@/lib/team-slot-swap";
 import { decidePastedRosterRegistration } from "@/lib/pasted-roster-registration";
 import {
   describeMentionOutcomes,
@@ -902,14 +908,55 @@ async function handleAnalyzeRequest(request: Request) {
       });
       continue;
     }
-    // "swap A with B" between two CONFIRMED players is a TEAM swap,
-    // never a drop. This guard exists because the mega-prompt had a
-    // forceful "swap X with Y = X OUT" rule that wrongly dropped Elvin
-    // on 2026-05-19. The prompt is gone, so the rule that misfired is
-    // gone — but the FEATURE is not, and it is the reason this stays:
-    // "swap Mustafa and Idris" is a team change the group asks for
-    // every few weeks (5 in the last 90 days), and it is a `TeamAssignment`
-    // move that no attendance extractor models.
+    // "swap A with B" is a TEAM-SHEET edit, never a drop. This guard
+    // exists because the mega-prompt had a forceful "swap X with Y =
+    // X OUT" rule that wrongly dropped Elvin on 2026-05-19. The prompt
+    // is gone, so the rule that misfired is gone — but the FEATURE is
+    // not, and it is the reason this stays: "swap Mustafa and Idris" is
+    // a team change the group asks for every few weeks (5 in the last
+    // 90 days), and it is a `TeamAssignment` move that no attendance
+    // extractor models.
+    //
+    // ⚠️ WIDENED 2026-09-08 — THE PEEL NOW SWALLOWS MORE. WHAT, AND
+    //    WHAT THOSE MESSAGES LOSE:
+    //
+    // It used to own a swap only when BOTH named players were
+    // CONFIRMED. It now also owns the REPLACEMENT — one side CONFIRMED
+    // holding no slot, the other holding a slot but NOT CONFIRMED —
+    // because that is the state the Elvin/Raihan message was in and
+    // declining it left a stale team sheet on a match night.
+    //
+    // The widening is one DATABASE STATE, not one message shape. The
+    // sentence matched is byte-identical, and the PARSE actually got
+    // stricter: `parseSwapNames` can no longer backtrack inside a word,
+    // so "no swap needed" (which used to yield `need` + `ed` and was
+    // saved only by neither half resolving) now matches nothing at all.
+    //
+    // WHAT A MESSAGE IN THAT NEW STATE LOSES BY BEING PEELED: every
+    // OTHER clause in it. A peel is terminal — the id goes into
+    // `statsRequestIds` and the one splice below removes the message
+    // from `fresh` — so "@Match Time swap Elvin with Raihan, and I'm
+    // out" now applies the slot move and drops the sender's own OUT on
+    // the floor. That exposure is NOT new (it is the hazard already
+    // flagged on the colour peel, and the both-CONFIRMED swap has
+    // always carried it); what is new is the set of DB states in which
+    // this peel fires, so the same hazard reaches a few more real
+    // messages. Accepted, because these two peels are the only things
+    // in this file that model a `TeamAssignment` move at all, and a
+    // dropped self-OUT is recoverable in one message where a team sheet
+    // naming a man who has gone home is not.
+    //
+    // AND THE ALTERNATIVE IS MEASURED, not assumed: before this change
+    // a replacement-shaped swap fell through to the router, reached
+    // `balancer`, and `team-ops-engine-batch.ts` handed `swap` back —
+    // SILENCE plus one operator note. That is exactly what the owner
+    // got at 16:47 on 2026-09-08. Nothing useful is being taken from
+    // the pipeline; the pipeline had nothing to give this shape.
+    //
+    // EVERY REFUSAL STILL FALLS THROUGH. `handleTeamSwapIfApplicable`
+    // returns null for all five refusal reasons in `team-slot-swap.ts`,
+    // so an ambiguous state reaches the router and the owners exactly
+    // as it does today, and the peel owns no message it cannot act on.
     const swapResult = await handleTeamSwapIfApplicable(org.id, m.body);
     if (swapResult) {
       statsRequestIds.add(m.waMessageId);
@@ -3199,17 +3246,37 @@ async function handleOnboardingIfApplicable(
 }
 
 /**
- * SEATBELT (2026-05-19): "swap A with B" / "switch A and B" where
- * BOTH are currently CONFIRMED is a TEAM swap — never a drop. We
- * resolve it deterministically from DB state and bypass the LLM
- * verdict so the "swap = X OUT" prompt rule can't fire.
+ * SEATBELT (2026-05-19, WIDENED 2026-09-08): "swap A with B" /
+ * "switch A and B" is a TEAM-SHEET edit, never a drop. It is resolved
+ * deterministically from database state, on the RAW BODY, with no model
+ * anywhere in the path.
+ *
+ * TWO SHAPES ARE OWNED. `lib/team-slot-swap.ts` holds the whole rule,
+ * the 8x8 state matrix behind it, and the argument for every refusal:
+ *
+ *   both CONFIRMED           → they exchange sides. The 2026-05-19
+ *                              seatbelt, unchanged, including its
+ *                              defensive one-sided case.
+ *   one CONFIRMED holding no
+ *   slot, the other holding a
+ *   slot but NOT CONFIRMED   → the slot MOVES. NEW (2026-09-08): the
+ *                              Elvin/Raihan replacement, where a
+ *                              DROPPED player's stale RED slot had to
+ *                              follow the body of the man who replaced
+ *                              him, and the shipped both-CONFIRMED rule
+ *                              declined the message entirely.
  *
  * Returns:
- *   { reply, logReason }  → handled (caller skips executeVerdict)
- *   null                  → not a both-confirmed swap; let normal
- *                           flow handle it (a genuine replacement
- *                           where one side isn't playing is still a
- *                           legit attendance swap).
+ *   { reply, logReason }  → handled (the caller peels the message)
+ *   null                  → not a shape this owns; the ordinary flow
+ *                           decides it, exactly as before. EVERY
+ *                           refusal comes back this way on purpose:
+ *                           owning a message peels it out of the batch,
+ *                           and a refusal that owned it would delete
+ *                           every other clause in the same message.
+ *
+ * It writes `TeamAssignment` and nothing else: never attendance, never
+ * the balancer.
  */
 /**
  * ── `looksLikeConditionalDrop` IS DELETED (§10 step 8) ───────────────
@@ -3232,19 +3299,8 @@ async function handleTeamSwapIfApplicable(
   orgId: string,
   rawBody: string,
 ): Promise<{ reply: string; logReason: string } | null> {
-  const body = (rawBody || "").trim();
-  // "swap A with B", "swap A and B", "switch A B", "swap A for B",
-  // "swap A & B", "swap A, B". Names = letter runs (first names).
-  const m = body.match(
-    /\b(?:swap|switch)\s+([\p{L}'-]{2,})\s*(?:with|and|for|&|,|<->|>|\/)?\s*([\p{L}'-]{2,})/iu,
-  );
-  if (!m) return null;
-  const n1 = m[1].toLowerCase();
-  const n2 = m[2].toLowerCase();
-  if (n1 === n2) return null;
-  // Ignore obvious non-name tokens.
-  const STOP = new Set(["the", "them", "him", "her", "with", "and", "for", "team", "teams", "side", "sides", "please", "pls"]);
-  if (STOP.has(n1) || STOP.has(n2)) return null;
+  const names = parseSwapNames(rawBody);
+  if (!names) return null;
 
   const match = await db.match.findFirst({
     where: {
@@ -3259,77 +3315,135 @@ async function handleTeamSwapIfApplicable(
           org: { select: { teamLabels: true } },
         },
       },
-      attendances: {
-        where: { status: "CONFIRMED" },
-        include: { user: { select: { id: true, name: true } } },
-      },
-      teamAssignments: true,
+      // EVERY attendance row, not only the CONFIRMED ones. The shipped
+      // query filtered to CONFIRMED, which is the whole reason a DROPPED
+      // Elvin could not be FOUND on 2026-09-08, let alone acted on.
+      // Widening the query does not widen who a name resolves to:
+      // `resolveSwapSide` still gives a unique CONFIRMED match outright
+      // priority, so every name that resolved before resolves to the
+      // same person.
+      attendances: { include: { user: { select: { id: true, name: true } } } },
+      teamAssignments: { include: { user: { select: { id: true, name: true } } } },
     },
   });
   if (!match) return null;
 
-  const norm = (s: string) =>
-    s.trim().toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "");
-  const find = (q: string) => {
-    const qq = norm(q);
-    const cands = match.attendances.filter((a) => {
-      if (!a.user.name) return false;
-      const nm = norm(a.user.name);
-      const first = nm.split(/\s+/)[0] ?? "";
-      return nm === qq || first === qq || nm.startsWith(qq) || first.startsWith(qq);
+  const teamOf = new Map(match.teamAssignments.map((t) => [t.userId, t.team]));
+  const roster: SwapCandidate[] = [];
+  for (const a of match.attendances) {
+    if (!a.user.name) continue;
+    roster.push({
+      userId: a.user.id,
+      name: a.user.name,
+      status: a.status,
+      team: teamOf.get(a.user.id) ?? null,
     });
-    return cands.length === 1 ? cands[0] : null;
-  };
-  const A = find(n1);
-  const B = find(n2);
-  // Both must resolve uniquely AND both be CONFIRMED for this to be a
-  // TEAM swap. Otherwise it's not our case (could be a genuine
-  // replacement, or ambiguous) — fall through to normal handling.
-  if (!A || !B || A.user.id === B.user.id) return null;
+  }
+  // Anyone holding a slot with NO attendance row at all. The generator
+  // cannot produce that state (it builds from CONFIRMED rows only), but
+  // a hand-edited or half-cleaned sheet can be left in it, and such a
+  // player is exactly the stale occupant a replacement needs to
+  // displace. They enter the pool as `NONE`.
+  const seen = new Set(roster.map((r) => r.userId));
+  for (const t of match.teamAssignments) {
+    if (seen.has(t.userId) || !t.user.name) continue;
+    roster.push({ userId: t.userId, name: t.user.name, status: "NONE", team: t.team });
+  }
+
+  const A = resolveSwapSide(names.a, roster);
+  const B = resolveSwapSide(names.b, roster);
+  if (!A || !B) return null;
+
+  const decision = decideSwap(A, B);
+
+  // A REFUSAL IS A FALL-THROUGH, NEVER AN OWNED MESSAGE. This is the
+  // same `null` the shipped handler returned for everything that was
+  // not a both-CONFIRMED pair, so the set of messages the peel swallows
+  // grows by exactly one shape (the replacement transfer) and by
+  // nothing else. `lib/team-slot-swap.ts` names each refusal and argues
+  // it; none of them is safe to ANSWER, because answering peels the
+  // message out of `fresh` and deletes every other clause in it.
+  if (decision.kind === "refuse") return null;
 
   const labels = resolveTeamLabels(match, match.activity.org, match.activity.sport);
-  const taA = match.teamAssignments.find((t) => t.userId === A.user.id);
-  const taB = match.teamAssignments.find((t) => t.userId === B.user.id);
+  const sheet = async () => {
+    const rows = await db.teamAssignment.findMany({
+      where: { matchId: match.id },
+      include: { user: { select: { name: true } } },
+    });
+    const red = rows.filter((t) => t.team === "RED").map((t) => t.user.name);
+    const yel = rows.filter((t) => t.team === "YELLOW").map((t) => t.user.name);
+    return (
+      `*${labels[0]}*\n${red.map((n, i) => `${i + 1}. ${n}`).join("\n")}\n\n` +
+      `*${labels[1]}*\n${yel.map((n, i) => `${i + 1}. ${n}`).join("\n")}`
+    );
+  };
 
-  if (!taA && !taB) {
+  if (decision.kind === "defer-no-teams") {
     // Teams not generated yet — nothing to swap, but make ABSOLUTELY
-    // sure nobody is dropped. Acknowledge + defer.
+    // sure nobody is dropped. Acknowledge + defer. Unchanged wording.
     return {
       reply:
-        `Both *${A.user.name}* and *${B.user.name}* are already in — nobody's dropped. ` +
+        `Both *${A.name}* and *${B.name}* are already in — nobody's dropped. ` +
         `Teams aren't generated yet; say *generate teams* and I'll build them (then I can put them on opposite sides).`,
-      logReason: `team-swap deferred (no teams yet): ${A.user.name} <-> ${B.user.name}`,
+      logReason: `team-swap deferred (no teams yet): ${A.name} <-> ${B.name}`,
     };
   }
 
-  // Swap their team sides (handle the one-sided edge defensively).
-  const teamA = taA?.team ?? (taB?.team === "RED" ? "YELLOW" : "RED");
-  const teamB = taB?.team ?? (taA?.team === "RED" ? "YELLOW" : "RED");
+  if (decision.kind === "team-swap") {
+    await db.$transaction([
+      db.teamAssignment.upsert({
+        where: { matchId_userId: { matchId: match.id, userId: decision.a.userId } },
+        create: { matchId: match.id, userId: decision.a.userId, team: decision.teamForA },
+        update: { team: decision.teamForA },
+      }),
+      db.teamAssignment.upsert({
+        where: { matchId_userId: { matchId: match.id, userId: decision.b.userId } },
+        create: { matchId: match.id, userId: decision.b.userId, team: decision.teamForB },
+        update: { team: decision.teamForB },
+      }),
+    ]);
+    return {
+      reply:
+        `🔁 Swapped *${decision.a.name}* and *${decision.b.name}* — nobody dropped. Updated teams:\n\n` +
+        (await sheet()),
+      logReason: `team-swap applied: ${decision.a.name} <-> ${decision.b.name}`,
+    };
+  }
+
+  // ── THE REPLACEMENT TRANSFER ───────────────────────────────────────
+  //
+  // One `TeamAssignment` row moves from a player who is not coming to a
+  // player who is. Same transaction shape as the bench-promote path in
+  // `lib/bench-confirmation.ts:129-138`, which has done exactly this
+  // slot transfer since the bench redesign: DELETE the donor's row and
+  // UPSERT the receiver's, atomically, so the sheet is never briefly a
+  // player short nor briefly holding two people in one seat.
+  //
+  // NO ATTENDANCE WRITE. Elvin stays DROPPED, Raihan stays CONFIRMED;
+  // the only thing that was ever wrong was which of them the team sheet
+  // named. And NO BALANCER: the message that caused this said "do not
+  // regenerate the teams" in as many words, and re-running it over a
+  // hand-made line-up on match night is 2026-06-18 (`c408649`).
   await db.$transaction([
-    db.teamAssignment.upsert({
-      where: { matchId_userId: { matchId: match.id, userId: A.user.id } },
-      create: { matchId: match.id, userId: A.user.id, team: teamB },
-      update: { team: teamB },
+    db.teamAssignment.delete({
+      where: { matchId_userId: { matchId: match.id, userId: decision.from.userId } },
     }),
     db.teamAssignment.upsert({
-      where: { matchId_userId: { matchId: match.id, userId: B.user.id } },
-      create: { matchId: match.id, userId: B.user.id, team: teamA },
-      update: { team: teamA },
+      where: { matchId_userId: { matchId: match.id, userId: decision.to.userId } },
+      create: { matchId: match.id, userId: decision.to.userId, team: decision.team },
+      update: { team: decision.team },
     }),
   ]);
-
-  const fresh = await db.teamAssignment.findMany({
-    where: { matchId: match.id },
-    include: { user: { select: { name: true } } },
-  });
-  const red = fresh.filter((t) => t.team === "RED").map((t) => t.user.name);
-  const yel = fresh.filter((t) => t.team === "YELLOW").map((t) => t.user.name);
+  const movedTo = decision.team === "RED" ? labels[0] : labels[1];
   return {
     reply:
-      `🔁 Swapped *${A.user.name}* and *${B.user.name}* — nobody dropped. Updated teams:\n\n` +
-      `*${labels[0]}*\n${red.map((n, i) => `${i + 1}. ${n}`).join("\n")}\n\n` +
-      `*${labels[1]}*\n${yel.map((n, i) => `${i + 1}. ${n}`).join("\n")}`,
-    logReason: `team-swap applied: ${A.user.name} <-> ${B.user.name}`,
+      `🔁 *${decision.to.name}* takes *${decision.from.name}*'s place on *${movedTo}* — ` +
+      `same teams otherwise, nothing regenerated, nobody's attendance changed. Updated teams:\n\n` +
+      (await sheet()),
+    logReason:
+      `team-slot-transfer applied: ${decision.from.name} (${decision.from.status}) ` +
+      `-> ${decision.to.name} on ${decision.team}`,
   };
 }
 

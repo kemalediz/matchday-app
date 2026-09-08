@@ -58,6 +58,28 @@
  *     deterministic pre-peel that runs on the RAW BODY with no verdict
  *     at all, so it survives the mega-prompt's deletion untouched.
  *     Owning `swap` here would put two deciders on one message.
+ *
+ *     ⚠️ 2026-09-08 RE-EXAMINED AND UPHELD, after this hand-back was
+ *     the visible symptom of a real incident. "@Match Time do not
+ *     regenerate the teams. Instead swap Elvin with Raihan and share us
+ *     the teams" produced the operator note
+ *     `team action "swap" is not a read (no module owns it)` and a
+ *     stale team sheet on a match night. The note was accurate and this
+ *     module was not the bug: the pre-peel had ALREADY matched the
+ *     sentence and then declined it on its own rule ("both must be
+ *     CONFIRMED"), and Elvin was DROPPED. The fix belongs where the
+ *     decision was made, so `lib/team-slot-swap.ts` now carries the
+ *     full state matrix and the pre-peel also owns the REPLACEMENT
+ *     case: a stale slot moves from a player who is not coming to a
+ *     confirmed player who has none.
+ *
+ *     Giving `balancer` a `swap` owner here was considered and
+ *     REFUSED, for the reason above and one more: this path's only
+ *     apply layer re-runs the balancer, and re-running the balancer is
+ *     the precise thing the message asked it not to do. A `swap` owner
+ *     here would need a second, non-generating apply layer — a
+ *     `TeamAssignment` mover that ignores the extractor's team facts —
+ *     which is the pre-peel, written twice.
  *   • `rename` — IT IS NOT A GENERATE. §10 step 8's brief allowed
  *     mapping it onto generate-with-`teamNames`, and it is refused:
  *     re-running the balancer over line-ups an admin has hand-swapped is
