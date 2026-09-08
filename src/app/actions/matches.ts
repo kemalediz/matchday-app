@@ -9,6 +9,10 @@ import { revalidatePath } from "next/cache";
 import { sendRatingEmails } from "@/lib/email";
 import { format } from "date-fns";
 import { computeEloDeltas } from "@/lib/elo";
+import {
+  planFormatSwitchSchedule,
+  renderKickoffMoveLine,
+} from "@/lib/format-switch-time";
 
 /**
  * Switch a match's format by swapping its `activityId` to another activity
@@ -18,6 +22,14 @@ import { computeEloDeltas } from "@/lib/elo";
  *
  * Attendance is re-evaluated: the first `newMaxPlayers` confirmed stay
  * CONFIRMED, anything beyond moves to BENCH. DROPPED stays DROPPED.
+ *
+ * The KICKOFF moves too. Each format is its own Activity with its own
+ * London wall-clock `time` (Sutton prod: 7-a-side 21:30, 5-a-side 21:15),
+ * and until 2026-09-08 this action left `Match.date` on the old format's
+ * time — so every downstream post stated the wrong kickoff until an admin
+ * noticed. `planFormatSwitchSchedule` owns that arithmetic, including
+ * when NOT to move (same-time formats, and a kickoff an admin set
+ * deliberately). See src/lib/format-switch-time.ts.
  */
 export async function switchMatchFormat(matchId: string, newActivityId: string) {
   const session = await auth();
@@ -47,11 +59,27 @@ export async function switchMatchFormat(matchId: string, newActivityId: string) 
 
   const newMaxPlayers = newActivity.sport.playersPerTeam * 2;
 
+  // Kickoff + deadline. When the plan says "don't move", the update must
+  // carry NEITHER key — a no-op has to be a no-op, not a rewrite with
+  // identical values.
+  const schedule = planFormatSwitchSchedule({
+    currentKickoff: match.date,
+    currentActivityTime: match.activity.time,
+    newActivityTime: newActivity.time,
+    newDeadlineHours: newActivity.deadlineHours,
+  });
+
   await db.match.update({
     where: { id: matchId },
     data: {
       activityId: newActivity.id,
       maxPlayers: newMaxPlayers,
+      ...(schedule.move
+        ? {
+            date: schedule.kickoff,
+            attendanceDeadline: schedule.attendanceDeadline,
+          }
+        : {}),
     },
   });
 
@@ -117,14 +145,18 @@ export async function switchMatchFormat(matchId: string, newActivityId: string) 
     ? "\n\n*Bench:*\n" +
       benchList.map((a, i) => `${i + 1}. ${a.user.name ?? "?"}`).join("\n")
     : "";
+  // The incident was the group being told the wrong kickoff, so when the
+  // switch moves it, say so in the same message. Empty when it didn't.
+  const kickoffLine = renderKickoffMoveLine(schedule);
 
   await db.botJob.create({
     data: {
       orgId: match.activity.orgId,
       kind: "group",
       text:
-        `🔁 *Match switched* — now *${newActivity.sport.name}* (${newMaxPlayers} players).\n\n` +
-        `*Playing (${fresh.length}/${newMaxPlayers}):*\n${playerLines || "_nobody yet_"}` +
+        `🔁 *Match switched* — now *${newActivity.sport.name}* (${newMaxPlayers} players).\n` +
+        (kickoffLine ? `${kickoffLine}\n` : "") +
+        `\n*Playing (${fresh.length}/${newMaxPlayers}):*\n${playerLines || "_nobody yet_"}` +
         benchLines,
     },
   });
