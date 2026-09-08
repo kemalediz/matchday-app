@@ -97,14 +97,68 @@ describe("parseCorpus", () => {
     expect(() => parseCorpus(line({ ...good, expect: {} }))).toThrow(/asserts nothing/i);
   });
 
-  it("rejects a case that carries a stub verdict but no stubKind", () => {
-    const bad = { ...good, messages: [{ from: "najib", body: "In", stub: { intent: "in" } }] };
+  it("rejects a case that carries routes but no stubKind", () => {
+    const bad = { ...good, messages: [{ from: "najib", body: "In", route: "self_att" }] };
+    delete (bad as Record<string, unknown>).liveOnlyReason;
     expect(() => parseCorpus(line(bad))).toThrow(/stubKind/);
   });
 
-  it("a case with no stub verdicts must say WHY it cannot be stubbed", () => {
-    // A live-only case never runs in CI. "46 cases" must not be allowed
-    // to imply "46 cases in CI", so the exemption is argued case by
+  it("rejects the DELETED verdict seam by name, rather than ignoring it", () => {
+    // A case ported carelessly from the pre-step-8 format would
+    // otherwise load as live-only and quietly stop covering anything.
+    const bad = { ...good, messages: [{ from: "najib", body: "In", stub: { intent: "in" } }] };
+    expect(() => parseCorpus(line(bad))).toThrow(/VERDICT seam/);
+  });
+
+  it("rejects both old stubKind spellings, and an unknown route", () => {
+    const routed = (over: Record<string, unknown>) => ({
+      ...good,
+      liveOnlyReason: undefined,
+      messages: [{ from: "najib", body: "In", route: "self_att" }],
+      ...over,
+    });
+    expect(() => parseCorpus(line(routed({ stubKind: "corrected" })))).toThrow(/transcribed/);
+    expect(() => parseCorpus(line(routed({ stubKind: "historical" })))).toThrow(/transcribed/);
+    expect(() =>
+      parseCorpus(
+        line({
+          ...good,
+          liveOnlyReason: undefined,
+          stubKind: "transcribed",
+          messages: [{ from: "najib", body: "In", route: "attendance" }],
+        }),
+      ),
+    ).toThrow(/route/);
+  });
+
+  it("rejects facts with no route to say which extractor they belong to", () => {
+    const bad = {
+      ...good,
+      messages: [{ from: "najib", body: "In", facts: { claims: [] } }],
+    };
+    expect(() => parseCorpus(line(bad))).toThrow(/route/);
+  });
+
+  it("accepts a transcribed case and refuses a liveOnlyReason on it", () => {
+    const ok = {
+      ...good,
+      liveOnlyReason: undefined,
+      stubKind: "transcribed",
+      messages: [
+        { from: "najib", body: "In", route: "self_att", facts: { claims: [{ polarity: "in" }] } },
+      ],
+    };
+    const [c] = parseCorpus(line(ok));
+    expect(c.stubKind).toBe("transcribed");
+    expect(c.messages[0].route).toBe("self_att");
+    expect(() =>
+      parseCorpus(line({ ...ok, liveOnlyReason: "cannot have both" })),
+    ).toThrow(/liveOnlyReason/);
+  });
+
+  it("a case with no route must say WHY it cannot be stubbed", () => {
+    // A live-only case never runs in CI. "61 cases" must not be allowed
+    // to imply "61 cases in CI", so the exemption is argued case by
     // case rather than left as a silent default.
     const noReason: Record<string, unknown> = { ...good };
     delete noReason.liveOnlyReason;
@@ -113,6 +167,24 @@ describe("parseCorpus", () => {
     const [c] = parseCorpus(line(good));
     expect(c.stubKind).toBeUndefined();
     expect(c.liveOnlyReason).toBeTruthy();
+  });
+
+  it("an adjudication must carry a verdict, an ISO date and a real sentence", () => {
+    const adj = (a: unknown) => line({ ...good, adjudication: a });
+    expect(() => parseCorpus(adj({ verdict: "maybe", date: "2026-09-08", reason: "x".repeat(30) })))
+      .toThrow(/verdict/);
+    expect(() => parseCorpus(adj({ verdict: "new_right", date: "yesterday", reason: "x".repeat(30) })))
+      .toThrow(/date/);
+    expect(() => parseCorpus(adj({ verdict: "new_right", date: "2026-09-08", reason: "too short" })))
+      .toThrow(/reason/);
+    const [c] = parseCorpus(
+      adj({
+        verdict: "harness",
+        date: "2026-09-08",
+        reason: "the seam it ran through had been deleted; restoring it restores the case",
+      }),
+    );
+    expect(c.adjudication?.verdict).toBe("harness");
   });
 
   it("never mistakes a phone-shaped string in a message for real contact data", () => {

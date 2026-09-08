@@ -1,68 +1,59 @@
 /**
  * INCIDENT CORPUS — stubbed replay (deterministic, runs in CI).
  *
- * Replays every corpus case that carries stub verdicts through the real
- * `/api/whatsapp/analyze` route with the LLM seam stubbed, and grades
- * the DATABASE and what MatchTime said against the known-correct
- * outcome recorded in `e2e/corpus/incidents.jsonl`.
+ * Replays every corpus case that carries a ROUTE through the real
+ * `/api/whatsapp/analyze` route with the router and extractor seams
+ * stubbed, and grades the DATABASE and what MatchTime said against the
+ * known-correct outcome recorded in `e2e/corpus/incidents.jsonl`.
  *
- * Two kinds of stubbed case, declared per case as `stubKind`:
- *   historical — the verdict the model ACTUALLY emitted during the
- *                incident. Asks: does today's SERVER catch it?
- *   corrected  — what a correct model emits. Asks: does the server
- *                execute a correct verdict correctly?
+ * A stub says what the ROUTER answered and what the EXTRACTOR found —
+ * both properties of the message text. It never says what to do. Every
+ * case therefore pins a DECISION the shipped code makes: capacity, the
+ * interaction contract, authorisation, tense, contingency, the
+ * confidence floor, the bench, the batch-final squad post.
  *
  * ═══════════════════════════════════════════════════════════════════════
- * ⚠️ THIS SPEC IS THE ONE FAILING TEST IN THE SUITE, ON PURPOSE
+ * WHAT THE NUMBERS MEAN, AND THE ONE THAT WAS WRONG
  * ═══════════════════════════════════════════════════════════════════════
  *
- * MEASURED 2026-09-06, after every other spec was ported off the verdict
- * seam: **10 of 36 stubbed cases green, 24 recorded passes gone.** The
- * scoreboard says `spurious_write 8 · wrong_write 3 · missed_write 10 ·
- * speech 5`, and the missed-write rate is 27.8% against §10 step 3's
- * go/no-go target of 2%.
+ * MEASURED 2026-09-08: 35 of 35 stubbed cases pass, and 32 of the 35 fail
+ * when the seam stops forwarding (measured by disabling the two lines in
+ * `current-analyzer-pipeline.ts` that forward `route` and `facts`). The
+ * three survivors are S2b and S21b, whose recorded outcome IS silence,
+ * and S26, whose write comes from `reconcilePastedRoster` above the
+ * router. 26 of the 35 change the database; 33 make MatchTime speak.
  *
- * WHY, IN ONE SENTENCE: every case's `stub` block is a
- * `CorpusStubVerdict`, `verdict:` is deleted, and
- * `current-analyzer-pipeline.ts` therefore forwards NOTHING — so all 36
- * run against a server that routes nothing and says nothing.
+ * WHAT THIS REPLACED. For two days every case carried a
+ * `CorpusStubVerdict` and nothing was left that reads a verdict, so all
+ * 36 ran against a server that routed nothing and said nothing: 10 of 36
+ * "green", most of them expecting nothing to happen and getting it for
+ * the wrong reason.
  *
- * ⚠️ AND THE TEN THAT STILL "PASS" ARE MOSTLY VACUOUS. Their expectation
- * is that nothing happens, and a silent bot satisfies it for the wrong
- * reason. S3 (past tense never registers), S11 (a conditional drop
- * holds), S29 (banter drop refused) and S12b (a chase nudge is not a
- * drop) are all in that set: they are green because nobody decided
- * anything, not because the right decision was made. Do not read
- * "10/36" as ten cases of live coverage.
- *
- * (The eight SPURIOUS writes are not silence. They come from the
- * deterministic fast paths above the engine — `reconcilePastedRoster`
- * and the bench-prompt reader — which still act on messages nobody
- * routed. Worth its own look.)
- *
- * WHAT IT WOULD TAKE, and why it is not a mechanical port:
- * `current-analyzer-pipeline.ts`'s header has the argument in full. In
- * short, 25 of the 36 are `stubKind: "corrected"` and port directly
- * (write the facts the text carries), but 11 are `historical` — "the
- * verdict the model ACTUALLY EMITTED during the incident" — and there is
- * no historical router or extractor output to port, because neither
- * existed on the day. Every honest option changes what the corpus
- * asserts, which is a decision about its contract and not a test
- * migration. `README.md` says three times not to weaken a corpus
- * expectation to make a suite green, so this is left RED rather than
- * re-baselined, skipped, or filled with invented history.
+ * ⚠️ THE `spurious_write 8` IN THAT SCOREBOARD WAS NOT REAL, and this
+ * comment used to say the eight came from the deterministic fast paths
+ * above the engine acting on messages nobody routed. They did not.
+ * Re-measured on 2026-09-08, all eight had `attendanceBefore ===
+ * attendanceAfter` — not one row moved — and exactly ONE case in the
+ * whole sweep changed a single row (S26, correctly). The grader was
+ * filing a MISSED DROP as a spurious write, because a drop that never
+ * happens leaves the confirmed count above the expectation. `gradeCase`
+ * now classifies against `attendanceBefore`, so "spurious" means a write
+ * happened — which is what §10 step 3's go/no-go asks for.
  *
  * ── the original note, still true ───────────────────────────────────
  *
  * ⚠️ THIS SPEC ASSERTS AGAINST A RECORDED BASELINE, NOT AGAINST ALL-PASS.
  *
- * §4 of MDs/analyzer-redesign-2026-08-31.md documents that the current
- * prompt does not reliably do what it says, so some cases are EXPECTED
- * to fail today. That is a finding about the analyzer, not a bug in the
+ * §4 of MDs/analyzer-redesign-2026-08-31.md documents that the analyzer
+ * has not always done what it says, so a case is allowed to be EXPECTED
+ * to fail. That is a finding about the pipeline, not a bug in the
  * corpus, and the corpus must never be weakened to make it green. The
  * baseline in `e2e/corpus/baseline.stub.json` records exactly which
  * cases pass today; this spec fails on any DIVERGENCE in either
  * direction, so a regression is caught AND a fix is noticed.
+ *
+ * Changing an expectation is allowed, and only with an `adjudication`
+ * block written at the case saying why (README, rule 4).
  *
  *   npm run test:corpus          # this spec alone
  *   npm run test:e2e             # included in the full gate

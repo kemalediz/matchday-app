@@ -12,6 +12,7 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import {
+  ALL_CORPUS_ROUTES,
   ALL_PROMPT_SECTIONS,
   type AttStatus,
   type Category,
@@ -140,30 +141,68 @@ export function parseCorpus(body: string): CorpusCase[] {
       } else {
         bad(at, "`from` must be a roster key or an { name, phone } outsider");
       }
+      // The dead seam, named so a case ported carelessly from the old
+      // format says what is wrong with it instead of running as a
+      // live-only case that quietly stopped covering anything.
       if (m.stub !== undefined) {
-        if (!isRecord(m.stub)) bad(at, "`stub` must be an object");
+        bad(
+          at,
+          "`stub` is the deleted VERDICT seam (§10 step 8). A message says what the ROUTER " +
+            "answered (`route`) and what the EXTRACTOR found (`facts`) — never what to do",
+        );
+      }
+      if (m.route !== undefined) {
+        if (typeof m.route !== "string" || !ALL_CORPUS_ROUTES.includes(m.route)) {
+          bad(at, `unknown \`route\` ${JSON.stringify(m.route)} (expected one of ${ALL_CORPUS_ROUTES.join(", ")})`);
+        }
         anyStub = true;
       }
+      if (m.facts !== undefined) {
+        if (!isRecord(m.facts)) bad(at, "`facts` must be an object — the extractor's raw JSON");
+        if (m.route === undefined) {
+          bad(at, "`facts` without a `route`: nothing decides which extractor they belong to");
+        }
+      }
     }
-    if (anyStub && !["historical", "corrected"].includes(String(parsed.stubKind))) {
-      bad(at, "a case carrying stub verdicts must declare `stubKind` (historical | corrected)");
+    if (anyStub && parsed.stubKind !== "transcribed") {
+      bad(
+        at,
+        "a case carrying routes must declare `stubKind: \"transcribed\"` — every stubbed field " +
+          "is a property of the message text, checkable by re-reading it. The old values " +
+          '"historical" and "corrected" described VERDICTS and went with them',
+      );
     }
     if (!anyStub && parsed.stubKind !== undefined) {
-      bad(at, "`stubKind` set but no message carries a `stub` verdict");
+      bad(at, "`stubKind` set but no message carries a `route`");
     }
-    // A case with no stub never runs in CI. "46 cases" must not be
-    // allowed to imply "46 cases in CI", so every exemption is argued
+    // A case with no route never runs in CI. "61 cases" must not be
+    // allowed to imply "61 cases in CI", so every exemption is argued
     // case by case rather than left as a silent default.
     if (!anyStub && (typeof parsed.liveOnlyReason !== "string" || !parsed.liveOnlyReason.trim())) {
       bad(
         at,
-        "carries no `stub` verdict, so it can never run in CI — set `liveOnlyReason` explaining " +
-          "what a stub would destroy (usually: the assertion IS the model's classification, or " +
-          "the asserted text is model-authored)",
+        "carries no `route`, so it can never run in CI — set `liveOnlyReason` explaining " +
+          "what a stub would destroy (usually: the assertion IS the model's classification, the " +
+          "READING of the message was itself the incident, or the asserted text is model-authored)",
       );
     }
     if (anyStub && parsed.liveOnlyReason !== undefined) {
-      bad(at, "`liveOnlyReason` set on a case that DOES carry stub verdicts");
+      bad(at, "`liveOnlyReason` set on a case that DOES carry routes");
+    }
+
+    // Every CHANGED expectation carries its reason at the case.
+    if (parsed.adjudication !== undefined) {
+      const a = parsed.adjudication;
+      if (!isRecord(a)) bad(at, "`adjudication` must be an object");
+      if (!["old_right", "new_right", "harness"].includes(String(a.verdict))) {
+        bad(at, `adjudication.verdict must be old_right | new_right | harness, got ${JSON.stringify(a.verdict)}`);
+      }
+      if (typeof a.reason !== "string" || a.reason.trim().length < 20) {
+        bad(at, "`adjudication.reason` must be a sentence a human can check, not a label");
+      }
+      if (typeof a.date !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(a.date)) {
+        bad(at, "`adjudication.date` must be an ISO date (YYYY-MM-DD)");
+      }
     }
 
     const exp = parsed.expect;
@@ -229,9 +268,9 @@ export function loadCorpus(file: string = CORPUS_PATH): CorpusCase[] {
   return parseCorpus(readFileSync(file, "utf8"));
 }
 
-/** Cases runnable in stubbed mode (they carry verdicts to feed the seam). */
+/** Cases runnable in stubbed mode (they carry a route for the seam). */
 export function stubbableCases(cases: CorpusCase[]): CorpusCase[] {
-  return cases.filter((c) => c.messages.some((m: CorpusMessage) => m.stub !== undefined));
+  return cases.filter((c) => c.messages.some((m: CorpusMessage) => m.route !== undefined));
 }
 
 /** Helper the runner uses to seed a match with an initial squad. */

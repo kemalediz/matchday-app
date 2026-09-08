@@ -91,6 +91,60 @@ describe("gradeCase — the runner's own contract", () => {
     expect(r.classification).toBe("spurious_write");
   });
 
+  // ── "spurious" means A WRITE HAPPENED, and is measured against the
+  //    world BEFORE the run, never against the expectation alone ───────
+  //
+  //    §10 step 3 fixes `spuriousWriteRuns` (target 0) as half the
+  //    go/no-go for the migration, and its definition is "a write the
+  //    old pipeline correctly did NOT make". Until 2026-09-08 the
+  //    grader read the direction of the DIVERGENCE instead: a drop that
+  //    never happened leaves the confirmed count ABOVE the expected one,
+  //    `got > want`, and was filed as a spurious write. That is exactly
+  //    backwards — nothing was written at all — and it is how the
+  //    stubbed sweep came to report "spurious_write 8" on a run in which
+  //    35 of 36 cases changed not one row (measured 2026-09-08, every
+  //    one of the eight had `attendanceBefore === attendanceAfter`).
+  it("a mismatch where the row NEVER MOVED is a missed write, not a wrong one", () => {
+    const c = baseCase({ expect: { attendance: [{ player: "najib", status: "BENCH" }] } });
+    const r = gradeCase(
+      c,
+      obs({
+        attendanceBefore: [{ name: "Najib Ahmadi", status: "CONFIRMED" }],
+        attendanceAfter: [{ name: "Najib Ahmadi", status: "CONFIRMED" }],
+      }),
+    );
+    expect(r.passed).toBe(false);
+    expect(r.classification).toBe("missed_write");
+    expect(r.failures.join(" ")).toMatch(/nothing moved/i);
+  });
+
+  it("a count ABOVE the expectation that nothing moved to is a missed write", () => {
+    const c = baseCase({ expect: { counts: { confirmed: 1 } } });
+    const rows = [
+      { name: "Najib Ahmadi", status: "CONFIRMED" as const },
+      { name: "Alice Admin", status: "CONFIRMED" as const },
+    ];
+    const r = gradeCase(c, obs({ attendanceBefore: rows, attendanceAfter: rows }));
+    expect(r.passed).toBe(false);
+    expect(r.classification).toBe("missed_write");
+  });
+
+  it("a count ABOVE the expectation that the run WROTE is a spurious write", () => {
+    const c = baseCase({ expect: { counts: { confirmed: 1 } } });
+    const r = gradeCase(
+      c,
+      obs({
+        attendanceBefore: [{ name: "Najib Ahmadi", status: "CONFIRMED" }],
+        attendanceAfter: [
+          { name: "Najib Ahmadi", status: "CONFIRMED" },
+          { name: "Alice Admin", status: "CONFIRMED" },
+        ],
+      }),
+    );
+    expect(r.passed).toBe(false);
+    expect(r.classification).toBe("spurious_write");
+  });
+
   it("classification prefers a spurious write over a missed one when both happen", () => {
     const c = baseCase({
       expect: {

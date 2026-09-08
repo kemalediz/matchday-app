@@ -73,6 +73,23 @@ export async function buildCorpusWorld(
     );
   }
 
+  // MatchTime'S OWN LAST POST, as the ENGINE reads it.
+  //
+  // `history` is what the Pi forwards with the request; `state.lastBotPost`
+  // is a `BotJob` row (`load-state.ts:191`), and the two are different
+  // channels. §3.2 S25 turns entirely on the second: a bare "Confirmed"
+  // is resolved against the PENDING SET in the bot's own last post, and
+  // with no row there is no pending set, so the case scored a
+  // "short confirmation with no pending set" and looked like a bot that
+  // ignored a member — a badly-built world, not a defect (README rule 5).
+  if (w.lastBotPost) {
+    await ctx.db.run(
+      `INSERT INTO "BotJob" (id, "orgId", kind, text, "pollOptions", "createdAt", "sentAt")
+       VALUES ($1, $2, 'group', $3, ARRAY[]::text[], now() - interval '5 minutes', now())`,
+      [`botjob-${grp.matchId}-last`, grp.orgId, w.lastBotPost],
+    );
+  }
+
   await grp.drainOutbound(); // setup must not pollute the observation
   return grp;
 }
