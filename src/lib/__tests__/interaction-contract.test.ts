@@ -22,10 +22,12 @@ import {
   messageTagsBot,
   actionRequiresTag,
   isSelfAttendanceVerdict,
+  registerForEntryRequiresTag,
   looksLikeHypotheticalOrPast,
   offerIsAboutSomeoneElse,
   type TagInput,
   type GateVerdict,
+  type GateRegisterForEntry,
 } from "@/lib/interaction-contract";
 
 describe("messageTagsBot — structured signal OR hardened text fallback", () => {
@@ -387,6 +389,109 @@ describe("actionRequiresTag — an ADMIN reporting another player OUT", () => {
   it("the constant is a boolean and is ON", () => {
     expect(typeof ADMIN_REPORTED_OUT_IS_TAG_FREE).toBe("boolean");
     expect(ADMIN_REPORTED_OUT_IS_TAG_FREE).toBe(true);
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════
+// 2026-09-08 · THE DAVID INCIDENT — the gate was ALL-OR-NOTHING PER
+// MESSAGE, so one refused clause threw away every other one.
+//
+// Kemal posted to the live Sutton FC group, untagged:
+//
+//     "David is OUT voluntarily to switch to 5aside.
+//
+//      Either @Mojib Jalali or @Najib can be in the main squad and the
+//      other can go to bench"
+//
+// `ADMIN_REPORTED_OUT_IS_TAG_FREE` waives the tag for an admin only when
+// every entry is IN or OUT. The bench clause failed that `every`, the
+// whole message was refused, and David stayed in a squad he had just
+// left. The owner corrected it by hand, twice, on match day.
+//
+// THE BENCH EXCLUSION IS NOT THE BUG and is not being reversed: a demote
+// still needs a tag from everybody, the owner included. The bug is the
+// GRANULARITY. One refused entry must not silently discard the others,
+// so the question "does this need a tag?" is asked PER ENTRY, and
+// `actionRequiresTag` is exactly the OR of the per-entry answers.
+// ══════════════════════════════════════════════════════════════════════
+describe("registerForEntryRequiresTag — the gate, asked one entry at a time", () => {
+  const admin = { senderIsAdmin: true };
+  const player = { senderIsAdmin: false };
+
+  const IN = { name: "Amir", action: "IN" } as const;
+  const OUT = { name: "David", action: "OUT" } as const;
+  const BENCH = { name: "Mojib", action: "BENCH" } as const;
+
+  it("a third-party IN is tag-free for anyone (unchanged)", () => {
+    expect(registerForEntryRequiresTag(IN, admin)).toBe(false);
+    expect(registerForEntryRequiresTag(IN, player)).toBe(false);
+    expect(registerForEntryRequiresTag(IN)).toBe(false);
+  });
+
+  it("a third-party OUT is tag-free for an ADMIN only", () => {
+    expect(registerForEntryRequiresTag(OUT, admin)).toBe(false);
+    expect(registerForEntryRequiresTag(OUT, player)).toBe(true);
+    expect(registerForEntryRequiresTag(OUT, {})).toBe(true);
+    expect(registerForEntryRequiresTag(OUT)).toBe(true);
+  });
+
+  it("a BENCH requires a tag from EVERYONE, the owner included", () => {
+    expect(registerForEntryRequiresTag(BENCH, admin)).toBe(true);
+    expect(registerForEntryRequiresTag(BENCH, player)).toBe(true);
+    expect(registerForEntryRequiresTag(BENCH)).toBe(true);
+  });
+
+  it("THE INCIDENT, split: the OUT is free and the BENCH is refused", () => {
+    // The whole point. The same message, two answers, and the OUT half
+    // no longer dies with the BENCH half.
+    expect(registerForEntryRequiresTag(OUT, admin)).toBe(false);
+    expect(registerForEntryRequiresTag(BENCH, admin)).toBe(true);
+  });
+
+  it("the entry gate does not read the entry's NAME", () => {
+    // Nothing here may depend on who was named: identity is the
+    // roster's business and it is resolved later, in the engine.
+    for (const name of ["David", "", "  ", "@Mojib Jalali", "07700900123"]) {
+      expect(registerForEntryRequiresTag({ name, action: "OUT" }, admin)).toBe(false);
+      expect(registerForEntryRequiresTag({ name, action: "BENCH" }, admin)).toBe(true);
+    }
+  });
+});
+
+describe("actionRequiresTag is EXACTLY the OR of the per-entry answers", () => {
+  // The message-level answer must stay derivable from the per-entry one,
+  // or the engine's "is anything at all permitted?" check and the gate
+  // itself can disagree, and the split leaks. Enumerated over every
+  // combination of up to three entries, for every seat.
+  const ACTIONS = ["IN", "OUT", "BENCH"] as const;
+  const combos: GateRegisterForEntry[][] = [];
+  for (const a of ACTIONS) {
+    combos.push([{ name: "A", action: a }]);
+    for (const b of ACTIONS) {
+      combos.push([
+        { name: "A", action: a },
+        { name: "B", action: b },
+      ]);
+      for (const c of ACTIONS) {
+        combos.push([
+          { name: "A", action: a },
+          { name: "B", action: b },
+          { name: "C", action: c },
+        ]);
+      }
+    }
+  }
+
+  it("agrees on every combination, for an admin, a member and no sender", () => {
+    for (const sender of [{ senderIsAdmin: true }, { senderIsAdmin: false }, {}, undefined]) {
+      for (const entries of combos) {
+        const v: GateVerdict = { intent: "out", registerAttendance: null, registerFor: entries };
+        expect(
+          actionRequiresTag(v, sender),
+          `${JSON.stringify(entries)} for ${JSON.stringify(sender)}`,
+        ).toBe(entries.some((e) => registerForEntryRequiresTag(e, sender)));
+      }
+    }
   });
 });
 

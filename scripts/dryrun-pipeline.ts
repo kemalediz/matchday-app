@@ -350,6 +350,41 @@ const CASES: Case[] = [
   // carried a tag. Now the exemption hangs off THE TAG.
   { id: "W9", who: "Kemal", body: "Shahrokh is out 😂😂 vote him out lads", confirm: ["Shahrokh"], expect: "NO write. Untagged + banter markers => refused, even from the owner (the moved banterRefusal)" },
   { id: "W10", who: "Kemal", body: "@Match Time Shahrokh is out 😂 gutted for him", tagged: true, confirm: ["Shahrokh"], expect: "DROP Shahrokh. The SAME markers WITH a tag are still honoured — unchanged behaviour, and the control for W9" },
+
+  // ── V: the 2026-09-08 incident — ONE REFUSED CLAUSE ATE THE MESSAGE
+  //
+  // Kemal posted, untagged, on match day:
+  //
+  //   "David is OUT voluntarily to switch to 5aside.
+  //
+  //    Either @Mojib Jalali or @Najib can be in the main squad and the
+  //    other can go to bench"
+  //
+  // MatchTime recorded NOTHING. `ADMIN_REPORTED_OUT_IS_TAG_FREE` waives
+  // the tag for an admin only when every entry is IN or OUT, the bench
+  // clause failed that `every`, and the gate was taken ONCE FOR THE
+  // WHOLE MESSAGE — so a clean "David is OUT" from the one person
+  // entitled to say it died with it. David played on and the owner
+  // corrected the squad by hand, twice.
+  //
+  // The bench rule is NOT reversed: a demote still needs a tag from
+  // everybody. The gate is now asked PER CLAIM.
+  //
+  // ⚠️ THESE ARE THE EXTRACTION-DEPENDENT HALF. The split itself is
+  // deterministic and unit-tested; what a REPEAT sweep settles is
+  // whether the extractor reads two separate claims out of a two-clause
+  // message, and what it does with the either/or sentence — which names
+  // nobody definitively and must therefore register nobody.
+  //
+  // V5 is the adversarial control and it is the half that matters: this
+  // change makes MatchTime act on PART of a message it previously
+  // ignored whole, so a false positive now costs somebody their place.
+  { id: "V1", who: "Kemal", body: "David is OUT voluntarily to switch to 5aside.\n\nEither @Mojib Jalali or @Najib can be in the main squad and the other can go to bench", confirm: ["David", "Mojib"], expect: "THE 8 SEPT INCIDENT, VERBATIM. DROP David. Mojib and Najib UNCHANGED (an either/or names nobody, and a bench needs a tag). MatchTime should SAY what it left alone if it refuses a named bench" },
+  { id: "V2", who: "Kemal", body: "David is out, put Mojib on the bench", confirm: ["David", "Mojib"], expect: "the incident's shape with both clauses unambiguous: DROP David, Mojib STAYS CONFIRMED, and a sentence naming the half that needs a tag" },
+  { id: "V3", who: "Kemal", body: "David can't make it tonight. Mojib drops to the bench", confirm: ["David", "Mojib"], expect: "the same two clauses phrased naturally: DROP David, Mojib unchanged" },
+  { id: "V4", who: "Wasim", body: "David is out, put Mojib on the bench", confirm: ["David", "Mojib"], expect: "THE LIMIT. A NON-admin: NOTHING applied, and MatchTime stays silent. Both clauses are refused, so there is no turn for a refusal sentence to ride" },
+  { id: "V5", who: "Kemal", body: "David is out of form since he switched to 5aside. Either Mojib or Najib would walk into the main squad ahead of him", confirm: ["David", "Mojib"], expect: "THE ADVERSARIAL CONTROL. Contains the literal words 'David is out' inside a sentence about FORM, and an either/or about the squad. NO write, nobody dropped, nobody benched" },
+  { id: "V6", who: "Kemal", body: "@Match Time David is out, put Mojib on the bench", tagged: true, confirm: ["David", "Mojib"], expect: "the same message TAGGED: DROP David and BENCH Mojib. The control for V2 — the tag is what the bench clause was always missing" },
 ];
 
 /**

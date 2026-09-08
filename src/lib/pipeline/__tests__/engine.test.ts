@@ -2710,7 +2710,24 @@ describe("2026-09-07 · an admin's untagged third-party OUT (Shahrokh)", () => {
     expect(confirmedCount(r.nextState)).toBe(13);
   });
 
-  it("a NON-admin's untagged SWAP is still suppressed entirely", () => {
+  it("a NON-admin's untagged SWAP loses its DROP half, and only that half", () => {
+    // CHANGED 2026-09-08, deliberately, and it is the same change as the
+    // David incident seen from the other side. This used to assert
+    // "suppressed entirely", and that outcome was not a rule anybody
+    // wrote: it was the all-or-nothing gate, where one refused entry
+    // discarded every other entry in the message.
+    //
+    // Per entry, the contract's own answers are unambiguous. The OUT is
+    // refused — an ordinary member may not remove a player who never
+    // consented, which is the whole reason the tag rule exists and it is
+    // untouched. The IN is a third-party ADD, and an ADD has been
+    // tag-free for EVERYONE since the third-party-add change; it can
+    // only add somebody, never take a place off anybody, and capacity
+    // decides whether that is a slot or the bench exactly as it would
+    // for "Najib can play if you're short" typed on its own.
+    //
+    // And the sender is TOLD which half did not happen, so a member
+    // cannot come away believing he swapped two players.
     const r = decide({
       now: NOW,
       state: squad(),
@@ -2726,9 +2743,11 @@ describe("2026-09-07 · an admin's untagged third-party OUT (Shahrokh)", () => {
         }),
       ],
     });
-    expect(r.writes).toHaveLength(0);
     expect(statusOf(r.nextState, "shahrokh")).toBe("CONFIRMED");
-    expect(statusOf(r.nextState, "najib")).toBe("ABSENT");
+    expect(statusOf(r.nextState, "najib")).not.toBe("ABSENT");
+    expect(r.speech.find((x) => x.kind === "needs_tag_for_rest")).toMatchObject({
+      entries: [{ name: "Shahrokh", action: "OUT" }],
+    });
   });
 
   // ── THE APPLY PATH IS THE SAME ONE ────────────────────────────────
@@ -2865,5 +2884,416 @@ describe("S19 · showing teams that were never generated", () => {
     expect(r.speech.some((s) => s.kind === "teams_post")).toBe(false);
     expect(r.outcomes[0].disposition).toBe("acted");
     expect(r.writes).toHaveLength(0);
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════
+// 2026-09-08 · THE DAVID INCIDENT — one refused clause threw away every
+// other clause in the same message.
+//
+// Kemal posted to the live Sutton FC group, untagged, on match day:
+//
+//     "David is OUT voluntarily to switch to 5aside.
+//
+//      Either @Mojib Jalali or @Najib can be in the main squad and the
+//      other can go to bench"
+//
+// MatchTime recorded NOTHING. The stored reasoning:
+//
+//     by=attendance-engine intent=conditional_in action=none
+//     attendance-engine (other_att): requires an @Match Time tag
+//     (interaction contract)
+//
+// David stayed in the squad and the owner corrected it by hand, twice.
+//
+// WHY: `ADMIN_REPORTED_OUT_IS_TAG_FREE` waives the tag for an admin only
+// when the entries are ALL IN or OUT. The bench clause failed that
+// `every`, and because the gate was taken once FOR THE WHOLE MESSAGE,
+// the single refused clause took a clean, unambiguous "David is OUT"
+// down with it.
+//
+// THE BENCH RULE IS NOT REVERSED. A demote is roster surgery and still
+// needs a tag from everybody, the owner included. What changes is the
+// GRANULARITY: the gate is asked per claim, the permitted claims are
+// applied through the SAME path they always took, and the refused ones
+// are named out loud rather than dropped in silence (§9).
+//
+// This is the fifth production incident in this repo where a compound
+// message lost half its meaning. See the memory note on the
+// terminal-short-circuit bug class: the decision was being taken for the
+// whole message when it belonged to each part.
+// ══════════════════════════════════════════════════════════════════════
+
+describe("2026-09-08 · an admin's untagged [OUT + BENCH] (David / Mojib)", () => {
+  const INCIDENT =
+    "David is OUT voluntarily to switch to 5aside.\n\n" +
+    "Either @Mojib Jalali or @Najib can be in the main squad and the other can go to bench";
+
+  /** David and Mojib both in the squad, which is where that message landed. */
+  const squad = () =>
+    world({
+      players: [...SUTTON, "david"],
+      maxPlayers: 14,
+      // Zair is in it too: two of the cases below are about an ordinary
+      // member's OWN drop surviving beside a clause he may not make, and
+      // a member who was never in the squad has no drop to lose.
+      confirmed: [...FULL_14.slice(0, 11), "zair", "david", "mojib"],
+    });
+
+  /** The split the message makes: one third-party OUT, one third-party
+   *  BENCH. Exactly the shape the old `every` refused wholesale. */
+  const outAndBench = () =>
+    attendanceFacts([
+      claim({ subject: "other", personRef: "David", personNamed: true, polarity: "out" }),
+      claim({ subject: "other", personRef: "Mojib", personNamed: true, polarity: "bench" }),
+    ]);
+
+  it("THE INCIDENT: David is DROPPED and Mojib is left alone", () => {
+    const r = decide({
+      now: NOW,
+      state: squad(),
+      messages: [
+        msg({ from: "kemal", body: INCIDENT, route: "other_att", facts: outAndBench() }),
+      ],
+    });
+    expect(statusOf(r.nextState, "david")).toBe("DROPPED");
+    expect(statusOf(r.nextState, "mojib")).toBe("CONFIRMED");
+    expect(attWrites(r.writes)).toHaveLength(1);
+    expect(r.outcomes[0].disposition).toBe("acted");
+    expect(r.degradations).toHaveLength(0);
+  });
+
+  it("the refusal of the BENCH half is RECORDED, naming the clause", () => {
+    const r = decide({
+      now: NOW,
+      state: squad(),
+      messages: [
+        msg({ from: "kemal", body: INCIDENT, route: "other_att", facts: outAndBench() }),
+      ],
+    });
+    const reasons = r.outcomes[0].reasons.join(" | ");
+    expect(reasons).toMatch(/Mojib/);
+    expect(reasons).toMatch(/tag/i);
+  });
+
+  it("the reason trail still names the WAIVER that carried the drop", () => {
+    // The reason trail is the only place a wrong drop can be traced back
+    // to a policy rather than to a model. The message-level form of this
+    // check (`!needsTag && actionRequiresTag(gate)`) goes quiet on a
+    // message that carries a waived drop AND a refused demote, which is
+    // this incident exactly, so it is asked over the permitted claims.
+    const r = decide({
+      now: NOW,
+      state: squad(),
+      messages: [
+        msg({ from: "kemal", body: INCIDENT, route: "other_att", facts: outAndBench() }),
+      ],
+    });
+    expect(r.outcomes[0].reasons.join(" | ")).toMatch(/ADMIN_REPORTED_OUT_IS_TAG_FREE/);
+  });
+
+  it("SPEECH: MatchTime says what it did NOT do", () => {
+    // §9: "message understood, action silently not taken" is this
+    // product's signature failure, and a partially-applied instruction
+    // the owner does not know was partial is exactly that. The sentence
+    // rides a turn MatchTime is already taking (the drop landed, so the
+    // squad post goes out anyway), so it costs no extra message.
+    const r = decide({
+      now: NOW,
+      state: squad(),
+      messages: [
+        msg({ from: "kemal", body: INCIDENT, route: "other_att", facts: outAndBench() }),
+      ],
+    });
+    const s = r.speech.find((x) => x.kind === "needs_tag_for_rest");
+    expect(s).toBeDefined();
+    expect(s).toMatchObject({
+      kind: "needs_tag_for_rest",
+      entries: [{ name: "Mojib Sadat", action: "BENCH" }],
+    });
+    // …and the squad post it rides on is still there.
+    expect(r.speech.some((x) => x.kind === "squad_status")).toBe(true);
+  });
+
+  it("THE LIMIT: the same message from a NON-admin applies NOTHING", () => {
+    const r = decide({
+      now: NOW,
+      state: squad(),
+      messages: [
+        msg({ from: "zair", body: INCIDENT, route: "other_att", facts: outAndBench() }),
+      ],
+    });
+    expect(statusOf(r.nextState, "david")).toBe("CONFIRMED");
+    expect(statusOf(r.nextState, "mojib")).toBe("CONFIRMED");
+    expect(r.writes).toHaveLength(0);
+    expect(r.speech).toHaveLength(0);
+    expect(r.outcomes[0].reasons.join(" ")).toMatch(/requires an @Match Time tag/);
+  });
+
+  it("an admin's untagged [OUT, OUT] still applies BOTH (yesterday, unchanged)", () => {
+    const r = decide({
+      now: NOW,
+      state: squad(),
+      messages: [
+        msg({
+          from: "kemal",
+          body: "David and Mojib are both out",
+          route: "other_att",
+          facts: attendanceFacts([
+            claim({ subject: "other", personRef: "David", personNamed: true, polarity: "out" }),
+            claim({ subject: "other", personRef: "Mojib", personNamed: true, polarity: "out" }),
+          ]),
+        }),
+      ],
+    });
+    expect(statusOf(r.nextState, "david")).toBe("DROPPED");
+    expect(statusOf(r.nextState, "mojib")).toBe("DROPPED");
+    expect(r.speech.some((x) => x.kind === "needs_tag_for_rest")).toBe(false);
+  });
+
+  it("an admin's untagged [BENCH] ALONE still applies nothing (unchanged)", () => {
+    const r = decide({
+      now: NOW,
+      state: squad(),
+      messages: [
+        msg({
+          from: "kemal",
+          body: "put Mojib on the bench",
+          route: "other_att",
+          facts: attendanceFacts([
+            claim({ subject: "other", personRef: "Mojib", personNamed: true, polarity: "bench" }),
+          ]),
+        }),
+      ],
+    });
+    expect(statusOf(r.nextState, "mojib")).toBe("CONFIRMED");
+    expect(r.writes).toHaveLength(0);
+    // SILENT. The refusal only ever rides a turn MatchTime was already
+    // taking; a lone sentence on an untagged message is the chattiness
+    // the interaction contract exists to prevent.
+    expect(r.speech).toHaveLength(0);
+    expect(r.outcomes[0].reasons.join(" ")).toMatch(/requires an @Match Time tag/);
+  });
+
+  it("an admin's TAGGED [OUT + BENCH] applies BOTH (unchanged)", () => {
+    const r = decide({
+      now: NOW,
+      state: squad(),
+      messages: [
+        msg({
+          from: "kemal",
+          body: "@Match Time " + INCIDENT,
+          tagged: true,
+          route: "other_att",
+          facts: outAndBench(),
+        }),
+      ],
+    });
+    expect(statusOf(r.nextState, "david")).toBe("DROPPED");
+    expect(statusOf(r.nextState, "mojib")).toBe("BENCH");
+    expect(r.speech.some((x) => x.kind === "needs_tag_for_rest")).toBe(false);
+  });
+
+  // ── THE APPLY PATH IS THE SAME ONE ────────────────────────────────
+  //
+  // A drop opens a slot and the apply layer offers it to the bench
+  // (`attendance.ts:cancelAttendance` → `requestBenchConfirmationOnDrop`),
+  // reading the write the engine proposes. A PARTIALLY applied
+  // instruction must therefore produce the byte-identical write, or the
+  // vacated slot is offered differently, or not at all.
+  it("the partially-applied drop proposes exactly the write a clean drop proposes", () => {
+    const run = (facts: ReturnType<typeof outAndBench>) =>
+      decide({
+        now: NOW,
+        state: squad(),
+        messages: [
+          msg({ id: "wa-fixed", from: "kemal", body: INCIDENT, route: "other_att", facts }),
+        ],
+      });
+    const partial = attWrites(run(outAndBench()).writes);
+    const clean = attWrites(
+      run(
+        attendanceFacts([
+          claim({ subject: "other", personRef: "David", personNamed: true, polarity: "out" }),
+        ]),
+      ).writes,
+    );
+    expect(partial).toHaveLength(1);
+    expect(partial).toEqual(clean);
+    expect(partial[0].status).toBe("DROPPED");
+  });
+
+  it("the freed slot is still offered to the bench off the partial apply", () => {
+    // The engine's half of the offer chain: the `open_bench_offer` write
+    // and the sentence that goes with it, both fired by the drop that
+    // survived the split.
+    const state = world({
+      players: [...SUTTON, "david"],
+      maxPlayers: 14,
+      confirmed: [...FULL_14.slice(0, 13), "david"],
+      bench: ["mojib"],
+    });
+    const r = decide({
+      now: NOW,
+      state,
+      messages: [
+        msg({ from: "kemal", body: INCIDENT, route: "other_att", facts: outAndBench() }),
+      ],
+    });
+    expect(statusOf(r.nextState, "david")).toBe("DROPPED");
+    expect(r.writes.some((w) => w.kind === "open_bench_offer")).toBe(true);
+    expect(r.speech.some((x) => x.kind === "bench_offer_open")).toBe(true);
+    // Mojib is on the bench and the BENCH clause was refused, so he is
+    // exactly where he was: on the bench, and now one of the people the
+    // freed slot is offered to.
+    expect(statusOf(r.nextState, "mojib")).toBe("BENCH");
+  });
+
+  // ── The other half of the granularity bug: the SENDER's own claim ──
+  it("a member's own claim survives beside a third-party clause it may not make", () => {
+    // "I'm out, and put Mojib on the bench" from an ordinary member.
+    // Before the split, the bench clause discarded the sender's own drop
+    // too, and the club turned up short with a player in the list who
+    // had said he was not coming.
+    const r = decide({
+      now: NOW,
+      state: squad(),
+      messages: [
+        msg({
+          from: "zair",
+          body: "I'm out lads, put Mojib on the bench",
+          route: "other_att",
+          facts: attendanceFacts([
+            claim({ polarity: "out" }),
+            claim({ subject: "other", personRef: "Mojib", personNamed: true, polarity: "bench" }),
+          ]),
+        }),
+      ],
+    });
+    expect(statusOf(r.nextState, "zair")).toBe("DROPPED");
+    expect(statusOf(r.nextState, "mojib")).toBe("CONFIRMED");
+  });
+
+  // ── The collapse runs BEFORE the split, and it has to ──────────────
+  it("two claims about the SAME person are collapsed first, so the LAST one is gated", () => {
+    // "Mojib is in… actually put Mojib on the bench" from an admin,
+    // untagged. Gating the raw claim list would refuse the BENCH, keep
+    // the earlier IN and register the man the message just demoted —
+    // the correction reversed, which is the shape the per-person
+    // collapse already existed to prevent.
+    const r = decide({
+      now: NOW,
+      state: world({ players: [...SUTTON, "david"], maxPlayers: 14, confirmed: [...FULL_14.slice(0, 12)] }),
+      messages: [
+        msg({
+          from: "kemal",
+          body: "Mojib is in. Actually no, put him on the bench",
+          route: "other_att",
+          facts: attendanceFacts([
+            claim({ subject: "other", personRef: "Mojib", personNamed: true, polarity: "in" }),
+            claim({ subject: "other", personRef: "Mojib", personNamed: true, polarity: "bench" }),
+          ]),
+        }),
+      ],
+    });
+    expect(statusOf(r.nextState, "mojib")).toBe("ABSENT");
+    expect(r.writes).toHaveLength(0);
+  });
+
+  // ── The recruit waiver reaches exactly as far as the OUT waiver ────
+  it("PR #33's recruit waiver does NOT carry a BENCH either", () => {
+    // `addressedByRecruit` stands in for the tag, and it is model
+    // output ("this sentence asks for players") rather than the Pi's
+    // structured mention list. The bench rule's "second, independent
+    // signal" cannot be an inference, so the waiver reaches an OUT and
+    // stops there. The OUT half still lands, which is PR #33 working.
+    const r = decide({
+      now: NOW,
+      state: squad(),
+      messages: [
+        msg({
+          from: "kemal",
+          body: "David is out, put Mojib on the bench. We need one more player",
+          route: "other_att",
+          facts: attendanceFacts(
+            [
+              claim({ subject: "other", personRef: "David", personNamed: true, polarity: "out" }),
+              claim({ subject: "other", personRef: "Mojib", personNamed: true, polarity: "bench" }),
+            ],
+            { sideRequests: ["recruit"] },
+          ),
+        }),
+      ],
+    });
+    expect(statusOf(r.nextState, "david")).toBe("DROPPED");
+    expect(statusOf(r.nextState, "mojib")).toBe("CONFIRMED");
+  });
+
+  it("a NON-admin's untagged [self OUT + third-party OUT] applies only the self half", () => {
+    const r = decide({
+      now: NOW,
+      state: squad(),
+      messages: [
+        msg({
+          from: "zair",
+          body: "I'm out and David is out too",
+          route: "other_att",
+          facts: attendanceFacts([
+            claim({ polarity: "out" }),
+            claim({ subject: "other", personRef: "David", personNamed: true, polarity: "out" }),
+          ]),
+        }),
+      ],
+    });
+    expect(statusOf(r.nextState, "zair")).toBe("DROPPED");
+    expect(statusOf(r.nextState, "david")).toBe("CONFIRMED");
+    const s = r.speech.find((x) => x.kind === "needs_tag_for_rest");
+    expect(s).toMatchObject({ entries: [{ name: "David", action: "OUT" }] });
+  });
+
+  it("a refused clause naming NOBODY on the roster is never spoken about", () => {
+    // The refusal sentence names people, and the only names it may
+    // print are the roster's. An unresolvable reference would have been
+    // refused by identity.ts anyway ("not a member; nothing to drop or
+    // bench"), so there is nothing to tell the group.
+    const r = decide({
+      now: NOW,
+      state: squad(),
+      messages: [
+        msg({
+          from: "kemal",
+          body: "David is out, bench Ronaldo",
+          route: "other_att",
+          facts: attendanceFacts([
+            claim({ subject: "other", personRef: "David", personNamed: true, polarity: "out" }),
+            claim({ subject: "other", personRef: "Ronaldo", personNamed: true, polarity: "bench" }),
+          ]),
+        }),
+      ],
+    });
+    expect(statusOf(r.nextState, "david")).toBe("DROPPED");
+    expect(r.speech.some((x) => x.kind === "needs_tag_for_rest")).toBe(false);
+  });
+
+  it("a refused clause is NOT spoken about when nothing was applied at all", () => {
+    // David is already DROPPED, so the permitted half writes nothing and
+    // MatchTime takes no turn. The refusal has no turn to ride and stays
+    // in the reason trail, where the operator log can see it.
+    const state = world({
+      players: [...SUTTON, "david"],
+      maxPlayers: 14,
+      confirmed: [...FULL_14.slice(0, 12), "mojib"],
+      dropped: ["david"],
+    });
+    const r = decide({
+      now: NOW,
+      state,
+      messages: [
+        msg({ from: "kemal", body: INCIDENT, route: "other_att", facts: outAndBench() }),
+      ],
+    });
+    expect(r.writes).toHaveLength(0);
+    expect(r.speech).toHaveLength(0);
+    expect(r.outcomes[0].reasons.join(" | ")).toMatch(/Mojib/);
   });
 });
