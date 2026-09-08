@@ -16,7 +16,7 @@ import { describe, it, expect } from "vitest";
 import { compose } from "../compose";
 import { decide } from "../engine";
 import { composeSquadStatusPost, displaysSquadState } from "../../group-copy";
-import { NOW, attendanceFacts, claim, fullName, msg, world } from "./helpers";
+import { NOW, SUTTON, attendanceFacts, claim, fullName, msg, world } from "./helpers";
 import type { EngineResult, SquadState } from "../types";
 
 function composeFor(state: SquadState, messages: Parameters<typeof decide>[0]["messages"]) {
@@ -443,5 +443,98 @@ describe("showing teams that do not exist (2026-09-06 sweep)", () => {
     const text = out.utterances[0].text;
     expect(text).toMatch(/no teams generated yet/i);
     expect(text).not.toContain("Teams for tonight");
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════
+// 2026-09-08 · SAYING WHAT WAS NOT DONE (the David incident).
+//
+// An untagged admin's "David is OUT … the other can go to bench" applies
+// the drop and refuses the demote. §9's signature failure is "message
+// understood, action silently not taken", and a partially applied
+// instruction the owner does not know was partial is exactly that, so
+// MatchTime names the half it left alone.
+//
+// The sentence only ever rides a turn MatchTime was already taking (the
+// engine emits the intent beside a write), so it is not a new class of
+// unprompted chatter on an untagged message.
+// ══════════════════════════════════════════════════════════════════════
+describe("a partially applied instruction says which half did not happen", () => {
+  const SQUAD = [...TEN, "usama", "karahan", "zair", "mojib"];
+
+  const incident = () =>
+    composeFor(world({ players: [...SUTTON, "david"], confirmed: [...SQUAD.slice(0, 13), "david"] }), [
+      msg({
+        from: "kemal",
+        body:
+          "David is OUT voluntarily to switch to 5aside.\n\n" +
+          "Either @Mojib Jalali or @Najib can be in the main squad and the other can go to bench",
+        route: "other_att",
+        facts: attendanceFacts([
+          claim({ subject: "other", personRef: "David", personNamed: true, polarity: "out" }),
+          claim({ subject: "other", personRef: "Mojib", personNamed: true, polarity: "bench" }),
+        ]),
+      }),
+    ]);
+
+  it("names the refused player, the remedy, and nothing else", () => {
+    const { out } = incident();
+    const text = out.utterances.map((u) => u.text).join("\n");
+    expect(text).toContain("I've not moved Mojib Sadat to the bench");
+    expect(text).toContain("@Match Time");
+  });
+
+  it("does NOT repeat the half it DID do — the squad post is that", () => {
+    // Two rosters one line apart is the 2026-06-12 Sutton Lads shape
+    // (S36). The refusal sentence talks about the refused half only.
+    const { out } = incident();
+    const refusal = out.utterances.find((u) => u.text.includes("left alone"))!;
+    expect(refusal.text).not.toContain("David");
+    // …and the squad post, which carries what DID happen, is still sent.
+    expect(out.utterances.some((u) => u.text.includes("/14"))).toBe(true);
+  });
+
+  it("is attached to the message it answers, not to the batch", () => {
+    const { out } = incident();
+    const refusal = out.utterances.find((u) => u.text.includes("left alone"))!;
+    expect(refusal.messageId).not.toBeNull();
+  });
+
+  it("says nothing at all when the whole message was refused", () => {
+    // A bench demote on its own, untagged: nothing is applied, so
+    // MatchTime takes no turn and the sentence has none to ride.
+    const { out } = composeFor(world({ confirmed: SQUAD }), [
+      msg({
+        from: "kemal",
+        body: "put Mojib on the bench",
+        route: "other_att",
+        facts: attendanceFacts([
+          claim({ subject: "other", personRef: "Mojib", personNamed: true, polarity: "bench" }),
+        ]),
+      }),
+    ]);
+    expect(out.utterances).toHaveLength(0);
+  });
+
+  it("reads correctly when BOTH a drop and a demote were refused", () => {
+    // An ordinary member: his own OUT lands, and the two clauses about
+    // other people do not.
+    const { out } = composeFor(
+      world({ players: [...SUTTON, "david"], confirmed: [...SQUAD.slice(0, 13), "david"] }),
+      [
+        msg({
+          from: "zair",
+          body: "I'm out, David is out too and Mojib can go on the bench",
+          route: "other_att",
+          facts: attendanceFacts([
+            claim({ polarity: "out" }),
+            claim({ subject: "other", personRef: "David", personNamed: true, polarity: "out" }),
+            claim({ subject: "other", personRef: "Mojib", personNamed: true, polarity: "bench" }),
+          ]),
+        }),
+      ],
+    );
+    const refusal = out.utterances.find((u) => u.text.includes("left alone"))!;
+    expect(refusal.text).toContain("I've not taken David out or moved Mojib Sadat to the bench");
   });
 });

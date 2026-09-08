@@ -19,7 +19,7 @@ import type { APIRequestContext } from "@playwright/test";
 import { test, expect, resetDb } from "../fixtures";
 import type { TestDb } from "../helpers/test-db";
 import { createGroup, SimGroup } from "./group";
-import { otherFacts, selfIn, selfOut } from "../helpers/stub";
+import { facts, otherClaim, otherFacts, selfIn, selfOut } from "../helpers/stub";
 
 test.describe.configure({ mode: "serial" });
 
@@ -413,6 +413,112 @@ test.describe("an admin's untagged drop still opens the bench offer", () => {
     expect(claim.json.result).toBe("confirmed");
     expect((await grp.attendanceOf("greg"))?.status).toBe("CONFIRMED");
     expect(await grp.openOffers()).toHaveLength(0);
+  });
+});
+
+// ── 2026-09-08 · A PARTIALLY APPLIED INSTRUCTION, END TO END ─────────
+//
+// Kemal posted, untagged, on match day:
+//
+//   "David is OUT voluntarily to switch to 5aside.
+//
+//    Either @Mojib Jalali or @Najib can be in the main squad and the
+//    other can go to bench"
+//
+// MatchTime recorded NOTHING, because the tag gate was taken ONCE for
+// the whole message and the bench clause failed it. David played on in a
+// squad he had left.
+//
+// The engine unit tests pin the split. What only this file can prove is
+// that the surviving half goes down the ORDINARY apply path: a drop
+// frees a slot and `attendance.ts:cancelAttendance` →
+// `requestBenchConfirmationOnDrop` offers it to the bench. A partially
+// applied drop that skipped that would leave a club a player short with
+// somebody sitting on the bench waiting to be asked.
+test.describe("an untagged admin's [OUT + BENCH] applies the OUT, end to end", () => {
+  test("the drop lands, the demote does not, and the freed slot is offered", async ({
+    request,
+    db,
+  }) => {
+    const grp = (
+      await createGroup(request, db, {
+        maxPlayers: 5,
+        attendance: [
+          { key: "owner", status: "CONFIRMED" },
+          { key: "alice", status: "CONFIRMED" },
+          { key: "pete", status: "CONFIRMED" },
+          { key: "dan", status: "CONFIRMED" },
+          { key: "felix", status: "CONFIRMED" },
+          { key: "greg", status: "BENCH" },
+        ],
+      })
+    ).attach(request);
+
+    // No tag anywhere: the "@" is on the PLAYERS, exactly as in the real
+    // message. Pete is the drop; Dan is the demote the owner may not
+    // make without tagging the bot.
+    const r = await grp.post(
+      "owner",
+      "@Pete Power is OUT voluntarily to switch to 5aside. Either @Dan Drummer or @Felix Fox can be in the main squad and the other can go to bench",
+      {
+        route: "other_att",
+        facts: facts([otherClaim("Pete Power", "out"), otherClaim("Dan Drummer", "bench")]),
+      },
+    );
+
+    // THE HALF THAT APPLIES.
+    expect(await grp.dropped()).toContain("Pete Power");
+    expect((await grp.counts()).confirmed).toBe(4);
+
+    // THE HALF THAT DOES NOT. A demote is roster surgery and still needs
+    // a tag from everybody, the owner included.
+    expect(await grp.confirmed()).toContain("Dan Drummer");
+    expect(await grp.bench()).not.toContain("Dan Drummer");
+
+    // AND THE OWNER IS TOLD, because a partially applied instruction he
+    // believes landed whole is §9's signature failure.
+    expect(r.reply ?? "").toMatch(/left alone/i);
+    expect(r.reply ?? "").toMatch(/Dan/);
+
+    // THE APPLY PATH IS THE ORDINARY ONE: the freed slot is offered to
+    // the bench, and the offer is claimable.
+    const offers = await grp.openOffers();
+    expect(offers).toHaveLength(1);
+    const claim = await grp.dm("greg", "YES");
+    expect(claim.json.result).toBe("confirmed");
+    expect((await grp.attendanceOf("greg"))?.status).toBe("CONFIRMED");
+    expect(await grp.openOffers()).toHaveLength(0);
+  });
+
+  test("the same message from a PLAYER applies nothing and says nothing", async ({
+    request,
+    db,
+  }) => {
+    const grp = (
+      await createGroup(request, db, {
+        maxPlayers: 5,
+        attendance: [
+          { key: "owner", status: "CONFIRMED" },
+          { key: "alice", status: "CONFIRMED" },
+          { key: "pete", status: "CONFIRMED" },
+          { key: "dan", status: "CONFIRMED" },
+          { key: "felix", status: "CONFIRMED" },
+        ],
+      })
+    ).attach(request);
+
+    const r = await grp.post("greg", "Pete is out, put Dan on the bench", {
+      route: "other_att",
+      facts: facts([otherClaim("Pete Power", "out"), otherClaim("Dan Drummer", "bench")]),
+    });
+
+    expect(await grp.confirmed()).toContain("Pete Power");
+    expect(await grp.confirmed()).toContain("Dan Drummer");
+    expect(await grp.openOffers()).toHaveLength(0);
+    // Both clauses refused, so nothing was applied and there is no turn
+    // for a refusal sentence to ride: MatchTime stays silent.
+    expect(r.reply).toBeNull();
+    expect(r.react).toBeNull();
   });
 });
 

@@ -44,6 +44,7 @@
  */
 import {
   actionRequiresTag,
+  registerForEntryRequiresTag,
   type GateRegisterForEntry,
   type GateVerdict,
 } from "../interaction-contract";
@@ -328,38 +329,23 @@ export function decide(input: EngineInput): EngineResult {
       // of the policy — and because a second boolean beside the gate is
       // how the recruit waiver leaked onto the bulk-DM path.
       // `senderIsAdmin` is the ROSTER's answer, never the model's.
-      const gate = toGateVerdict(claims, facts);
-      const needsTag = actionRequiresTag(gate, { senderIsAdmin });
-      /** True only when the admin-OUT waiver is the thing carrying this
-       *  message: the gate says yes for anyone else and no for this
-       *  sender. Implies `senderIsAdmin` by construction. */
-      const waivedByAdminOut = !needsTag && actionRequiresTag(gate);
-      if (needsTag && !msg.tagged && !addressedByRecruit) {
-        out.reasons.push("requires an @Match Time tag (interaction contract)");
-        return;
-      }
-      if (waivedByAdminOut && !msg.tagged) {
-        // Name WHICH waiver let an untagged roster change through. The
-        // reason trail is the only place a wrong drop can be traced back
-        // to a policy rather than to a model, and there are now two
-        // waivers that can carry the same message.
-        out.reasons.push(
-          "untagged, but an admin may report another player OUT without one " +
-            "(ADMIN_REPORTED_OUT_IS_TAG_FREE)",
-        );
-      }
-      if (addressedByRecruit && !msg.tagged) {
-        out.reasons.push(
-          "untagged, but an admin's recruit command addresses MatchTime (PR #33)",
-        );
-      }
 
-      if (!state.matchId) {
-        degrade("no active registration match (blocked or none upcoming)", "state");
-        return;
-      }
-
-      // ── Resolve every claim to a person BEFORE deciding anything ─────
+      // ── Collapse to ONE claim per person, BEFORE the gate ────────────
+      //
+      // MOVED UP FROM BELOW ON 2026-09-08, and the move is load-bearing:
+      // the gate is now asked PER CLAIM, and a per-claim gate has to see
+      // each person's FINAL claim or it re-opens the correction-reversal
+      // the collapse exists to prevent. "Mojib is in… actually put Mojib
+      // on the bench", untagged: gating the raw list refuses the BENCH,
+      // keeps the earlier IN and registers the man the message just
+      // demoted. Collapsed first, the person carries one claim, that
+      // claim is gated, and a refusal is a refusal for that person.
+      //
+      // Nothing else moved with it. The ordering rule below (OUT before
+      // IN across distinct people) and every per-claim veto still run in
+      // their old order, on the same array; only the point at which the
+      // array is built changed. The rest of this comment is the original
+      // and still describes exactly what these six lines do.
       //
       // ORDER MATTERS, and it is a DECISION, so the engine owns it: a
       // replacement frees the slot before it fills it. Found by the
@@ -381,9 +367,219 @@ export function decide(input: EngineInput): EngineResult {
         const key = c.subject === "sender" ? "@self" : c.personRef.trim().toLowerCase();
         byTarget.set(key, c);
       }
-      const ordered = [...byTarget.values()].sort(
+      const collapsed = [...byTarget.values()].sort(
         (a, b) => (a.polarity === "out" ? 0 : 1) - (b.polarity === "out" ? 0 : 1),
       );
+
+      const gate = toGateVerdict(collapsed, facts);
+      const needsTag = actionRequiresTag(gate, { senderIsAdmin });
+
+      // ── THE GATE, ASKED ONCE PER CLAIM (2026-09-08) ──────────────────
+      //
+      // THE INCIDENT. Kemal posted to the live group, untagged, on match
+      // day:
+      //
+      //   "David is OUT voluntarily to switch to 5aside.
+      //
+      //    Either @Mojib Jalali or @Najib can be in the main squad and
+      //    the other can go to bench"
+      //
+      // MatchTime recorded NOTHING — "requires an @Match Time tag
+      // (interaction contract)" — and David stayed in a squad he had
+      // just left, corrected by hand twice on the day. The BENCH clause
+      // is genuinely refused (a demote needs a tag from everybody, the
+      // owner included, and that rule is NOT being reversed); the bug is
+      // that the refusal was taken for the WHOLE MESSAGE, so one clause
+      // MatchTime may not act on discarded a clean, unambiguous drop
+      // from the one person entitled to order it.
+      //
+      // So the question is asked per claim. `actionRequiresTag` is still
+      // the message-level summary and is still exactly the OR of these
+      // answers (pinned by an exhaustive test in
+      // `interaction-contract.test.ts`) — it is used below only for the
+      // "is there anything at all here I may act on?" question, which is
+      // the one it is the right answer to.
+      const claimNeedsTag = (c: Claim): boolean =>
+        // The sender's OWN attendance is the contract's first tag-free
+        // class and never needs one. Note this is a WIDENING beside the
+        // old message-level gate, which refused a sender's own IN/OUT
+        // whenever the same message also carried a third-party clause it
+        // disliked: "I'm out, and put Mojib on the bench" from an
+        // ordinary member used to lose the sender's own drop as well,
+        // and the club turned up short with his name still in the list.
+        c.subject === "sender"
+          ? false
+          : registerForEntryRequiresTag(
+              { name: c.personRef, action: polarityToAction(c.polarity) },
+              { senderIsAdmin },
+            );
+      /** May this claim be acted on, given how the message was (or was
+       *  not) addressed to MatchTime? */
+      const permitted = (c: Claim): boolean => {
+        if (!claimNeedsTag(c)) return true;
+        if (msg.tagged) return true;
+        // PR #33's recruit waiver stands in for a tag on the rest of an
+        // admin's recruit command, and it reaches exactly as far as the
+        // OUT waiver does: NEVER a BENCH. A tag is a structural signal
+        // (the Pi's mention list); `addressedByRecruit` is an INFERENCE
+        // over model output ("this sentence asks for players"), and the
+        // bench rule's second, independent signal cannot be an
+        // inference. Before 2026-09-08 this waiver carried a bench
+        // through untagged, which contradicted the rule stated one
+        // constant away; the engine test named for it is the receipt.
+        return addressedByRecruit && c.polarity !== "bench";
+      };
+      const refusedClaims = collapsed.filter((c) => !permitted(c));
+      const ordered = collapsed.filter((c) => permitted(c));
+      // ⚠️ WHAT A REFUSED CLAIM SKIPS. Dropping it here skips every
+      // per-claim rule below for that person: the confidence floor,
+      // tense, the availability hold, both contingency holds, identity
+      // resolution, the admin-only bench guard, `banterRefusal`,
+      // capacity and `applyClaim`. Every one of those can only ever
+      // REFUSE a claim further, so skipping them cannot turn a "no" into
+      // a "yes" — the refusal is the strongest answer any of them could
+      // have reached. Two non-refusals live down there and both are
+      // accounted for: the guest-name-ask, which only ever collects an
+      // IN (never refused, see above), and `degrade()` on an ambiguous
+      // or contradictory name, which exists to explain a write that did
+      // not happen — and this claim's reason line already does that,
+      // more precisely. The third is `isPromoteFromBenchAuthorized`,
+      // computed over `targets`: a refused claim leaves it, which can
+      // only make it stricter, and the self-replace case it protects
+      // reads the SENDER's own claim, which is never refused.
+
+      // SEATBELT. `actionRequiresTag` and `claimNeedsTag` are two
+      // statements of ONE rule — the message-level answer is defined as
+      // the OR of the per-claim ones, and an exhaustive unit test pins
+      // it — so this can only fire if the contract grows a case one of
+      // them does not know about. That drift is the whole shape of the
+      // 2026-09-08 incident (a rule stated in one place, applied at the
+      // wrong granularity in another), and four seatbelts were found
+      // dead and silent on 2026-08-31, so it degrades LOUDLY rather
+      // than being a comment claiming the two agree.
+      if (needsTag !== collapsed.some((c) => claimNeedsTag(c))) {
+        degrade(
+          "interaction contract disagrees with itself: actionRequiresTag says " +
+            `${needsTag} and the per-claim rule says ${!needsTag}`,
+        );
+      }
+
+      /** Claims that are ONLY here because of the admin-OUT waiver: the
+       *  contract refuses them for anybody else and permits them for
+       *  this sender. Implies `senderIsAdmin` by construction.
+       *
+       *  Asked over the PERMITTED claims rather than over the message
+       *  (which is what `!needsTag && actionRequiresTag(gate)` did until
+       *  2026-09-08), because a message can now carry a waived drop AND
+       *  a refused demote at once — which is the incident — and the
+       *  message-level form went quiet on exactly that case. The reason
+       *  trail is the only place a wrong drop can be traced back to a
+       *  policy rather than to a model, so it has to name the waiver
+       *  whenever the waiver is what moved somebody. */
+      const waivedByAdminOut = ordered.some(
+        (c) =>
+          c.subject === "other" &&
+          !claimNeedsTag(c) &&
+          // The same question with NO sender: "would anyone else have
+          // needed a tag for this?" Absence means "not an admin".
+          registerForEntryRequiresTag({
+            name: c.personRef,
+            action: polarityToAction(c.polarity),
+          }),
+      );
+
+      if (ordered.length === 0) {
+        // NOTHING in the message may be acted on. Byte-identical to the
+        // old behaviour, reason string included: silence, no reaction,
+        // DB unchanged.
+        //
+        // ⚠️ A TERMINAL BRANCH IN THIS LOOP SKIPS EVERY GUARD BELOW IT,
+        // and that has caused its own family of defects (three in two
+        // days, see the terminal-short-circuit note). This one is the
+        // OLD terminal branch moved four lines, not a new one, and here
+        // is what it skips and why each is covered:
+        //
+        //   the waiver reason lines   nothing was permitted, so no
+        //                             waiver carried anything and there
+        //                             is no policy to name.
+        //   `!state.matchId` degrade  deliberately still BELOW this, as
+        //                             it was before: an untagged message
+        //                             in a group with no active match
+        //                             should report the tag as its
+        //                             reason, not degrade over a match
+        //                             it was never going to write to.
+        //   resolution / identity     zero claims to resolve.
+        //   the guest-name-ask        it collects unnamed third-party
+        //                             INs, and an IN is tag-free for
+        //                             everyone, so `ordered` can never
+        //                             be empty while one exists.
+        //   promote authorisation,
+        //   capacity, applyClaim,
+        //   the bench-offer chain     all keyed off `targets`, which is
+        //                             empty with no claims; the loop
+        //                             below returns on `targets.length
+        //                             === 0` anyway.
+        //   `fromAffirmation` ack     unreachable: an affirmation builds
+        //                             third-party IN claims, which are
+        //                             tag-free, so it cannot arrive here.
+        //   the recruit side-request
+        //   reason line               also skipped before this change,
+        //                             by the same return one line up.
+        out.reasons.push("requires an @Match Time tag (interaction contract)");
+        return;
+      }
+
+      /** The refused half, resolved to REAL PEOPLE, for the sentence
+       *  below. Only names the roster recognises: the refusal names
+       *  players out loud, and the only names MatchTime prints are its
+       *  own roster's, never a string a model produced. A reference
+       *  that resolves to nobody had nothing to refuse anyway
+       *  (identity.ts: "not a member; nothing to drop or bench"). */
+      const refusedForSpeech: Array<{ name: string; action: "OUT" | "BENCH" }> = [];
+      for (const c of refusedClaims) {
+        const what = c.polarity === "bench" ? "moved to the bench" : "dropped";
+        out.reasons.push(
+          `"${c.personRef}" is not being ${what}: that part needs an @Match Time tag ` +
+            `(the rest of the message still applies)`,
+        );
+        const res = resolvePerson(c.personRef, w.roster);
+        if (res.kind === "resolved") {
+          refusedForSpeech.push({
+            name: res.member.name,
+            action: c.polarity === "bench" ? "BENCH" : "OUT",
+          });
+        }
+      }
+
+      if (waivedByAdminOut && !msg.tagged) {
+        // Name WHICH waiver let an untagged roster change through. The
+        // reason trail is the only place a wrong drop can be traced back
+        // to a policy rather than to a model, and there are now two
+        // waivers that can carry the same message.
+        out.reasons.push(
+          "untagged, but an admin may report another player OUT without one " +
+            "(ADMIN_REPORTED_OUT_IS_TAG_FREE)",
+        );
+      }
+      if (addressedByRecruit && !msg.tagged) {
+        out.reasons.push(
+          "untagged, but an admin's recruit command addresses MatchTime (PR #33)",
+        );
+      }
+
+      if (!state.matchId) {
+        degrade("no active registration match (blocked or none upcoming)", "state");
+        return;
+      }
+
+      // ── Resolve every surviving claim to a person ────────────────────
+      //
+      // `ordered` is the collapsed, OUT-first, gate-permitted list built
+      // above. Everything from here down is unchanged and runs for every
+      // claim in it, whether the message was tagged, waived or partially
+      // refused — which is the property the offer chain depends on (a
+      // partially applied drop must propose the identical write, so the
+      // vacated slot is offered exactly as it always was).
       const targets: Target[] = [];
       const guestAsks: Claim[] = [];
       for (const c of ordered) {
@@ -758,6 +954,36 @@ export function decide(input: EngineInput): EngineResult {
             });
           }
         }
+      }
+
+      // ── SAY WHAT WAS NOT DONE (2026-09-08) ──────────────────────────
+      //
+      // §9: "message understood, action silently not taken" is this
+      // product's signature failure, and a partially applied instruction
+      // the owner does not know was partial is that failure exactly. He
+      // watched MatchTime act on his message; every reason he has to
+      // believe the rest of it landed is now a reason to be wrong about
+      // the squad on match day.
+      //
+      // Against that, the contract is conservative about SPEAKING, and
+      // deliberately so. Both are satisfied by the same condition: the
+      // sentence only ever rides a turn MatchTime is ALREADY taking.
+      // `out.writes.length > 0` means this message changed the squad, so
+      // the status post is going out regardless and the refusal costs no
+      // extra message and no new class of unprompted chatter. When
+      // nothing was written — the whole message refused, or the
+      // permitted half turning out idempotent — MatchTime stays silent
+      // exactly as it does today, and the refusal lives in the reason
+      // trail where the operator log reads it.
+      //
+      // It names the remedy ("tag me") because the alternative is an
+      // owner who learns only that half his instruction vanished.
+      if (refusedForSpeech.length > 0 && out.writes.length > 0) {
+        speech.push({
+          kind: "needs_tag_for_rest",
+          messageId: msg.id,
+          entries: refusedForSpeech,
+        });
       }
 
       // A resolved confirmation is a conversational turn and deserves an

@@ -71,6 +71,8 @@ const FULL_NAMES: Record<string, string> = {
   // message refers to him.
   shahrokh: "Shahrokh",
   ayoub: "Ayoub Benali",
+  // One name, no surname, exactly as he appears in the live group.
+  david: "David",
   salman: "Salman Shelly",
   talha: "Talha Younis",
   aydin: "Aydin Celik",

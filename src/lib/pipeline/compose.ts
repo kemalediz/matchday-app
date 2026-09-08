@@ -373,6 +373,31 @@ export function compose(result: EngineResult): ComposedOutput {
         break;
       }
 
+      case "needs_tag_for_rest": {
+        // WHAT MATCHTIME DID NOT DO, named. The engine has already
+        // decided this sentence is allowed (it only emits the intent
+        // beside a write, so this rides the squad post rather than
+        // speaking on its own), and it has already resolved every name
+        // against the roster. All that is left here is the wording.
+        //
+        // It says the REFUSED half only. The applied half is in the
+        // squad post one message later, and repeating it here is the
+        // two-rosters-one-line-apart shape S36 exists to prevent.
+        const benched = s.entries.filter((e) => e.action === "BENCH").map((e) => safeName(e.name));
+        const dropped = s.entries.filter((e) => e.action === "OUT").map((e) => safeName(e.name));
+        const parts: string[] = [];
+        if (dropped.length > 0) parts.push(`taken ${joinList(dropped)} out`);
+        if (benched.length > 0) parts.push(`moved ${joinList(benched)} to the bench`);
+        if (parts.length === 0) break;
+        utterances.push({
+          messageId: s.messageId,
+          text:
+            `One thing I've left alone: I've not ${parts.join(" or ")}. ` +
+            `That bit needs an @Match Time tag, so tag me and I'll sort it 👍`,
+        });
+        break;
+      }
+
       case "bench_claim_too_late": {
         const who = firstName(
           state.roster.find((m) => m.userId === s.userId)?.name ?? "",
