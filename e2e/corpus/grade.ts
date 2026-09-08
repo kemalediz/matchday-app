@@ -115,29 +115,54 @@ export interface CorpusWorld {
   /** Open a real BenchSlotOffer by dropping this confirmed player first
    *  (the only way to get the "OPEN BENCH SLOT" context block). */
   openBenchSlotByDropping?: string;
+  /**
+   * MatchTime's own last group post, seeded as a `BotJob` row.
+   *
+   * NOT the same thing as `history`, and the difference decides §3.2
+   * S25: `history` is the buffer the Pi forwards with the request, while
+   * `state.lastBotPost` is read from the database
+   * (`load-state.ts:191`) and is what the engine resolves a bare
+   * "Confirmed" against. A case that puts the bot's pending list only in
+   * `history` gives the engine no pending set to resolve, and the run
+   * then looks like a bot ignoring a member.
+   */
+  lastBotPost?: string;
 }
 
-/** What the model emitted — used ONLY in stubbed mode. See `stubKind`. */
-export interface CorpusStubVerdict {
-  intent?: string;
-  confidence?: number;
-  react?: string | null;
-  reply?: string | null;
-  registerAttendance?: "IN" | "OUT" | "BENCH" | null;
-  benchConfirmation?: "yes" | "no" | null;
-  registerFor?: Array<{ name: string; action: "IN" | "OUT" | "BENCH" }> | null;
-  /** The message asks for MORE PLAYERS. A flag, not an intent — it
-   *  coexists with the attendance the same message carries. */
-  recruitRequest?: boolean;
-  scoreRed?: number | null;
-  scoreYellow?: number | null;
-  includeNames?: string[] | null;
-  teamOverrides?: Array<{ name: string; team: "RED" | "YELLOW" }> | null;
-  teamNames?: [string, string] | null;
-  bulkPayment?: { payerName: string; count: number; coveredNames?: string[] } | null;
-  reminder?: { date: string; time?: string; note: string } | null;
-  reasoning?: string;
-}
+/**
+ * The nine routes the router may answer with. A copy, deliberately:
+ * this file is pure and has no business importing from `src/`, and a
+ * corpus that names a route the pipeline has never heard of should fail
+ * in the LOADER rather than silently route to `unsure` at run time.
+ * `load.ts` checks every case's `route` against this list.
+ */
+export const ALL_CORPUS_ROUTES: readonly string[] = [
+  "none",
+  "self_att",
+  "other_att",
+  "offer",
+  "question",
+  "balancer",
+  "score",
+  "admin_ops",
+  "unsure",
+];
+
+/**
+ * The RAW JSON an extractor returned for a message — the successor to
+ * `CorpusStubVerdict`, which §10 step 8 deleted along with the thing
+ * that emitted verdicts.
+ *
+ * It is deliberately an untyped record and not a `Facts` union: the
+ * server's `parseFacts` still runs for real on it, so the enum
+ * re-validation, the dropped claim on a drifted polarity and the
+ * "none" → null affirmation mapping stay part of what a case exercises
+ * (§11.3 — structured output guarantees shape, never semantics). The
+ * shape belongs to whichever extractor the `route` reaches:
+ * `attendance` for `self_att` / `other_att` / `offer` / `unsure`,
+ * `question`, `teams`, `score`, `admin` for the rest.
+ */
+export type CorpusFacts = Record<string, unknown>;
 
 export interface CorpusMessage {
   /** A roster key, or an outsider the org has never seen. */
@@ -150,8 +175,19 @@ export interface CorpusMessage {
    *  buffer does; turns run in ascending order and each turn sees the
    *  previous turns (and MatchTime's own replies) as chat history. */
   turn?: number;
-  /** Stubbed-mode verdict. See `CorpusCase.stubKind`. */
-  stub?: CorpusStubVerdict;
+  /**
+   * STUBBED MODE — what the ROUTER answered for this message. Its
+   * presence is what makes a case runnable in CI: a message with no
+   * route is never fed to the router stub, and `gate.ts` treats an
+   * unmapped id as `unsure`.
+   *
+   * A route is a fact about the message ("this is the sender talking
+   * about their own attendance"), not a decision about it, which is why
+   * it is safe to hand-write and the old `registerAttendance` was not.
+   */
+  route?: string;
+  /** STUBBED MODE — the raw JSON the extractor for `route` returned. */
+  facts?: CorpusFacts;
 }
 
 /** One line of the Pi's last-15 buffer, forwarded on every analyze call.
@@ -225,16 +261,57 @@ export interface CorpusCase {
   messages: CorpusMessage[];
   expect: CorpusExpectation;
   /**
-   * How to read the `stub` verdicts on this case's messages.
-   *  - "historical": the verdict the model ACTUALLY emitted during the
-   *    incident. A stubbed run then asks "does today's SERVER catch it?"
-   *    Cases whose fix was prompt-only are expected to fail in stubbed
-   *    mode — that is a finding, recorded in the baseline, not a bug.
-   *  - "corrected": what a correct model emits. A stubbed run asks
-   *    "does the server execute a correct verdict correctly?"
-   * Absent → the case is LIVE-ONLY (nothing to stub).
+   * How to read the `route` + `facts` on this case's messages. ONE legal
+   * value, and that is the point.
+   *
+   *  - "transcribed": every stubbed field is a property of the message
+   *    text, checkable by re-reading it — who is talking, about whom,
+   *    in / out / bench, tense, contingent, named or not. Nothing in it
+   *    says what the server should DO. A stubbed run therefore asks the
+   *    only question a stub can honestly ask: given a correct reading of
+   *    this message, does the server decide and write correctly?
+   *
+   * The two old values are gone with the seam they described.
+   * "corrected" meant "the verdict a correct model emits" and
+   * "historical" meant "the verdict the model actually emitted on the
+   * day" — the second of which has no successor at all, because there
+   * was no router and no extractor on 2026-05-08 and inventing their
+   * output would be `README.md`'s rule 1 in reverse. Where the READING
+   * itself was the incident, the case is live-only with a
+   * `liveOnlyReason` saying so; where the reading was never in doubt and
+   * the failure was what the system DID with it, the facts are
+   * transcribed here and the case stays in CI. The loader rejects both
+   * old spellings by name.
+   *
+   * Absent → the case is LIVE-ONLY (nothing honest to stub).
    */
-  stubKind?: "historical" | "corrected";
+  stubKind?: "transcribed";
+  /**
+   * Why this case's `expect` block says what it says, when the answer is
+   * not simply "the commit in `provenance`".
+   *
+   * Written at the case, not in a PR description, because a PR
+   * description is unreadable six months later from inside the file that
+   * needs it. Required by the loader whenever an expectation was CHANGED
+   * rather than merely ported: `README.md`'s rule is that an expectation
+   * may never be weakened to make a suite green, and the enforceable
+   * version of that rule is that every change to one carries a reason a
+   * human can check.
+   *
+   *  - "old_right": the recorded expectation stands and today's pipeline
+   *    is wrong. The case is left FAILING and the defect reported.
+   *  - "new_right": the recorded expectation encoded the mega-prompt's
+   *    behaviour rather than correct behaviour. The expectation moves,
+   *    and `reason` says what the correct behaviour is and why.
+   *  - "harness": neither the expectation nor the product moved — the
+   *    case was failing because the seam it ran through had been
+   *    deleted. Restoring the seam restores the case.
+   */
+  adjudication?: {
+    verdict: "old_right" | "new_right" | "harness";
+    date: string;
+    reason: string;
+  };
   /**
    * True when the case carries an `@Match Time` tag the ORIGINAL
    * production message did not have. The interaction contract (19f43e3,
@@ -245,10 +322,11 @@ export interface CorpusCase {
    */
   contractTagAdded?: boolean;
   /**
-   * Set on a case that carries NO stub verdict and therefore never runs
-   * in CI. It must say what a stub would destroy — usually that the
-   * assertion IS the model's classification, or that the asserted text
-   * is model-authored so a stub would contain the answer. Enforced by
+   * Set on a case that carries NO `route` and therefore never runs in
+   * CI. It must say what a stub would destroy — the assertion IS the
+   * model's classification; the READING of the message was itself the
+   * incident, so a stub would contain the answer; the asserted text is
+   * model-authored; or a stub is structurally impossible. Enforced by
    * the loader so the count of CI-covered cases can never quietly drift
    * away from the count of corpus cases.
    */
@@ -397,11 +475,31 @@ export function gradeCase(c: CorpusCase, o: CorpusObservation): CaseGrade {
   const joined = allText.join("\n");
 
   // ── writes ──────────────────────────────────────────────────────────
+  //
+  // "SPURIOUS" MEANS A WRITE HAPPENED. Every classification below is
+  // decided against `attendanceBefore`, not against the expectation
+  // alone, because §10 step 3's go/no-go number is *"zero cases where
+  // the new pipeline would WRITE and the old correctly did not"*. Read
+  // off the divergence instead, a drop that never happened leaves the
+  // confirmed count above the expected one and files as a spurious
+  // write — the opposite of what happened. That is not hypothetical: the
+  // stubbed sweep of 2026-09-06 reported `spurious_write 8` while 35 of
+  // its 36 cases changed not a single row, and the number was quoted in
+  // this directory's README and in `corpus.spec.ts` as evidence of
+  // deterministic fast paths writing behind the router's back. Measured
+  // again on 2026-09-08: all eight had `attendanceBefore ===
+  // attendanceAfter`. Nothing wrote. See `grade.test.ts`.
   for (const want of e.attendance ?? []) {
     const name = resolvePlayer(c, want.player);
     const got = statusOf(o.attendanceAfter, name);
     if (got === want.status) continue;
-    if (want.status === "ABSENT") {
+    const before = statusOf(o.attendanceBefore, name);
+    const shown = got === "ABSENT" ? "no attendance row" : got;
+    if (got === before) {
+      // The row is exactly as the world seeded it: the pipeline failed
+      // to make a write, whichever direction the expectation pointed.
+      fail("missed_write", `${name}: expected ${want.status}, got ${shown} (nothing moved)`);
+    } else if (want.status === "ABSENT") {
       fail("spurious_write", `${name}: expected NO attendance row, got ${got}`);
     } else if (got === "ABSENT") {
       fail("missed_write", `${name}: expected ${want.status}, got no attendance row`);
@@ -427,13 +525,19 @@ export function gradeCase(c: CorpusCase, o: CorpusObservation): CaseGrade {
       ["bench", "BENCH"],
       ["dropped", "DROPPED"],
     ];
+    const tallyBefore = (s: AttStatus) =>
+      o.attendanceBefore.filter((r) => r.status === s).length;
     for (const [key, status] of checks) {
       const want = e.counts[key];
       if (want === undefined) continue;
       const got = tally(status);
-      if (got !== want) {
-        fail(got > want ? "spurious_write" : "missed_write", `${key}: expected ${want}, got ${got}`);
-      }
+      if (got === want) continue;
+      // Same rule as the per-player check above: a tally that is exactly
+      // what the world was seeded with is a write that did not happen,
+      // however far it is from the expectation.
+      const moved = got !== tallyBefore(status);
+      const kind: Classification = moved && got > want ? "spurious_write" : "missed_write";
+      fail(kind, `${key}: expected ${want}, got ${got}${moved ? "" : " (nothing moved)"}`);
     }
   }
 
@@ -592,7 +696,15 @@ export interface Scoreboard {
   sectionsWithACase: string[];
   /** §3.2 sections with no case at all. A deliverable in its own right. */
   coverageGaps: string[];
-  /** §10 step 3's go/no-go numbers. */
+  /** §10 step 3's go/no-go numbers.
+   *
+   *  `spuriousWriteRuns` counts runs in which the pipeline WROTE
+   *  something it should not have — measured against `attendanceBefore`,
+   *  never against the distance from the expectation. A run that changes
+   *  no row can no longer contribute to it (see `gradeCase`). The one
+   *  exception left is `benchOffersOpen`, which the observation reports
+   *  only as an "after": an offer count above the expectation is filed
+   *  spurious without a before to check it against. */
   criteria: {
     spuriousWriteRuns: number;
     missedWriteRuns: number;
@@ -647,7 +759,7 @@ export function buildScoreboard(
   }
 
   // Coverage is a property of the CORPUS, not of one run: a case skipped
-  // for want of a stub verdict still covers its section. Counting only
+  // for want of a route still covers its section. Counting only
   // the cases that ran would have reported 26 phantom gaps in the
   // stubbed baseline, which is exactly the kind of number that gets
   // repeated in a funding document.
@@ -696,7 +808,7 @@ export function renderScoreboard(sb: Scoreboard): string {
         `this mode and are NOT covered by the numbers above.`,
     );
     lines.push(
-      `    A case with no stub verdict cannot be replayed deterministically — its outcome ` +
+      `    A case with no route cannot be replayed deterministically — its outcome ` +
         `depends on the real model. Run \`npm run test:corpus:live\` for those.`,
     );
   }

@@ -15,7 +15,10 @@
  * §10 step 8 deleted `AnalysisVerdict` altogether, which is this rule
  * paying off rather than a reason to relax it. The boundary carries
  * rows, member names, speech, DMs and reacts, and it did not have to
- * change when the decider it was written around ceased to exist.
+ * change when the decider it was written around ceased to exist — nor
+ * when the cases themselves were ported from verdicts to routes + facts
+ * on 2026-09-08. Both times the OBSERVATION was already the right
+ * shape.
  */
 import type { APIRequestContext } from "@playwright/test";
 import type { TestDb } from "../helpers/test-db";
@@ -32,7 +35,8 @@ export interface CorpusPipeline {
   /** Shown in the scoreboard and the machine-readable report. */
   readonly name: string;
   /** Can this pipeline replay this case in this mode? A stubbed run
-   *  needs the case to carry stub verdicts; a live run needs a key. */
+   *  needs the case to carry a `route` per message; a live run needs a
+   *  key. */
   supports(c: CorpusCase, mode: CorpusMode): boolean;
   /** Replay the case against a FRESH world and report what happened. */
   run(ctx: PipelineContext, c: CorpusCase, mode: CorpusMode): Promise<CorpusObservation>;

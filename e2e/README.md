@@ -108,25 +108,27 @@ surviving half was renamed **`MT_TEST_DM_QA_STUB`** (`src/lib/dm-qa.ts`,
 `e2e/helpers/env.ts`, `e2e/helpers/live-llm.ts`). Same behaviour, a name that
 says what it does.
 
-**`npm run test:e2e` has ONE failing test, on purpose.** Measured on
-2026-09-07:
+**`npm run test:e2e` is green.** Measured on 2026-09-08:
 
 ```
-1 failed · 265 passed · 80 skipped · 0 did not run   (1.2m)
+0 failed · 279 passed · 80 skipped · 0 did not run
 ```
 
-Before the port, on the same commit range:
+Before the port off the verdict seam, on the same commit range:
 
 ```
 40 failed · 150 passed · 80 skipped · 82 did not run   (1.7m)
 ```
 
-The one failure is **`e2e/sim/corpus.spec.ts`** — the stubbed incident-corpus
-sweep, whose 36 cases still carry `CorpusStubVerdict` blocks that nothing reads.
-It is left red rather than skipped or re-baselined because porting it requires a
-DECISION about what `stubKind: "historical"` means once the component that erred
-is deleted. `e2e/corpus/README.md` has the options and their costs; the spec's
-own header has the measured numbers.
+The last red spec was **`e2e/sim/corpus.spec.ts`**, the stubbed incident-corpus
+sweep, whose 36 cases still carried the deleted verdict seam's blocks, which
+nothing read. It was left red rather than skipped or re-baselined because porting it
+needed a DECISION about what a HISTORICAL stub — "the verdict the model actually
+emitted on the day" — means once the component that erred is deleted. That decision was taken on 2026-09-08 and is written up
+in `e2e/corpus/README.md`: routes + facts per message, ten of the eleven
+`historical` cases transcribed and kept in CI, one moved to live-only because
+the READING of its message was the incident. Every one of the 36 carries an
+`adjudication` block giving the verdict and the reason at the case.
 
 Two files were **inverted** rather than ported, because what they asserted is
 genuinely gone: `sim/attendance-engine-overload.spec.ts` (the analyzer no longer

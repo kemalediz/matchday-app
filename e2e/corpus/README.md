@@ -24,57 +24,44 @@ MT_CORPUS_FILTER=S12 MT_SIM_RUNS=100 MT_SETTLE_LABEL=after-36 \
 
 Both write a machine-readable report to `.e2e/corpus/report-<mode>.json`.
 
-> ### ⚠️ `npm run test:corpus` (the STUBBED sweep) measures nothing right now
+> ### The stubbed sweep after §10 step 8: routes and facts, never a verdict
 >
-> The stubbed sweep replayed each case's `stub` block through `analyzeBatch`'s
-> verdict seam. §10 step 8 (2026-09-06) deleted `analyzeBatch`, `SYSTEM_PROMPT`
-> and `AnalysisVerdict`; the PR that ported the rest of the suite off that seam
-> deleted `verdict:` itself, so `CurrentAnalyzerPipeline` now forwards
-> **nothing** in `stub` mode. All 36 cases run against a server that routes
-> nothing and says nothing.
+> **What it does now.** Each stubbed case says, per message, what the ROUTER
+> answered (`route`) and what the EXTRACTOR found (`facts`), and the real
+> `/api/whatsapp/analyze` route decides and writes from there. Both are
+> properties of the message TEXT, checkable by re-reading it. Nothing in a case
+> says what the server should do.
 >
-> **Measured 2026-09-06: 10 of 36 green, 24 recorded passes gone**
-> (`spurious_write 8 · wrong_write 3 · missed_write 10 · speech 5`;
-> missed-write rate 27.8% against §10 step 3's 2% target).
+> **Measured 2026-09-08, ports 3203 / 54409: 35 of 35 stubbed cases pass, and
+> 32 of the 35 fail the moment the seam stops forwarding.** That second number
+> is the one worth keeping: it was produced by deliberately disabling the two
+> lines in `current-analyzer-pipeline.ts` that forward `route` and `facts` and
+> re-running the sweep. Only three cases survived a pipeline that reads nothing
+> — S2b and S21b, whose recorded outcome IS silence (each says so in its own
+> `notes`, and neither can be strengthened without destroying the assertion it
+> exists for), and S26, whose write comes from `reconcilePastedRoster` above the
+> router. Twenty-six of the thirty-five change the database and thirty-three of
+> them make MatchTime speak.
 >
-> **Do not read 10/36 as ten cases of coverage.** Most of those ten expect
-> nothing to happen, and a silent bot satisfies that for the wrong reason —
-> S3 (past tense never registers), S11 (a conditional drop holds), S29 (banter
-> drop refused) and S12b (a chase nudge is not a drop) are green because
-> nobody decided anything. The eight SPURIOUS writes are the other side of the
-> same coin: they come from the deterministic fast paths that sit ABOVE the
-> engine (`reconcilePastedRoster`, the bench-prompt reader), which still act
-> on messages nobody routed.
+> **What this replaced, and the number to stop quoting.** For two days the
+> adapter forwarded nothing at all, because every case carried a
+> `CorpusStubVerdict` and the verdict seam had been deleted with `analyzeBatch`.
+> That sweep scored **10 of 36 green** and its scoreboard read
+> `spurious_write 8 · wrong_write 3 · missed_write 10 · speech 5`.
 >
-> This is **left failing on purpose**, not re-baselined. Re-recording it with
-> `MT_CORPUS_RECORD=1` would enshrine "the bot says nothing" as the expected
-> outcome of 36 real incidents, which is the single worst thing that could be
-> done to this corpus.
->
-> **The port is not mechanical, and that is why it did not ride along with the
-> rest of the suite.** 25 of the 36 are `stubKind: "corrected"` and port
-> directly: write the facts the text carries, and the case still asks "does the
-> server execute a correct reading correctly?". The other **11 are
-> `historical`** — "the verdict the model ACTUALLY EMITTED during the incident"
-> — and there is no historical router or extractor output to port, because
-> neither component existed on the day. Each option changes what the corpus
-> asserts:
->
-> | option | what it costs |
-> | --- | --- |
-> | re-label them `corrected` and write the true facts | the cases stop asking whether the SERVER catches a bad reading; they become "given a correct reading, is the outcome right?" |
-> | mark them live-only with a `liveOnlyReason` | CI-covered cases drop from 36 to 25 |
-> | write deliberately-wrong facts | tests the extractor, not the server — the "grading your own answer key" trap below |
->
-> Rule 4 above ("never weaken an expectation to make the suite green") is why
-> none of those was chosen unilaterally. Pick one, re-record, and say which in
-> the commit.
->
-> The LIVE sweeps (`test:corpus:live`, `:answers`, `:writes`, `:dryrun`) are
-> unaffected: they never used the verdict seam, and they are the corpus's real
-> evidence until this is settled.
+> **There were no spurious writes.** Re-measured on 2026-09-08, all eight had
+> `attendanceBefore === attendanceAfter`: not one row moved, in any of them. The
+> grader was classifying a MISSED DROP as a spurious write, because a drop that
+> never happens leaves the confirmed count ABOVE the expectation and the counts
+> check read `got > want` as "it wrote too much". `gradeCase` now decides every
+> classification against `attendanceBefore`, so "spurious" means a write
+> happened — which is what §10 step 3's go/no-go criterion asks for. The claim
+> in this file and in `corpus.spec.ts` that the eight came from deterministic
+> fast paths acting behind the router's back was wrong: exactly ONE case in that
+> whole sweep changed a single row, and it was S26, doing what it is supposed
+> to.
 
-**61 cases; 36 run in CI.** The other 25 cannot be replayed deterministically and
+**61 cases; 35 run in CI.** The other 26 cannot be replayed deterministically and
 each must say why (see *Stubbed vs live*). The scoreboard states all three numbers
 on its first two lines — a case that never ran is never counted as a pass.
 
@@ -172,6 +159,7 @@ scoreboard from before PR #34 that does not name its ports is unverifiable.**
 | `engine-pipeline.ts` | pipeline #3 — the shipped route with the engine WRITING (§10 step 6). |
 | `answer-engine-pipeline.ts` | pipeline #4 — `question` + `balancer`, answered from the database and writing nothing (§10 step 7 part 1). |
 | `write-routes-pipeline.ts` | pipeline #5 — `score` + `admin_ops`, deciding AND writing: scores, Elo, `paidAt`, `PaymentCredit`, reminder DMs (§10 step 7 part 2). |
+| `world.ts` | builds the world every pipeline is judged against — one builder, so a divergence in it can never read as a divergence in the pipelines. |
 | `runner.ts` | feeds cases to a pipeline, scores them, writes the report. |
 | `baseline.stub.json` | what passes today. A record, not an endorsement. |
 | `../sim/corpus.spec.ts` | stubbed runner (CI). |
@@ -210,6 +198,25 @@ fails: check the expectation against the commit in its provenance block,
 then record the failure in the baseline. **Never weaken an expectation to
 make the suite green.**
 
+> **The enforceable form of rule 4 is `adjudication`** (2026-09-08). An
+> expectation may be CHANGED, and sometimes must be — but only with the reason
+> written at the case, in a sentence a human can check against the code. The
+> loader requires a verdict, an ISO date and a real sentence:
+>
+> | verdict | means |
+> | --- | --- |
+> | `old_right` | the recorded expectation stands and today's pipeline is wrong. The case is left FAILING and the defect reported. |
+> | `new_right` | the recorded expectation encoded the old decider's behaviour rather than correct behaviour. It moves, and the reason says what correct is. |
+> | `harness` | neither the expectation nor the product moved. The case was failing because the seam it ran through had been deleted. |
+>
+> "It went green" is never a reason. Of the 36 verdicts recorded on 2026-09-08,
+> 27 are `harness` (the expectation was not touched at all) and 9 are
+> `new_right`, and every one of the nine asserts MORE than it did before: six
+> gained a canary write, S7 went from `speaks: any` to `speaks: required` plus
+> `mustMention`, S21b gained the `speaks: silent` its own provenance had always
+> claimed, and S12 moved to live-only because a stub would have contained the
+> answer. Not one expectation was relaxed.
+
 **5. A failing case is not yet a production bug either.** Before reporting one,
 rule out a badly-built world. Three cases in the first sweep failed because the
 world did not reproduce the scenario: a completed match seeded at today 20:00,
@@ -229,20 +236,26 @@ targets before calling it a defect, and say plainly when you have not.
                   "player": "Najib Ahmadi", "note": "…what actually happened…" },
   "world":   { "maxPlayers": 14, "players": [...], "attendance": [...] },
   "history": [{ "author": "MatchTime", "body": "…the roster post…" }],
-  "messages": [{ "from": "najib", "body": "In", "stub": { … } }],
-  "stubKind": "historical",
+  "messages": [{ "from": "najib", "body": "In",
+                 "route": "self_att",                       // what the ROUTER said
+                 "facts": { "claims": [{ "polarity": "in" }] } }],  // what the EXTRACTOR found
+  "stubKind": "transcribed",
   "expect": { "attendance": [{ "player": "najib", "status": "BENCH" }],
-              "counts": { "confirmed": 14, "bench": 1 } }
+              "counts": { "confirmed": 14, "bench": 1 } },
+  "adjudication": { "verdict": "harness", "date": "2026-09-08",
+                    "reason": "…why this expectation says what it says…" }
 }
 ```
 
 `world` knobs: `maxPlayers`, `players`, `attendance`, `features`,
 `upcomingMatchInDays` (`null` = no match), `alsoMatchInDays` (a second
-match, for rollover), `completedMatch`, `teams`, `openBenchSlotByDropping`.
+match, for rollover), `completedMatch`, `teams`, `openBenchSlotByDropping`,
+`lastBotPost` (MatchTime's own last group post, as a `BotJob` row — NOT the
+same channel as `history`, and what a bare "Confirmed" resolves against).
 
 `messages` knobs: `from` (roster key or `{name, phone}` outsider), `body`,
 `tag` (the `@Match Time` signal), `turn` (which analyze batch — turns run in
-order and later turns see earlier ones as history), `stub`.
+order and later turns see earlier ones as history), `route`, `facts`.
 
 `expect` knobs: `attendance` (status or `ABSENT`), `unchanged`, `counts`,
 `benchOffersOpen`, `score`, `teamsUnchanged`, `allowNewMembers`, `speaks`
@@ -250,35 +263,85 @@ order and later turns see earlier ones as history), `stub`.
 `mustNotMention`, `mustMatch`, `mustNotMatch`, `claimsMatchWrites`,
 `noRawPhone`.
 
+### Writing `facts`
+
+State the fields the case is ABOUT and leave the rest out.
+`current-analyzer-pipeline.ts:withFactDefaults` fills the boring ones from
+`e2e/helpers/stub.ts:claim()` — the same defaults the other twenty-one ported
+spec files use, so a case and a spec that write the same claim cannot drift into
+describing different messages. Per claim those defaults are:
+
+```
+subject "sender" · personRef "" · personNamed false · polarity "in"
+contingent false · conditionOn "none" · tense "present" · basis "decision"
+reported false · confidence 0.95            … and per body: affirmation "none", sideRequests []
+```
+
+The shape belongs to whichever extractor the `route` reaches — `attendance` for
+`self_att` / `other_att` / `offer` / `unsure`, and `question`, `teams`, `score`,
+`admin` for the four others. Those four are small enough to state in full and
+are passed through untouched. It is the model's RAW JSON, so `parseFacts` still
+runs for real on it: a drifted enum still drops its claim, `"none"` still maps
+to a null affirmation, and `-1` / `""` are still the schema's stand-ins for null.
+
 ## Stubbed vs live
 
-`stubKind` says how to read a case's `stub` verdicts:
+**A stub carries a ROUTE and some FACTS. It never carries a decision.** That is
+the rule the whole file turns on, and `MDs/llm-pipeline-testing-playbook.md` §2
+is the argument for it: a stub that can express "and therefore do X" is stubbing
+the part of the system most likely to move, and when it moved — §10 step 8
+deleting `analyzeBatch` — every test coupled to it stopped testing anything.
 
-- **`historical`** — the verdict the model *actually emitted* during the
-  incident. A stubbed run asks: **does today's server catch it?** Cases whose
-  fix was prompt-only will fail here, and that is the point.
-- **`corrected`** — what a correct model emits. A stubbed run asks: does the
-  server execute a correct verdict correctly?
-- **absent** — the case is live-only: its outcome depends on the real model
-  classifying the message, so there is nothing honest to stub. **The loader then
-  requires `liveOnlyReason`**, so the count of CI-covered cases can never quietly
-  drift away from the count of corpus cases. The three honest reasons are: the
-  assertion IS the classification; the asserted text is model-authored, so a stub
-  would contain the answer; or a stub is structurally impossible (a reminder
-  verdict carries an absolute date the server clamps to `now+60d`).
+`stubKind` has exactly one legal value, and that is the point:
 
-**For a prompt-only fix, the live result is the authority.** A `corrected` stub is
-a guess at what the model emits, and when the original fix changed only the prompt
-(`c85a23c`, `a5a150a`) that guess is guessing the answer. S9 and S28 fail stubbed
-and pass live 3/3 for exactly this reason: the hand-written verdict asked the apply
-path for something the real model never requests. Treat a stubbed failure on a
-prompt-only fix as a question about the stub, not a finding about production.
+- **`transcribed`** — every stubbed field is a property of the message text,
+  checkable by re-reading it: who is talking, about whom, in / out / bench,
+  tense, contingent, named or not. The case then asks the only question a stub
+  can honestly ask: **given a correct reading of this message, does the server
+  decide and write correctly?**
+- **absent** — the case is live-only. **The loader then requires
+  `liveOnlyReason`**, so the count of CI-covered cases can never quietly drift
+  away from the count of corpus cases. The four honest reasons are: the assertion
+  IS the classification; **the READING of the message was itself the incident**,
+  so any stub would contain the answer (S12, Mojib's "replace me and habibi");
+  the asserted text is model-authored; or a stub is structurally impossible.
 
-**Do not "record" stubs from a live run.** The model is non-deterministic, so one
+The two old values are gone. `corrected` said "the verdict a correct model
+emits" and `historical` said "the verdict the model actually emitted on the
+day", and the second has no successor at all: there was no router and no
+extractor on 2026-05-08, so writing one and calling it history is rule 1 in
+reverse. The eleven `historical` cases were split by asking, per case, whether
+the READING was ever in doubt — ten were transcribed and kept in CI, one (S12)
+went live-only. Each says which and why in its own `adjudication` block. The
+loader rejects both old spellings by name so a half-ported case cannot load.
+
+**Do not "record" facts from a live run.** The model is non-deterministic, so one
 sample pins whatever it happened to emit — and §4.1 of the redesign doc measured
 the Amir case emitting the ghost `registerFor: [{name: "Amir's brother"}]` on six
 of six runs. A recorded stub there would enshrine the bug as the expected input.
 
+## Adding a case
+
+1. **Find the commit.** Rule 1: ground truth comes from git. `git show <ref>` and
+   read what the fix actually changed.
+2. **Build the world it landed in** — the squad, the bench, the open offer, the
+   completed match, MatchTime's own last post.
+3. **Write the message, then transcribe it.** Re-read the text and write down
+   only what it SAYS. If you find yourself reaching for a field that means "and
+   therefore register them", stop: that field does not exist, and the engine is
+   what answers it.
+4. **Say what must be TRUE afterwards**, in rows and speech properties. Never a
+   golden string.
+5. **Make sure it can fail.** If your expectation is "nothing happened", a
+   pipeline that reads nothing satisfies it. Two ways out, in order of
+   preference: transcribe facts that positively DEMAND the write the case says
+   must not happen (so the case fails the moment a guard stops refusing), and add
+   a CANARY — an unrelated message in the same batch whose write nobody disputes.
+   Six cases carry one, each labelled in its `notes`. If neither is possible, say
+   so at the case, in full: S21b does, because the assertion that would make it
+   fail ("no `PaymentCredit` row") is not in `CorpusObservation` at all.
+6. **Run it, then run it with the seam disabled.** A case that passes both ways
+   is not a case.
 ## Adding a pipeline
 
 Implement `CorpusPipeline` (`pipeline.ts`) and hand it to `runCorpus`. The

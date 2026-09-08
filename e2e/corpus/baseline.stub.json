@@ -1,7 +1,7 @@
 {
   "pipeline": "current-analyzer",
-  "recordedAt": "2026-09-01",
-  "note": "Stubbed-mode baseline for e2e/sim/corpus.spec.ts. This is a RECORD OF TODAY'S BEHAVIOUR, not a statement that today's behaviour is correct. Section 4 of MDs/analyzer-redesign-2026-08-31.md documents that the current prompt does not reliably do what it says. Two cases fail on purpose and the PR that introduced this file explains why. NEVER weaken a corpus expectation to turn a 'fail' into a 'pass' here - fix the analyzer, then re-record with MT_CORPUS_RECORD=1. 'skip' means the case carries no stub verdict and is live-only.",
+  "recordedAt": "2026-09-08",
+  "note": "Stubbed-mode baseline for e2e/sim/corpus.spec.ts. This is a RECORD OF TODAY'S BEHAVIOUR, not a statement that today's behaviour is correct. RE-RECORDED 2026-09-08, on the commit that ported every case from the deleted VERDICT seam to routes + facts: 35 pass, 0 fail, 26 skip (live-only, each with a liveOnlyReason). The previous baseline was recorded 2026-09-01 against a stubbed sweep that fed the server verdicts; between the two, 24 cases showed as 'pass -> fail' purely because the seam had been deleted, and every one of the 36 was adjudicated case by case rather than re-recorded wholesale - the verdict and the reason are in each case's `adjudication` block in incidents.jsonl. 35 pass is NOT 35 cases of coverage on its own: the number that says the cases measure something is that 32 of the 35 FAIL when the seam stops forwarding (S2b and S21b assert silence and cannot; S26 is written by reconcilePastedRoster above the router). NEVER weaken a corpus expectation to turn a 'fail' into a 'pass' here - fix the pipeline, or adjudicate the case in writing, then re-record with MT_CORPUS_RECORD=1. 'skip' means the case carries no route and is live-only.",
   "cases": {
     "S1-ibrahim-baki-verdict-coverage": "skip",
     "S2-rollover-full-squad-benches-this-week": "pass",
@@ -11,9 +11,9 @@
     "S6-najib-in-at-full-squad": "pass",
     "S7-erdal-words-must-match-action": "pass",
     "S8-salman-admin-demote-to-bench": "pass",
-    "S9-aydin-promote-from-bench-no-hedge": "fail",
+    "S9-aydin-promote-from-bench-no-hedge": "pass",
     "S11-erdal-conditional-drop-holds": "pass",
-    "S12-mojib-replacement-request-drops-sender": "pass",
+    "S12-mojib-replacement-request-drops-sender": "skip",
     "S2b-untagged-third-party-drop-is-gated": "pass",
     "S12b-kemal-chase-nudge-is-not-a-drop": "pass",
     "S13-third-party-nomination-cannot-claim-slot": "pass",
@@ -35,7 +35,7 @@
     "S22-reminder-request-queues-a-dm": "skip",
     "S24-factcheck-wrong-squad-count": "skip",
     "S27-untagged-named-add-registers": "pass",
-    "S28-mention-resolved-swap": "fail",
+    "S28-mention-resolved-swap": "pass",
     "S28b-raw-lid-digits-register-nobody": "skip",
     "S29-zeeshan-banter-drop-refused": "pass",
     "S29b-admin-drop-is-honoured": "pass",
@@ -51,6 +51,18 @@
     "S17-final-score-is-recorded": "pass",
     "PR33-recruit-ask-must-not-swallow-the-drop": "pass",
     "PR44-availability-statement-registers-nobody": "skip",
-    "PR44-a-real-commitment-ten-days-out-still-registers": "skip"
+    "PR44-a-real-commitment-ten-days-out-still-registers": "skip",
+    "PR48-a-courtesy-on-a-state-description-registers-nobody": "skip",
+    "PR48-a-bare-state-description-registers-nobody": "skip",
+    "PR48-a-place-asked-for-still-registers": "skip",
+    "PR48-a-place-claimed-still-registers": "skip",
+    "S16e-roster-question-names-the-players": "skip",
+    "S16f-fixture-question-states-time-and-venue": "skip",
+    "S19b-show-teams-with-none-generated-says-so": "skip",
+    "S17b-first-score-on-a-published-match": "skip",
+    "S22-reminder-request-is-queued-for-the-resolved-day": "skip",
+    "ADMIN-recruit-blast-from-the-last-n-matches": "skip",
+    "ADMIN-recruit-blast-untagged-needs-a-tag": "skip",
+    "ADMIN-chase-nudge-is-not-a-recruit-blast": "skip"
   }
 }
