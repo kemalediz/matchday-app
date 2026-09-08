@@ -177,4 +177,46 @@ describe("isNextUpcomingForPosting", () => {
     const target = m({ id: "target", date: at("2026-06-30T19:30:00Z") });
     expect(isNextUpcomingForPosting([earlier, target], target)).toBe(false);
   });
+
+  it("after the 2026-09-08 kickoff fix, a switched match is no longer CO-TIMED with a ghost — the earlier-in-fixture rule decides, not the id tie-break", () => {
+    // Pre-fix, a 5-a-side ghost and the real 7-a-side match shared the
+    // exact same timestamp and only the lowest `id` won — arbitrary.
+    // The match now moves to 21:15 while a ghost under the still-active
+    // 7-a-side Activity would sit at 21:30, so rule (1) decides: the
+    // earlier match in the same fixture is the one that posts, whatever
+    // the ids happen to be. (Rule (2) stays as belt-and-braces for any
+    // genuinely co-timed pair.)
+    const real = m({
+      id: "zzz-5aside", // deliberately the HIGHER id
+      activityId: "tuesday-5aside",
+      date: at("2026-09-08T20:15:00Z"), // 21:15 BST — moved by the fix
+    });
+    const ghost = m({
+      id: "aaa-7aside",
+      activityId: "tuesday-7aside",
+      date: at("2026-09-08T20:30:00Z"), // 21:30 BST
+    });
+    const all = [real, ghost];
+    expect(isNextUpcomingForPosting(all, real)).toBe(true);
+    expect(isNextUpcomingForPosting(all, ghost)).toBe(false);
+  });
+
+  it("the 2026-07-14 rollover guard still holds once this week's match has moved 15 minutes", () => {
+    // This week switched to 5-a-side and moved to 21:15; next week's
+    // auto-generated 7-a-side match is at 21:30 a week later. Same
+    // fixture, so next week must stay silent.
+    const thisWeek = m({
+      id: "this",
+      activityId: "tuesday-5aside",
+      date: at("2026-09-08T20:15:00Z"),
+    });
+    const nextWeek = m({
+      id: "next",
+      activityId: "tuesday-7aside",
+      date: at("2026-09-15T20:30:00Z"),
+    });
+    const all = [thisWeek, nextWeek];
+    expect(isNextUpcomingForPosting(all, thisWeek)).toBe(true);
+    expect(isNextUpcomingForPosting(all, nextWeek)).toBe(false);
+  });
 });

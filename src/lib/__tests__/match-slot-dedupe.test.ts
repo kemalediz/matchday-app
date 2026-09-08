@@ -135,3 +135,64 @@ describe("hasMatchForSlot", () => {
     expect(hasMatchForSlot(slot(), [])).toBe(false);
   });
 });
+
+/**
+ * THE 2026-09-08 KICKOFF FIX vs THE GHOST.
+ *
+ * `switchMatchFormat` now MOVES `Match.date` to the new Activity's
+ * configured time (see src/lib/format-switch-time.ts). The generator's
+ * dedupe keys on the match INSTANT, so moving the instant is precisely
+ * the thing that could resurrect the ghost. These tests prove it does
+ * not, using the real Sutton prod pair (21:30 ↔ 21:15).
+ *
+ * The invariant: a switch moves the match by exactly
+ * |newActivity.time − oldActivity.time| — 15 minutes for Sutton. Both
+ * Activities stay `isActive`, so on its next run the generator computes a
+ * slot for EACH of them and dedupe must suppress BOTH. It does, because
+ * that difference is also the pre-condition for the pair to dedupe at
+ * all: it had to be inside ±90 min BEFORE this fix (match parked at the
+ * old format's time, other activity generating at the new one) exactly as
+ * much as after it. The fix swaps which side of the pair carries the
+ * offset; it does not widen it.
+ */
+describe("dedupe after switchMatchFormat moves the kickoff (2026-09-08)", () => {
+  const SEVEN_2130 = new Date("2026-09-08T20:30:00Z"); // 21:30 BST
+  const FIVE_2115 = new Date("2026-09-08T20:15:00Z"); // 21:15 BST
+
+  it("switched to 5-a-side and moved to 21:15: the still-active 7-a-side activity generates NOTHING", () => {
+    const switched = [slot({ instant: FIVE_2115 })];
+    expect(hasMatchForSlot(slot({ instant: SEVEN_2130 }), switched)).toBe(true);
+  });
+
+  it("…and the 5-a-side activity it now belongs to also generates nothing (exact instant)", () => {
+    const switched = [slot({ instant: FIVE_2115 })];
+    expect(hasMatchForSlot(slot({ instant: FIVE_2115 }), switched)).toBe(true);
+  });
+
+  it("the reverse switch (5→7, moved to 21:30) suppresses BOTH activities' slots too", () => {
+    const switched = [slot({ instant: SEVEN_2130 })];
+    expect(hasMatchForSlot(slot({ instant: FIVE_2115 }), switched)).toBe(true);
+    expect(hasMatchForSlot(slot({ instant: SEVEN_2130 }), switched)).toBe(true);
+  });
+
+  it("the move itself (15 min) is an order of magnitude inside the ±90 min tolerance", () => {
+    const moveMs = Math.abs(SEVEN_2130.getTime() - FIVE_2115.getTime());
+    expect(moveMs).toBe(15 * 60 * 1000);
+    expect(moveMs).toBeLessThan(SLOT_TIME_TOLERANCE_MS);
+  });
+
+  it("the fix does not change WHICH format pairs ghost: a >90 min pair ghosted before and ghosts after, symmetrically", () => {
+    // A hypothetical org with formats 2.5h apart (19:00 and 21:30) was
+    // ALREADY outside tolerance before this fix: the switched match sat
+    // at 19:00 and the 21:30 activity generated a ghost. After the fix it
+    // sits at 21:30 and the 19:00 activity generates one. Same defect,
+    // same count, owned by the other activity. The tolerance is a
+    // property of the two configured times, not of this change.
+    const early = new Date("2026-09-08T18:00:00Z"); // 19:00 BST
+    const late = new Date("2026-09-08T20:30:00Z"); // 21:30 BST
+    // before the fix — match parked at the old (19:00) time
+    expect(hasMatchForSlot(slot({ instant: late }), [slot({ instant: early })])).toBe(false);
+    // after the fix — match moved to the new (21:30) time
+    expect(hasMatchForSlot(slot({ instant: early }), [slot({ instant: late })])).toBe(false);
+  });
+});
