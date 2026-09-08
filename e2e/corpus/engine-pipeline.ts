@@ -58,19 +58,18 @@ export class AttendanceEnginePipeline extends CurrentAnalyzerPipeline {
   /**
    * LIVE ONLY, deliberately.
    *
-   * A stubbed corpus run drives each case's `stub` block, which is a
-   * VERDICT — and the engine never wanted one: it calls the router and
-   * the extractor, which have their own seams. Grading a "stubbed" run
-   * of this pipeline would therefore be grading canned verdicts against
-   * an engine that never saw them.
+   * This said "a stubbed corpus run drives each case's `stub` block,
+   * which is a VERDICT — and the engine never wanted one". That was the
+   * argument until 2026-09-08, when the corpus was ported: a stub is now
+   * a ROUTE and some FACTS, which is exactly what the engine does want,
+   * and `CurrentAnalyzerPipeline` (which this extends) runs the whole
+   * stubbed sweep through it.
    *
-   * Since §10 step 8 that argument is stronger, not weaker: `analyzeBatch`
-   * is deleted, so a stubbed run of ANY pipeline in this directory now
-   * grades a decider that does not exist (see this directory's README).
-   * The engine's deterministic coverage lives in
-   * `src/lib/pipeline/__tests__` (unit) and
-   * `e2e/sim/attendance-engine.spec.ts` (end-to-end, stubbed at the
-   * router and extractor seams instead).
+   * LIVE-ONLY IS KEPT ANYWAY, for the reason in the header above: since
+   * §10 step 8 this class is byte-for-byte the same pipeline as #1, so a
+   * stubbed run of it would score the same 35 cases twice and read like
+   * a second measurement. The name survives so quoted live sweeps stay
+   * re-runnable; it has nothing left to add in stubbed mode.
    */
   override supports(_c: CorpusCase, mode: CorpusMode): boolean {
     return mode === "live";
