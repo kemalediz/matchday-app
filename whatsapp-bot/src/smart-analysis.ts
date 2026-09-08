@@ -24,6 +24,7 @@ import {
   type AnalyzeResult,
 } from "./api.js";
 import { enrichOrDegrade, planFlushRetry, type InboundEnrichment } from "./inbound-enrich.js";
+import { rewriteMentions, type MentionName, type RawMentionContact } from "./mentions.js";
 import { firstUsableName, readMessageBody, readNotifyName, safeRead } from "./wa-read.js";
 import { degradedMessage } from "./degraded.js";
 import {
@@ -106,45 +107,16 @@ export function immediateFlushReason(args: {
   return null;
 }
 
-// ─── Self-mention detection (pure, unit-tested) ─────────────────────
-/** A mentioned JID plus, when its Contact could be resolved, the
- *  whatsapp-web.js `Contact.isMe` flag. */
-export interface MentionedContact {
-  /** Mentioned JID as it appears in `mentionedIds` — "<digits>@c.us" or
-   *  the opaque "<digits>@lid" form WhatsApp now emits for @-mentions. */
-  jid: string;
-  /** Resolved `Contact.isMe`; undefined when the contact couldn't be fetched. */
-  isMe?: boolean;
-}
-
-/**
- * Did this message @-mention the BOT itself? Immune to the
- * @c.us-vs-@lid identity mismatch that caused the prod incident.
- *
- * Root cause: WhatsApp encodes @-mentions as opaque "<digits>@lid" JIDs,
- * but `client.info.wid` is the phone-based "<digits>@c.us" form. So a plain
- * `mentionedIds.includes(selfId)` is ALWAYS false even when the bot was
- * mentioned (the mention carries the bot's @lid identity, selfId is its
- * @c.us identity — two different strings for the same account).
- *
- * Reliable signal: the resolved `Contact.isMe` boolean, which is true for
- * the bot's own contact regardless of JID format. We also match the raw jid
- * against every known bot identity string (its @c.us wid, its @lid, etc.) as
- * belt-and-suspenders for when a contact couldn't be resolved.
- *
- * Returns true if ANY mentioned contact is the bot under ANY identity form.
- */
-export function isSelfMention(
-  mentioned: MentionedContact[],
-  botIdentities: Array<string | null | undefined>,
-): boolean {
-  const botIds = new Set(botIdentities.filter((s): s is string => !!s));
-  for (const m of mentioned) {
-    if (m.isMe === true) return true;
-    if (botIds.has(m.jid)) return true;
-  }
-  return false;
-}
+// ─── Self-mention detection ─────────────────────────────────────────
+// `isSelfMention` and `MentionedContact` are DELETED (2026-09-08),
+// replaced by `contactIsBot` / `RawMentionContact` in `mentions.ts`.
+// They were separate from the body rewrite, which meant two functions
+// deciding "is this mention the bot?" — and the rewrite had to answer it
+// anyway in order to substitute "@Match Time". Now `rewriteMentions`
+// returns `botMentioned` alongside the body and `contactIsBot` is the
+// single rule. All seven @lid-vs-@c.us regression cases moved with it,
+// to `mentions.test.ts`, where they run through `rewriteMentions` — the
+// function this file actually calls.
 
 interface Pending {
   waMessageId: string;
@@ -155,6 +127,10 @@ interface Pending {
   /** Raw WhatsApp mention JIDs (e.g. "447700900123@c.us", "…@lid"),
    *  forwarded UNCHANGED so the onboarding admin parser can resolve them. */
   mentions?: string[];
+  /** Per-JID display names from the contact lookup. UNVERIFIED — the
+   *  server checks each against the org roster before any of it becomes
+   *  text (see `mentions.ts`). */
+  mentionNames?: MentionName[];
   /** Did this message @-mention the bot's own JID? Computed here on the Pi
    *  (only the Pi knows its selfId); forwarded as the PRIMARY signal for
    *  the server's @Match Time interaction-contract gate. */
@@ -374,6 +350,10 @@ export async function enqueueForAnalysis(client: Client, msg: Message): Promise<
     authorName: readNotifyName(msg),
     authorPhone: phone,
     botMentioned: false,
+    // No contact lookup happened yet, so there are no names to offer.
+    // The server will leave every @<digits> token raw, which is the
+    // honest outcome for a mention nobody could look up.
+    mentionNames: [],
   };
 
   const enriched = await enrichOrDegrade(
@@ -389,7 +369,7 @@ export async function enqueueForAnalysis(client: Client, msg: Message): Promise<
         err instanceof Error ? err.message : err,
       ),
   );
-  const { body, authorName, authorPhone, botMentioned } = enriched;
+  const { body, authorName, authorPhone, botMentioned, mentionNames } = enriched;
 
   const pending: Pending = {
     waMessageId,
@@ -407,6 +387,11 @@ export async function enqueueForAnalysis(client: Client, msg: Message): Promise<
     // Sent even when enrichment failed, so the server can still do what it
     // can with them.
     mentions: rawMentionedIds.length > 0 ? rawMentionedIds : undefined,
+    // The display names behind those JIDs, UNVERIFIED. The server checks
+    // each against the org roster (`lib/pipeline/mention-names.ts`) and
+    // only then does a name reach the message text. Omitted when empty so
+    // the payload does not grow for the ordinary no-mention message.
+    mentionNames: mentionNames.length > 0 ? mentionNames : undefined,
     botMentioned,
     attempts: 0,
   };
@@ -473,40 +458,49 @@ async function enrichInbound(
   const authorPhone =
     fallback.authorPhone || digitsOnlyPhone(safeRead(contact, "number"));
 
-  // Resolve @-mentions in the body before forwarding to the analyzer.
-  // WhatsApp wire-format puts each tag as "@<jid-number>" (e.g.
-  // "@158055467598020" for an @lid sender, "@447xxx" for @c.us). The
-  // LLM can't reason about opaque IDs — Kemal hit this when his
-  // "@Izzet E is replacing @Elnur Mammadov" message got classified as
-  // "noise" because the LLM saw three lid numbers and no names.
-  // For each mentioned id, fetch the contact and replace the @<jid>
-  // token with @<pushname-or-name>. Falls back to the raw token if
-  // resolution fails.
-  let body = rawBody;
+  // ── @-MENTIONS: LOOK THEM UP, BUT DO NOT NAME THEM ─────────────────
+  //
+  // WhatsApp puts each tag in the wire body as "@<jid-digits>" (e.g.
+  // "@158055467598020" for an @lid mention, "@447xxx" for @c.us). The LLM
+  // cannot reason about opaque ids — Kemal's "@Izzet E is replacing
+  // @Elnur Mammadov" was classified as noise because the analyzer saw
+  // three lid numbers and no names — so SOMETHING has to turn them into
+  // names. The question is who.
+  //
+  // It used to be this loop, pasting `pushname || name || shortName`
+  // straight into the body. That is the 2026-09-08 defect: the pushname
+  // is the mentioned person's OWN profile name, not the club's name for
+  // them and not what WhatsApp showed the person who typed the message.
+  // "@Shahrokh🐔 Sutton Football Club" arrived as "@DÇ" and "@David
+  // David 67" as "@割::::.̸̢̤̋…"; both drops were silently lost.
+  // `mentions.ts` has the full measurement.
+  //
+  // So the contact is still fetched — we need `isMe` for the tag signal,
+  // and the display name is a useful LOOKUP KEY — but the only body
+  // rewrite performed here is the bot's OWN mention, to the literal
+  // "@Match Time". Everything else keeps its raw token and travels as
+  // `mentionNames` for the server to check against the org roster.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const mentionedIds: string[] = ((msg as any).mentionedIds ?? []) as string[];
-  // Resolve each mentioned contact ONCE: we both rewrite the body @-token
-  // and capture its `isMe` flag for self-mention detection below.
-  const mentionedContacts: MentionedContact[] = [];
+  // Resolve each mentioned contact ONCE: `isMe` for the self-mention
+  // signal, and the display name for the server-side roster lookup.
+  const mentionedContacts: RawMentionContact[] = [];
   for (const jid of mentionedIds) {
     try {
       const c = await client.getContactById(jid);
-      mentionedContacts.push({ jid, isMe: c.isMe });
-      const name = c.pushname || c.name || c.shortName || null;
-      if (body && name && typeof name === "string") {
-        // Match the @-tag using the digits portion of the JID. WA
-        // puts the @-tag in the text as `@<digits>` (no @lid /
-        // @c.us suffix in the visible body), so we strip the suffix
-        // and escape regex metacharacters.
-        const digits = jid.replace(/@.*$/, "").replace(/[+]/g, "");
-        if (digits.length >= 5) {
-          const re = new RegExp(`@${digits}\\b`, "g");
-          body = body.replace(re, `@${name}`);
-        }
-      }
+      // Every read is total — on the broken build these are throwing
+      // getters and one throw used to lose the whole enrichment.
+      mentionedContacts.push({
+        jid,
+        isMe: safeRead(c, "isMe") === true,
+        name:
+          asOptionalString(safeRead(c, "pushname")) ??
+          asOptionalString(safeRead(c, "name")) ??
+          asOptionalString(safeRead(c, "shortName")),
+      });
     } catch {
-      /* non-fatal — fall back to raw @<jid> for this token, and to a
-         jid-only (no isMe) entry for self-mention matching. */
+      /* non-fatal — the raw @<digits> token survives for this mention,
+         and a jid-only entry still matches for self-mention detection. */
       mentionedContacts.push({ jid });
     }
   }
@@ -531,9 +525,14 @@ async function enrichInbound(
     info?.wid?.lid,
     info?.lid,
   ];
-  const botMentioned = isSelfMention(mentionedContacts, botIdentities);
 
-  return { body, authorName, authorPhone, botMentioned };
+  const { body, mentionNames, botMentioned } = rewriteMentions({
+    body: rawBody,
+    contacts: mentionedContacts,
+    botIdentities,
+  });
+
+  return { body, authorName, authorPhone, botMentioned, mentionNames };
 }
 
 // ─── Flush mechanics ────────────────────────────────────────────────
@@ -560,6 +559,7 @@ async function flushGroup(client: Client, groupId: string): Promise<void> {
       authorName: p.authorName,
       timestamp: p.timestamp,
       mentions: p.mentions,
+      mentionNames: p.mentionNames,
       botMentioned: p.botMentioned,
     }));
     const history = getHistory(groupId);

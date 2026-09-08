@@ -307,6 +307,17 @@ export interface AnalyzeInboundMessage {
   /** Raw WhatsApp mention JIDs (e.g. "447700900123@c.us", "…@lid"),
    *  forwarded UNCHANGED for the onboarding admin parser. */
   mentions?: string[];
+  /**
+   * The display name the Pi's contact lookup gave for each mentioned JID.
+   * UNVERIFIED, and deliberately NOT pasted into `body` by the Pi: it is
+   * the mentioned person's own WhatsApp pushname, which is often not the
+   * name the club uses and is a string that person controls (2026-09-08 —
+   * "@David David 67" reached the analyzer as "@割::::.̸̢̤̋…" and the drop
+   * was lost). The server matches it against the org roster and only then
+   * writes a name into the text. Absent from older Pi builds, and absent
+   * whenever no mention had a usable name.
+   */
+  mentionNames?: Array<{ jid: string; name: string }>;
   /** Did this message @-mention the bot's own JID? Computed on the Pi
    *  (only it knows the bot's selfId). PRIMARY signal for the server's
    *  @Match Time interaction-contract gate; the server falls back to body

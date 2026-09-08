@@ -16,6 +16,7 @@ const fb = (over: Partial<InboundEnrichment> = {}): InboundEnrichment => ({
   authorName: null,
   authorPhone: "",
   botMentioned: false,
+  mentionNames: [],
   ...over,
 });
 
@@ -37,6 +38,7 @@ describe("enrichOrDegrade", () => {
       authorName: "Kemal",
       authorPhone: "447700900001",
       botMentioned: true,
+      mentionNames: [],
     });
     expect(onDegrade).not.toHaveBeenCalled();
   });
@@ -56,6 +58,7 @@ describe("enrichOrDegrade", () => {
       authorName: null,
       authorPhone: "",
       botMentioned: false,
+      mentionNames: [],
     });
     expect(onDegrade).toHaveBeenCalledOnce();
     expect(onDegrade).toHaveBeenCalledWith(err);
@@ -108,6 +111,7 @@ describe("enrichOrDegrade", () => {
       authorName: "Ayoub",
       authorPhone: "447700900222",
       botMentioned: true,
+      mentionNames: [],
     });
     expect(onDegrade).not.toHaveBeenCalled();
   });
@@ -128,6 +132,7 @@ describe("enrichOrDegrade", () => {
       authorName: "fresh",
       authorPhone: "447700900999",
       botMentioned: true,
+      mentionNames: [],
     });
   });
 
@@ -142,7 +147,13 @@ describe("enrichOrDegrade", () => {
           throw new Error("logger blew up too");
         },
       ),
-    ).resolves.toEqual({ body: "in", authorName: null, authorPhone: "", botMentioned: false });
+    ).resolves.toEqual({
+      body: "in",
+      authorName: null,
+      authorPhone: "",
+      botMentioned: false,
+      mentionNames: [],
+    });
   });
 
   it("survives a fallback object that is itself junk", async () => {
@@ -150,7 +161,13 @@ describe("enrichOrDegrade", () => {
     const out = await enrichOrDegrade(null as any, async () => {
       throw new Error("r");
     }, vi.fn());
-    expect(out).toEqual({ body: "", authorName: null, authorPhone: "", botMentioned: false });
+    expect(out).toEqual({
+      body: "",
+      authorName: null,
+      authorPhone: "",
+      botMentioned: false,
+      mentionNames: [],
+    });
   });
 });
 
