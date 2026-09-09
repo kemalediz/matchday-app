@@ -27,8 +27,12 @@ export type DegradedCapability =
   /** `client.getChats()` — the startup group listing, and the canary for the
    *  whole injected layer. */
   | "group-enumeration"
-  /** `getChatById().participants` + `getContactById()` — the startup sweep
-   *  that writes `Membership.lastSeenInGroupAt`. */
+  /** `getChatById().participants` + `getContactById()` — the startup sweep.
+   *  Sole writer of `Organisation.lastParticipantSweepAt`, and the only
+   *  thing that can read the whole roster at once. (Since 2026-09-09 a
+   *  member's own group message also refreshes their
+   *  `Membership.lastSeenInGroupAt`, so this outage no longer freezes
+   *  everybody — only the people who never type.) */
   | "participant-sync"
   /** `recoverGroupMessages` — the 2h catch-up replay after a restart. */
   | "message-recovery"
@@ -53,9 +57,12 @@ export const DEGRADED_CAPABILITIES: Record<DegradedCapability, CapabilityInfo> =
   "participant-sync": {
     rule: "snapshotting a group's members so the server can back-fill the roster",
     consequence:
-      "Membership.lastSeenInGroupAt is not being refreshed, and it is written ONLY here — " +
-      "so the web app's self-IN gate will start rejecting real players who are plainly in " +
-      "the WhatsApp group, and members who joined before the bot did stay invisible",
+      "Organisation.lastParticipantSweepAt is not being refreshed, and it is written ONLY " +
+      "here — so nothing can read the group's roster: the web app's self-IN gate drops " +
+      "into its degraded mode, players who have never posted in the group can be rejected " +
+      "even though they are plainly in it, and members who joined before the bot did stay " +
+      "invisible. Members who DO post are unaffected: their own messages refresh " +
+      "Membership.lastSeenInGroupAt",
   },
   "message-recovery": {
     rule: "replaying the last ~2h of group messages after a (re)start",

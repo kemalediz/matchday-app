@@ -21,17 +21,19 @@
  *
  * ── WHY THERE IS A DEGRADED MODE (2026-08-31) ────────────────────────────
  *
- * `Membership.lastSeenInGroupAt` has exactly ONE writer: the bot's startup
- * participant sweep (`whatsapp-bot/src/index.ts` → `/api/whatsapp/sync-
- * participants` → `importParticipants`). That sweep has been failing since
- * 2026-07-07 because whatsapp-web.js's injected page code is out of step
- * with the live WhatsApp Web build (see MDs/cold-audit-2026-08-31.md).
+ * The bot's startup participant sweep (`whatsapp-bot/src/index.ts` →
+ * `/api/whatsapp/sync-participants` → `importParticipants`) has been
+ * failing since 2026-07-07, because whatsapp-web.js's injected page code
+ * is out of step with the live WhatsApp Web build (see
+ * MDs/cold-audit-2026-08-31.md). The chat resolves, `chat.participants`
+ * comes back empty, and nothing throws.
  *
- * While it is down the column is frozen, and a null sighting stops meaning
- * "you are not in the group" and starts meaning "I have not been able to
- * look". Nine real Sutton players, including regulars and someone who
- * joined the group yesterday, were being told to their face that they were
- * not in a group they were sitting in. The set grew every week.
+ * While it is down nobody's sighting is refreshed, and a null sighting
+ * stops meaning "you are not in the group" and starts meaning "I have not
+ * been able to look". Nine real Sutton players, including regulars and
+ * someone who joined the group yesterday, were being told to their face
+ * that they were not in a group they were sitting in. The set grew every
+ * week.
  *
  * The gate is not wrong. Treating a STALE signal as proof of absence is
  * wrong. So:
@@ -40,6 +42,70 @@
  *     for positive evidence that this person really is in this club's
  *     group, and if we cannot find any we still deny, but we say something
  *     TRUE instead of an accusation.
+ *
+ * ── WHAT `lastSeenInGroupAt` MEANS NOW, AND WHY IT MOVED (2026-09-09) ────
+ *
+ * The paragraph above used to open "`Membership.lastSeenInGroupAt` has
+ * exactly ONE writer". It has two.
+ *
+ *   1. the participant sweep, when it works;
+ *   2. **an inbound group message from a resolved sender** — every
+ *      message in the org's monitored group is first-hand proof that its
+ *      author was in that group at that moment, and the analyze route
+ *      already resolves the author of every one. That signal needs
+ *      nothing from the broken injected layer, so it keeps working
+ *      through exactly the outage that kills the sweep. See
+ *      `src/lib/group-sighting.ts`.
+ *
+ * So the column now reads: **"the last time we had positive evidence,
+ * from any source, that THIS PERSON was in the org's WhatsApp group."**
+ * It is a monotone record of confirmed presence and NEVER evidence of
+ * absence — which is not actually a change of character, only of
+ * wording: no writer has ever set it back to null, so a non-null value
+ * has always meant "has been confirmed at some point", and departure has
+ * always been `leftAt`'s job. Adding a second source of the same kind of
+ * proof therefore does not weaken what the gate concludes from it. It
+ * changes only how many real players have one.
+ *
+ * ── THE TRAP, AND WHY THE FRESHNESS SIGNAL HAD TO BE SPLIT OFF ───────────
+ *
+ * `GroupSyncStatus.lastSyncAt` used to be computed as
+ * `MAX(Membership.lastSeenInGroupAt)` across the org. That was exactly
+ * right while the sweep was the only writer: the newest sighting anywhere
+ * was, necessarily, the moment the last sweep ran.
+ *
+ * With messages as a second writer it stops being that, in the most
+ * dangerous way available. ONE chatty player says "haha", his own
+ * sighting is refreshed, the org's MAX goes fresh, and
+ * `isGroupSyncStale` reports a HEALTHY sweep. It is not healthy; nothing
+ * has read the roster since 07/07. Three things would then switch
+ * themselves off silently and simultaneously:
+ *
+ *   - this degraded mode, so `degraded-plays-for-club` stops rescuing the
+ *     never-swept, never-posting member whom a team-mate put in a squad —
+ *     precisely the people it was built for, and precisely the people a
+ *     message-based signal can never reach on its own;
+ *   - the admin dashboard's banner (`groupSyncAdminWarning`), so the one
+ *     person who could escalate stops being told;
+ *   - the `sweep-stale` health alert in `lib/bot-health.ts`.
+ *
+ * The 2026-07-07 outage already ran EIGHT WEEKS before anyone noticed. A
+ * change that makes the same outage invisible would be a worse bug than
+ * the one it fixes.
+ *
+ * Hence two facts, two columns:
+ *
+ *   `Membership.lastSeenInGroupAt`        did we ever see THIS PERSON in
+ *                                         the group. Sweep or their own
+ *                                         message; both are proof.
+ *   `Organisation.lastParticipantSweepAt` when a full roster READ last
+ *                                         succeeded. Sweep only.
+ *
+ * ONLY the second can license the inference "we have never seen them,
+ * therefore they are not in the group", because only a mechanism that
+ * looks at EVERYONE can make an argument about who is missing. The first
+ * can only ever add or refresh evidence about one person. Feed
+ * `GroupSyncStatus.lastSyncAt` from the second and nothing else.
  */
 
 /**
@@ -62,6 +128,13 @@
  * it stale: a false "stale" only opens a narrow, evidence-gated fallback,
  * whereas a false "fresh" tells real players a falsehood and locks them
  * out of the button.
+ *
+ * UNCHANGED by the 2026-09-09 split, and worth saying why: this number is
+ * calibrated against how often the SWEEP runs, and the sweep still runs on
+ * `ready` and nowhere else. Now that the clock it is measured against is
+ * `Organisation.lastParticipantSweepAt` rather than the members'
+ * sightings, chatter can no longer move it, so the calibration is if
+ * anything more honest than it was.
  */
 export const GROUP_SYNC_FRESHNESS_DAYS = 10;
 
@@ -74,19 +147,26 @@ export interface GateMembership {
    *  `group_leave` event and by admins, so it is NOT affected by the
    *  participant sweep being down. */
   leftAt: Date | null;
-  /** Last time the bot saw this user in the org's WhatsApp group
-   *  participant sync. Null = never confirmed in the group. Only
-   *  trustworthy as evidence of absence while the sweep is fresh. */
+  /** Last time we had positive evidence that this user was in the org's
+   *  WhatsApp group — from the participant sweep, or from a message they
+   *  posted in that group (2026-09-09). Monotone: no writer ever clears
+   *  it. Null = never confirmed, which is only evidence of ABSENCE while
+   *  the sweep is fresh; departure is `leftAt`'s job, never this. */
   lastSeenInGroupAt: Date | null;
   role: "OWNER" | "ADMIN" | "PLAYER";
 }
 
 /** Health of the org's participant sweep, derived from existing data. */
 export interface GroupSyncStatus {
-  /** MAX(`Membership.lastSeenInGroupAt`) across every membership of the
-   *  org (left rows included — this measures when a SWEEP last succeeded,
-   *  not who is currently on the roster). Null when no sweep has ever
-   *  succeeded for this org. */
+  /** `Organisation.lastParticipantSweepAt` — when a full READ of the
+   *  group's participant list last succeeded. Null when no sweep has ever
+   *  succeeded for this org.
+   *
+   *  MUST come from that column and nowhere else. It was
+   *  MAX(`Membership.lastSeenInGroupAt`) until 2026-09-09; now that a
+   *  group message refreshes the sender's sighting, that MAX measures
+   *  CHATTER, and feeding it in here would report a dead sweep as
+   *  healthy and silently disable everything below. See the header. */
   lastSyncAt: Date | null;
   now: Date;
 }
@@ -103,6 +183,14 @@ export interface GroupSyncStatus {
  *     `authorUserId` is this user. The bot only ever analyses messages
  *     from the org's monitored group, and only a participant can post
  *     there. This is direct proof of presence.
+ *
+ *     STILL LOAD-BEARING after 2026-09-09, despite a message now
+ *     refreshing `lastSeenInGroupAt` directly (which would short-circuit
+ *     to `seen-in-group` long before this is consulted). It covers the
+ *     BACKLOG: every `AnalyzedMessage` row written before that change
+ *     produced no sighting, so for members who have posted in the past
+ *     but not since, this count is the only trace left. Removing it
+ *     would re-block people the moment they went quiet for a week.
  *
  *   - `clubAttendances`: `Attendance` rows on this org's matches. Every
  *     one of those was written by the bot reading an IN in the group, by

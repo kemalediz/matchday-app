@@ -268,6 +268,7 @@ import {
   type ResolvedSender,
 } from "@/lib/resolve-sender";
 import { planUnresolvedNudge } from "@/lib/unresolved-nudge";
+import { recordGroupSightings, sightedUserIds } from "@/lib/group-sighting";
 
 interface InboundMessage {
   waMessageId: string;
@@ -484,6 +485,41 @@ async function handleAnalyzeRequest(request: Request) {
   for (const m of fresh) {
     senderById.set(m.waMessageId, await resolveSender(org.id, m));
   }
+
+  // ── SIGNAL 1: THESE PEOPLE ARE IN THE GROUP ────────────────────────
+  //
+  // Every message in `fresh` came from this org's monitored WhatsApp
+  // group, so every resolved sender is PROVABLY a participant right now.
+  // That is the one presence signal that needs nothing from
+  // whatsapp-web.js's injected layer, which is what the startup
+  // participant sweep depends on and what has been broken since
+  // 2026-07-07 — leaving `Membership.lastSeenInGroupAt` frozen and the
+  // web app telling real players they are not in a group they are
+  // sitting in.
+  //
+  // ONE batched write, HERE, deliberately:
+  //   - OUTSIDE the per-message loop. `analyze/route.ts` is ~4,000 lines
+  //     of fast paths and this file's defining bug class is a `continue`
+  //     silently deleting the guards beneath it (six incidents; see the
+  //     clause-peel block below). A per-message write down there would
+  //     be deleted by the next fast path somebody adds, and nobody would
+  //     notice for weeks.
+  //   - BEFORE every branch, short-circuit and early return below, so no
+  //     future one can skip it.
+  //   - AFTER resolution, because an unresolved sender proves somebody
+  //     is in the group but not WHO, and there is no row to refresh.
+  //
+  // It skips NOTHING and decides NOTHING: it neither reads nor writes
+  // anything the rest of this handler touches, and it cannot throw (see
+  // `recordGroupSightings`). Deduped and empty-body messages are not in
+  // `fresh` and so contribute no sighting — a conservative under-count,
+  // which is the safe side of "presence is provable, absence is not".
+  // `fromMe` never reaches here at all: the Pi drops the bot's own
+  // messages in its `message` handler and in the 2h recovery replay.
+  // A synthetic or reconstructed `waMessageId` is irrelevant to this
+  // write — identity comes from the author, not the id, and a message
+  // replayed under a fresh id lands inside the throttle window anyway.
+  await recordGroupSightings(org.id, sightedUserIds(senderById.values()));
 
   // ═══════════════════════════════════════════════════════════════════
   // A FAST PATH CLAIMS A CLAUSE, NOT A MESSAGE (2026-09-09)

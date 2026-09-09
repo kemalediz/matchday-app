@@ -16,6 +16,9 @@
  *     User.name/phoneNumber.
  *   - Membership upsert as PLAYER; restores soft-removed (leftAt) rows;
  *     always stamps lastSeenInGroupAt.
+ *   - Stamps `Organisation.lastParticipantSweepAt` when the roster was
+ *     non-empty (2026-09-09). This function is that column's ONLY
+ *     writer — see the note at the bottom.
  *   - @lid-only participants (no resolvable phone) are skipped — the
  *     pushname resolvers pick them up the moment they message.
  */
@@ -140,6 +143,30 @@ export async function importParticipants(
       });
       if (existing.leftAt !== null) restoredMembership += 1;
     }
+  }
+
+  // ── THE SWEEP'S OWN CLOCK (2026-09-09) ───────────────────────────
+  //
+  // `Organisation.lastParticipantSweepAt` records that a full READ of
+  // the group's participant list SUCCEEDED. It is the only thing that
+  // licenses the inference "we have never seen this person, therefore
+  // they are not in the group", and this function is its only writer.
+  //
+  // It is stamped for the READ, not for the matching: a roster that is
+  // entirely @lid participants imports zero rows and is still a
+  // successful read of the list.
+  //
+  // An EMPTY list is NOT a successful read. That is the exact shape of
+  // the 2026-07-07 breakage — `chat.participants` comes back `[]` with
+  // nothing thrown — and the Pi already refuses to POST one. Stamping
+  // it here would tell the gate, the admin banner and the health alert
+  // that a dead sweep is healthy, which is the whole failure this
+  // column exists to prevent.
+  if (participants.length > 0) {
+    await db.organisation.update({
+      where: { id: orgId },
+      data: { lastParticipantSweepAt: new Date() },
+    });
   }
 
   return {

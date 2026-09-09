@@ -60,7 +60,12 @@ test.beforeEach(async ({ db }) => {
   await db.run(`DELETE FROM "BotJob"`);
   // Pin the participant sweep as FRESH so `sweep-stale` (a real finding,
   // and true of production today) does not colour every assertion below.
-  await db.run(`UPDATE "Membership" SET "lastSeenInGroupAt" = now() WHERE "orgId" = $1`, [
+  //
+  // This sets the SWEEP's own clock, not the members' sightings
+  // (2026-09-09). A group message now refreshes the sender's
+  // `Membership.lastSeenInGroupAt`, so that column no longer measures the
+  // sweep — writing it here would prove nothing about this rule.
+  await db.run(`UPDATE "Organisation" SET "lastParticipantSweepAt" = now() WHERE id = $1`, [
     ORG_ID,
   ]);
 });
