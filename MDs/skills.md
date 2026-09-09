@@ -67,7 +67,9 @@ If SSH returns "additional check required" with a `login.tailscale.com/a/...` UR
 
 Worse, it was **invisible server-side**: every instance ACKed the same key, which upserted into exactly **one** `SentNotification` row. 30+ messages in the group, 1 row in the database.
 
-`deploy-pi.sh` does: `systemctl stop` → wait → `pkill` any survivors **by process pattern** (cgroup membership is exactly what orphans escape) → verify **zero** remain → `systemctl start` **once** → wait → verify **exactly one** → print the PID.
+`deploy-pi.sh` does: `systemctl stop` → wait → kill any survivors **by PID** (cgroup membership is exactly what orphans escape) → verify **zero** remain → `systemctl start` **once** → wait → verify **exactly one** → print the PID.
+
+**It never kills by command-line pattern (changed 2026-09-09).** A second product, **HomeTenant** (`hometenant-bot.service`, `~/hometenant-bot/whatsapp-bot`), runs on the same Pi, and its start script is character-for-character identical to ours — so `npm start` there produces a byte-identical command line and the old `pkill -f` took it down. The discriminator is now the **working directory**: a process is ours only if its `cwd` is under `~/matchtime-bot/whatsapp-bot`, read from `/proc/<pid>/cwd`. Anything whose cwd cannot be read is neither killed nor started alongside — the deploy blocks loudly instead.
 
 Two defences were added alongside it:
 
@@ -75,13 +77,17 @@ Two defences were added alongside it:
 - **Outbound circuit breaker**: `MAX_GROUP_MESSAGES_PER_HOUR = 10` per org. Past that, group dispatch stops and a `CRITICAL:` line is logged. Normal traffic is 1-2 group posts/day, so this only ever fires on a runaway. If you see it in the Vercel logs, check the Pi for duplicate processes first.
 - **Startup guard** (`whatsapp-bot/src/instance-lock.ts`): the bot takes a liveness-verified pidfile lock on boot and refuses to become a second instance. Under systemd it exits **0** on purpose — the unit has `Restart=on-failure`, and a non-zero exit would produce an endless crash-restart loop.
 
-Diagnosing by hand? Count instances like this (the naive `pgrep -f "sh -c node --env-file"` also matches your own shell — that false positive cost us an hour):
+Diagnosing by hand? Count instances like this. Two traps: the naive `pgrep -f "sh -c node --env-file"` also matches your own shell (that false positive cost us an hour), **and it matches HomeTenant's bot**, so always print the cwd and check which installation each process is in:
 
 ```bash
-pgrep -a -f 'sh -c node --env-file.*src/index.ts' | grep -v "^$$ "
+for p in $(pgrep -f 'node --env-file.*src/index.ts'); do
+  printf '%s\t%s\t%s\n' "$p" "$(sudo readlink /proc/$p/cwd)" "$(ps -o args= -p $p)"
+done | grep matchtime-bot
 ```
 
-One line = healthy. Two or more = you are mid-incident: `sudo pkill -9 -f 'sh -c node --env-file.*src/index.ts'` then run `scripts/deploy-pi.sh`.
+One `sh -c …` wrapper under `~/matchtime-bot/whatsapp-bot` = healthy. Two or more = you are mid-incident.
+
+**Never `pkill -f` to clean it up** — that pattern matches HomeTenant too and would take down a live product handling gas-leak reports. Kill the specific pids you just listed (`sudo kill -9 <pids>`), then run `scripts/deploy-pi.sh`, which does the scoping for you.
 
 ## Verification tools / pre-built scripts
 
