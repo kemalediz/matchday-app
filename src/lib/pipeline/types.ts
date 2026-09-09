@@ -199,9 +199,21 @@ export type SideRequest =
 export interface AttendanceFacts {
   kind: "attendance";
   claims: Claim[];
-  /** A bare affirmation/refusal answering MatchTime's own last post
-   *  ("Confirmed", "yes", "no"). §3.2 S25 — the bot's last post is a
-   *  known object, so the engine can resolve what it refers to. */
+  /** A bare affirmation/refusal answering something the message itself
+   *  does not state ("Confirmed", "yes", "no").
+   *
+   *  IT IS A POINTER, NOT A FACT ABOUT ATTENDANCE, and it is worth
+   *  exactly as much as whatever the ENGINE can resolve it against.
+   *  `engine.ts:handleAttendance` knows two such things and tries them
+   *  in order: the pending set in MatchTime's own last post (§3.2 S25 —
+   *  a known object, so a lookup rather than an inference), and failing
+   *  that the ROUTE, because `self_att` is stage 1's typed verdict that
+   *  the sender is joining or leaving this match themselves.
+   *
+   *  ⚠️ An affirmation the engine cannot resolve REGISTERS NOBODY, and
+   *  until 2026-09-09 it did worse than that: it returned, discarding
+   *  the message whole. Two players typed "In", came back claimless with
+   *  `affirmation: "yes"`, and lost their place in a live squad. */
   affirmation: "yes" | "no" | null;
   sideRequests: SideRequest[];
 }

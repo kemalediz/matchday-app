@@ -3582,3 +3582,311 @@ describe("2026-09-08 · an admin's untagged [OUT + BENCH] (David / Mojib)", () =
     expect(r.outcomes[0].reasons.join(" | ")).toMatch(/Mojib/);
   });
 });
+
+// ── S43 · a claimless affirmation on a self_att route (2026-09-09) ─────
+//
+// THE INCIDENT. Four players typed the single word "In" for Tuesday's
+// match inside twenty minutes. Two were registered and two were
+// silently discarded:
+//
+//   19:37:58  Wasim   "In"  -> intent=in    action=IN
+//   19:47:55  Abid    "In"  -> intent=noise action=none
+//   19:57:58  Mojib   "In"  -> intent=noise action=none
+//   19:57:59  habib   "In"  -> intent=in    action=IN
+//
+// Mojib and habib are ONE SECOND apart, in the SAME batch, with the
+// same word, and got opposite outcomes. All four resolved to real
+// members. Neither Abid nor Mojib was in the squad; neither saw a tick;
+// both believed they were in. Kemal noticed, not the system.
+//
+// The extractor read the two that died as `claims: []` with
+// `affirmation: "yes"` — a bare answer to MatchTime's last post rather
+// than the sender's own claim about themselves. `handleAttendance` then
+// looked for a pending set in that post, found none, and RETURNED:
+// "message understood, action silently not taken", §9's named signature
+// failure, verbatim.
+//
+// The measured claimless rate for "In" in that conversation window was
+// 14 of 20 (`scripts/measure-claimless.ts`). No amount of prompt work
+// makes it zero, so the ENGINE has to be right when extraction wobbles.
+describe("S43 · a claimless affirmation is resolved, not discarded (2026-09-09, Abid + Mojib)", () => {
+  /** Exactly what the extractor returned for Abid's and Mojib's "In". */
+  const bareAffirmation = () => attendanceFacts([], { affirmation: "yes" });
+
+  it("THE INCIDENT: a resolved member's claimless 'In' on self_att is CONFIRMED", () => {
+    const state = world({ confirmed: ["kemal", "elvin", "sait"] });
+    const r = decide({
+      now: NOW,
+      state,
+      messages: [msg({ from: "mojib", body: "In", route: "self_att", facts: bareAffirmation() })],
+    });
+    expect(statusOf(r.nextState, "mojib")).toBe("CONFIRMED");
+  });
+
+  it("all four of the real messages register, not two of them", () => {
+    const state = world({ confirmed: ["kemal", "elvin", "sait"] });
+    const r = decide({
+      now: NOW,
+      state,
+      messages: [
+        // Wasim and habib came back WITH a claim; Abid and Mojib did not.
+        // The whole point is that the outcome must not depend on which.
+        msg({ from: "wasim", body: "In", route: "self_att", facts: attendanceFacts([claim()]) }),
+        msg({ from: "abid", body: "In", route: "self_att", facts: bareAffirmation() }),
+        msg({ from: "mojib", body: "In", route: "self_att", facts: bareAffirmation() }),
+        msg({ from: "habib", body: "In", route: "self_att", facts: attendanceFacts([claim()]) }),
+      ],
+    });
+    for (const who of ["wasim", "abid", "mojib", "habib"]) {
+      expect(statusOf(r.nextState, who)).toBe("CONFIRMED");
+    }
+  });
+
+  it("the fallback is not a word list: it never reads the message body", () => {
+    // Kemal: "not just in, anyone can say yes, count me, sure. Many
+    // different words." The engine is told by the ROUTER that this is
+    // the sender's own attendance and by the EXTRACTOR that the sender
+    // affirmed. Neither of those is a word, so the body can be anything
+    // a player might type — including something nobody has thought of.
+    for (const body of ["count me", "sure", "go on then", "aye", "why not", "yep me too"]) {
+      const r = decide({
+        now: NOW,
+        state: world({ confirmed: ["kemal"] }),
+        messages: [msg({ from: "mojib", body, route: "self_att", facts: bareAffirmation() })],
+      });
+      expect(statusOf(r.nextState, "mojib"), `body=${JSON.stringify(body)}`).toBe("CONFIRMED");
+    }
+  });
+
+  it("says WHY in the reason trail, naming the route it leaned on", () => {
+    const r = decide({
+      now: NOW,
+      state: world({ confirmed: ["kemal"] }),
+      messages: [msg({ from: "mojib", body: "In", route: "self_att", facts: bareAffirmation() })],
+    });
+    expect(r.outcomes[0].reasons.join(" | ")).toMatch(/self_att/);
+  });
+
+  it("a bare 'yes' the ROUTER did not call self-attendance still registers nobody", () => {
+    // The negative case, and the tension worth stating plainly: "yes"
+    // is on both lists. What separates them is not the word, it is
+    // whether the router — which sees the whole batch — read the
+    // message as the sender joining this match. A "yes" answering
+    // "@Wasim can Najib come please?" routed `none` in production on
+    // 2026-09-08 and must keep doing nothing here.
+    for (const route of ["other_att", "unsure", "offer"] as const) {
+      const r = decide({
+        now: NOW,
+        state: world({ confirmed: ["kemal"] }),
+        messages: [msg({ from: "mojib", body: "yes", route, facts: bareAffirmation() })],
+      });
+      expect(r.writes, `route=${route}`).toHaveLength(0);
+      expect(statusOf(r.nextState, "mojib"), `route=${route}`).toBe("ABSENT");
+    }
+  });
+
+  it("'ok 👍' with nothing to answer registers nobody", () => {
+    const r = decide({
+      now: NOW,
+      state: world({ confirmed: ["kemal"] }),
+      messages: [
+        msg({ from: "mojib", body: "ok 👍", route: "other_att", facts: bareAffirmation() }),
+      ],
+    });
+    expect(r.writes).toHaveLength(0);
+    expect(r.speech).toHaveLength(0);
+  });
+
+  it("an affirmation from an UNRESOLVED sender writes nothing", () => {
+    // Same treatment a claimful "In" from an unresolved sender gets: no
+    // write, and the §9 unresolved-sender degradation so it is not
+    // silence. Never a registration for a person the roster cannot name.
+    const r = decide({
+      now: NOW,
+      state: world({ confirmed: ["kemal"] }),
+      messages: [msg({ from: null, body: "In", route: "self_att", facts: bareAffirmation() })],
+    });
+    expect(r.writes).toHaveLength(0);
+    expect(r.degradations.some((d) => /sender could not be resolved/i.test(d.detail))).toBe(true);
+  });
+
+  it("a claimless affirmation on an org that does not track attendance writes nothing", () => {
+    const r = decide({
+      now: NOW,
+      state: world({ confirmed: ["kemal"], features: { attendance: false } }),
+      messages: [msg({ from: "mojib", body: "In", route: "self_att", facts: bareAffirmation() })],
+    });
+    expect(r.writes).toHaveLength(0);
+  });
+
+  it("the S25 pending-set path still wins when there IS a pending set", () => {
+    // Unchanged, deliberately: the pending set is a KNOWN OBJECT and a
+    // lookup beats an inference. `parsePendingSet` runs first and the
+    // self_att fallback only sees what it leaves behind.
+    const state = world({
+      confirmed: ["kemal", "elvin", "sait", "mustafa", "abid", "idris"],
+      lastBotPost:
+        "Got it 🙌 Pending — waiting for confirmation: Faris Nasser, Shaz Iqbal. Say the word and I'll lock them in.",
+    });
+    const r = decide({
+      now: NOW,
+      state,
+      messages: [
+        msg({ from: "amir", body: "Confirmed", route: "other_att", facts: bareAffirmation() }),
+      ],
+    });
+    expect(statusOf(r.nextState, "faris")).toBe("CONFIRMED");
+    expect(statusOf(r.nextState, "shaz")).toBe("CONFIRMED");
+    expect(statusOf(r.nextState, "amir")).toBe("ABSENT");
+  });
+
+  it("a claimless affirmation with NO active match degrades rather than going silent", () => {
+    const r = decide({
+      now: NOW,
+      state: world({ confirmed: [], noMatch: true }),
+      messages: [msg({ from: "mojib", body: "In", route: "self_att", facts: bareAffirmation() })],
+    });
+    expect(r.writes).toHaveLength(0);
+    expect(r.degradations.some((d) => /no active registration match/i.test(d.detail))).toBe(true);
+  });
+
+  it("a claimless affirmation on a FULL squad goes to the bench, not nowhere", () => {
+    // Proof that the synthesised claim runs the whole gauntlet below the
+    // branch rather than being written straight out: capacity is
+    // arithmetic the engine does after the claim exists.
+    const state = world({ maxPlayers: 14, confirmed: FULL_14 });
+    const r = decide({
+      now: NOW,
+      state,
+      messages: [msg({ from: "mojib", body: "In", route: "self_att", facts: bareAffirmation() })],
+    });
+    expect(statusOf(r.nextState, "mojib")).toBe("BENCH");
+  });
+
+  it("a claimless affirmation beside a chase nudge is still the sender's own IN", () => {
+    // `chase` on its own returns early ("no attendance change"). It must
+    // not swallow the sender's affirmation with it — that is the same
+    // shape as the 2026-05-28 incident where a chase dropped its asker.
+    const r = decide({
+      now: NOW,
+      state: world({ confirmed: ["kemal"] }),
+      messages: [
+        msg({
+          from: "mojib",
+          body: "In, need a couple more lads",
+          route: "self_att",
+          facts: attendanceFacts([], { affirmation: "yes", sideRequests: ["chase"] }),
+        }),
+      ],
+    });
+    expect(statusOf(r.nextState, "mojib")).toBe("CONFIRMED");
+  });
+});
+
+// ── S43b · the residue: self_att with nothing in it at all ─────────────
+describe("S43b · a `self_att` message the extractor read as empty is a SIGNAL, not silence", () => {
+  it("degrades when the router says self_att and the extractor returns nothing at all", () => {
+    // The mirror of the `route === "none"` disagreement detector at the
+    // top of the loop. Measured at 2 of 20 on "count me": the extractor
+    // returns no claim AND no affirmation, so there is no polarity to
+    // write and nothing to resolve — but a phrasing Kemal named by name
+    // failing 10% of the time must reach an operator.
+    const r = decide({
+      now: NOW,
+      state: world({ confirmed: ["kemal"] }),
+      messages: [
+        msg({ from: "mojib", body: "count me", route: "self_att", facts: attendanceFacts([]) }),
+      ],
+    });
+    expect(r.writes).toHaveLength(0);
+    expect(
+      r.degradations.some((d) => /router said `self_att` but the extractor returned no claim/.test(d.detail)),
+    ).toBe(true);
+  });
+
+  it("does NOT degrade for the same emptiness on any other route", () => {
+    // `other_att`, `offer` and `unsure` are all routes where "nothing to
+    // report" is an ordinary answer, and an operator note per benign
+    // message is how a signal becomes noise nobody reads.
+    for (const route of ["other_att", "offer", "unsure"] as const) {
+      const r = decide({
+        now: NOW,
+        state: world({ confirmed: ["kemal"] }),
+        messages: [msg({ from: "mojib", body: "hmm", route, facts: attendanceFacts([]) })],
+      });
+      expect(r.degradations, `route=${route}`).toHaveLength(0);
+      expect(r.outcomes[0].reasons.join(" | "), `route=${route}`).toContain("no claims extracted");
+    }
+  });
+
+  it("does NOT degrade when the affirmation gave it a pointer to try", () => {
+    // An affirmation the engine could not resolve already has its own
+    // reason line and is a different thing from finding nothing at all.
+    const r = decide({
+      now: NOW,
+      state: world({ confirmed: ["kemal"] }),
+      messages: [
+        msg({
+          from: "mojib",
+          body: "Confirmed",
+          route: "other_att",
+          facts: attendanceFacts([], { affirmation: "yes" }),
+        }),
+      ],
+    });
+    expect(r.degradations).toHaveLength(0);
+    expect(r.outcomes[0].reasons.join(" | ")).toContain("no pending set");
+  });
+});
+
+// ── S43c · the tension, written down rather than hidden ────────────────
+//
+// "yes" is on BOTH lists. Kemal, naming what must register: "not just
+// in, anyone can say yes, count me, sure. Many different words." And the
+// same word, answering something else, must register nobody.
+//
+// What separates them is not the word. It is the batch, and the ROUTER
+// is the only stage that sees the batch. Measured on the live router, 20
+// runs each:
+//
+//   "yes" alone in a batch                          self_att 20/20
+//   "sure" alone in a batch                         self_att 20/20
+//   "Yes" under "@Wasim can Najib come please?"     none     20/20   ← live, 2026-09-08
+//   "yes" under "did anyone watch the Como game?"   none     20/20
+//   "sure" under "could you bring the bibs?"        none 19/20, admin_ops 1/20
+//
+// So the engine does not have to choose between Kemal's two sentences,
+// and it does not need a word list to honour both. These two tests pin
+// the two halves, and the second one is the behaviour CHANGE — stated
+// out loud because it is a change, on the most ambiguous word there is.
+describe("S43c · the same bare word, both ways round", () => {
+  const bare = () => attendanceFacts([], { affirmation: "yes" });
+
+  it("a bare 'yes' answering something else registers nobody (router: none/other_att)", () => {
+    const r = decide({
+      now: NOW,
+      state: world({ confirmed: ["kemal"] }),
+      messages: [
+        msg({ from: "kemal", body: "@Wasim can Najib come please?", route: "other_att", facts: attendanceFacts([]) }),
+        msg({ from: "wasim", body: "Yes", route: "none", facts: { kind: "none" } }),
+      ],
+    });
+    expect(r.writes).toHaveLength(0);
+    expect(statusOf(r.nextState, "wasim")).toBe("ABSENT");
+  });
+
+  it("a bare 'yes' the router read as the sender's own attendance DOES register them", () => {
+    // THE DELIBERATE CHANGE. Before this, an unresolvable affirmation
+    // was discarded whatever the route, which is what cost Abid and
+    // Mojib their places. After it, a member whose message stage 1 read
+    // as "joining this match themselves" is registered — and the cost of
+    // being wrong is one ✅ they undo with one word, against a slot they
+    // lose in silence.
+    const r = decide({
+      now: NOW,
+      state: world({ confirmed: ["kemal"] }),
+      messages: [msg({ from: "mojib", body: "yes", route: "self_att", facts: bare() })],
+    });
+    expect(statusOf(r.nextState, "mojib")).toBe("CONFIRMED");
+  });
+});

@@ -279,34 +279,137 @@ export function decide(input: EngineInput): EngineResult {
         return;
       }
 
-      // A bare "Confirmed" answering MatchTime's own pending list. The
-      // bot's last post is a KNOWN OBJECT, so this is a lookup, not an
-      // inference (§3.2 S25, 2026-04-24 Amir, 7453daa).
+      // ══════════════════════════════════════════════════════════════
+      // AN AFFIRMATION IS A POINTER. RESOLVE IT; NEVER DISCARD IT.
+      // ══════════════════════════════════════════════════════════════
+      //
+      // `affirmation: "yes"` with no claims means the extractor read the
+      // message as somebody saying yes to something the message itself
+      // does not state. That is not a fact about attendance — it is a
+      // REFERENCE, and it is worth exactly as much as the thing the
+      // engine can resolve it against. There are two such things, tried
+      // in this order, and both are objects the engine already holds.
+      //
+      // ⚠️ THE 2026-09-09 INCIDENT IS THE THIRD CASE: NEITHER. Four
+      // players typed "In" for Tuesday inside twenty minutes; two were
+      // registered and two were silently discarded. Mojib and habib were
+      // ONE SECOND apart, same batch, same word, opposite outcomes —
+      // because the extractor happened to return a claim for one and
+      // `claims: []` + `affirmation: "yes"` for the other. This branch
+      // then found no pending set and RETURNED, which is §9's named
+      // signature failure ("message understood, action silently not
+      // taken") committed verbatim, and it cost two men their place in a
+      // squad for a match six days out. Measured on the live extractor, 20
+      // runs each: in the incident's own conversation window "In" came back
+      // claimless 14 of 20 and "in" 11 of 20 (`scripts/measure-claimless.ts`).
+      // A rate like that is not something a prompt makes safe: the ENGINE
+      // has to be right when extraction wobbles.
       let claims = facts.claims;
       let fromAffirmation = false;
       if (claims.length === 0 && facts.affirmation === "yes") {
+        // ── 1. THE PENDING SET, unchanged (§3.2 S25, 2026-04-24 Amir,
+        // 7453daa). A bare "Confirmed" answering MatchTime's own pending
+        // list. The bot's last post is a KNOWN OBJECT, so this is a
+        // lookup, not an inference — which is why it is tried FIRST and
+        // why nothing below is allowed to weaken it.
         const pending = parsePendingSet(state.lastBotPost);
-        if (pending.length === 0) {
+        if (pending.length > 0) {
+          claims = pending.map((name) => ({
+            subject: "other" as const,
+            personRef: name,
+            personNamed: true,
+            polarity: "in" as const,
+            contingent: false,
+            conditionOn: "none" as const,
+            tense: "present" as const,
+            // The bot ASKED these names to confirm and one of them just
+            // said yes. That is a decision by construction; it is not the
+            // model's reading of anything.
+            basis: "decision" as const,
+            reported: true,
+            confidence: 0.95,
+          }));
+          fromAffirmation = true;
+          out.reasons.push(`short confirmation resolved to ${pending.length} pending name(s)`);
+        } else if (msg.route === "self_att") {
+          // ── 2. THE ROUTE. `self_att` is not prose and it is not this
+          // message's words: it is STAGE 1's typed verdict, and the
+          // router prompt defines it in one line — "the SENDER is
+          // joining or leaving THIS match themselves". So the engine has
+          // two independent model outputs saying the same thing from
+          // different directions: the router says this message is the
+          // sender's own attendance, the extractor says the sender
+          // affirmed. The referent of the affirmation is therefore the
+          // sender's own place, and that conclusion is reached from two
+          // typed enums without reading one character of the body.
+          //
+          // WHY NOT A PHRASE LIST. Kemal, on this fix: "not just in,
+          // anyone can say yes, count me, sure. Many different words."
+          // A pattern over that set is a CLASSIFIER, which this codebase
+          // has now deleted twice — PR #33 deleted the regex fast path,
+          // and `awaiting-answer.ts` refuses to add a `👍` pattern in as
+          // many words: "the information is not in the token. It is in
+          // the conversation." This reads the conversation the only way
+          // the engine honestly can: through the stage whose entire job
+          // is to say what a message is doing.
+          //
+          // WHY "yes" ONLY, AND NOT "no". A wrong IN costs one message
+          // to undo and the player is standing there anyway; a wrong OUT
+          // takes a man's place off him and he finds out at the pitch.
+          // §11.1 prices that asymmetry in exactly this direction, so
+          // the weaker signal is allowed to ADD a player and never to
+          // remove one. A claimless "no" keeps today's behaviour.
+          //
+          // WHY THIS IS SAFE FOR A BARE "yes". The negative case does
+          // not turn on the word either — it turns on the same route.
+          // "Yes" answering "@Wasim can Najib come please?" routed
+          // `none` in production on 2026-09-08 and never reaches an
+          // extractor at all; `other_att`, `offer` and `unsure` all fall
+          // through this branch untouched. The word "yes" appears on
+          // both lists; the route is what separates them.
+          claims = [
+            {
+              subject: "sender" as const,
+              personRef: "",
+              personNamed: false,
+              polarity: "in" as const,
+              contingent: false,
+              conditionOn: "none" as const,
+              tense: "present" as const,
+              // The router said JOINING. Joining acts on the squad, so
+              // this is a decision, not a statement of availability —
+              // the same reading `basis` is defined by in the extractor
+              // prompt, reached from the route instead of from a verb.
+              basis: "decision" as const,
+              reported: false,
+              confidence: 0.95,
+            },
+          ];
+          // NOT `fromAffirmation`. That flag exists to give a resolved
+          // pending-list confirmation a spoken answer when every write
+          // turned out idempotent, and a self IN already has one: the ✅
+          // react on the sender's own message. Setting it here would
+          // make a repeated "In" post a line to the group that a
+          // repeated claimful "In" does not — and the whole point of
+          // this branch is that the two shapes become indistinguishable
+          // from here down.
+          out.reasons.push(
+            "claimless affirmation on a `self_att` route: the router read this as the " +
+              "sender's own attendance, so the affirmation is their own IN",
+          );
+        } else {
+          // NO REFERENT, so nothing is registered — but the message
+          // FALLS THROUGH rather than returning. The old `return` here
+          // is the defect above, and it belongs to the
+          // terminal-short-circuit family this repo has now seen seven
+          // times: a `continue`/`return` that silently deletes every
+          // guard beneath it. What it was skipping: the side-request
+          // reason lines, the `chase` nudge branch, and the
+          // "no claims extracted" line that is the honest description of
+          // this outcome. Falling through reaches all three and still
+          // writes nothing, because `claims` is still empty.
           out.reasons.push("short confirmation with no pending set in the bot's last post");
-          return;
         }
-        claims = pending.map((name) => ({
-          subject: "other" as const,
-          personRef: name,
-          personNamed: true,
-          polarity: "in" as const,
-          contingent: false,
-          conditionOn: "none" as const,
-          tense: "present" as const,
-          // The bot ASKED these names to confirm and one of them just
-          // said yes. That is a decision by construction; it is not the
-          // model's reading of anything.
-          basis: "decision" as const,
-          reported: true,
-          confidence: 0.95,
-        }));
-        fromAffirmation = true;
-        out.reasons.push(`short confirmation resolved to ${pending.length} pending name(s)`);
       }
 
       // Side requests are facts in their own right and must survive
@@ -321,6 +424,24 @@ export function decide(input: EngineInput): EngineResult {
           // is exactly what the `strongDrop` regex over the model's
           // prose did two days after it shipped.
           out.reasons.push("chase nudge: no attendance change");
+          return;
+        }
+        if (msg.route === "self_att" && facts.affirmation === null) {
+          // §11.2 TWO-STAGE DISAGREEMENT, the other way round. The
+          // `route === "none"` branch at the top of this loop already
+          // degrades when the router says banter and the extractor finds
+          // a claim. This is its mirror: the router said "the SENDER is
+          // joining or leaving THIS match themselves" and the extractor
+          // came back with no claim AND no affirmation — nothing at all
+          // to act on and no pointer to resolve either.
+          //
+          // Nothing is written, because there is no polarity to write:
+          // `self_att` covers joining AND leaving, and guessing which is
+          // exactly the inference this pipeline exists to refuse. But it
+          // must not be SILENT. Measured at 2 of 20 on "count me"
+          // (`scripts/measure-claimless.ts`), and a silent 10% on a
+          // phrasing Kemal named by name is how 2026-09-09 happened.
+          degrade("router said `self_att` but the extractor returned no claim and no affirmation");
           return;
         }
         out.reasons.push("no claims extracted");

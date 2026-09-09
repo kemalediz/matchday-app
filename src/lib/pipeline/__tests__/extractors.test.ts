@@ -589,3 +589,72 @@ describe("extractForRoute", () => {
     expect(user.toLowerCase()).not.toContain("confirmed (");
   });
 });
+
+// ── The message is not its own context (2026-09-09) ────────────────────
+//
+// The Pi records every inbound message into its history buffer BEFORE
+// buffering it for the flush, and sends the whole buffer with the batch.
+// So `history` arrives here already containing the messages being
+// extracted, and each one was shown its own text twice: once under
+// "RECENT CHAT", once under "THE MESSAGE".
+//
+// That duplication is what made a bare "In" non-deterministic — the
+// model reads the second copy as an echo of the first and returns
+// `claims: []` with `affirmation: "yes"`. Measured on the live model,
+// 20 runs each: 14/20 claimless with the echo, 0/20 without it. Two
+// players lost their place to it on 2026-09-09.
+describe("the recent chat never contains the message being extracted", () => {
+  const echoModel = () => fakeModel('{"claims":[],"affirmation":"none","sideRequests":[]}');
+
+  it("drops the sender's own duplicate line from RECENT CHAT", async () => {
+    const model = echoModel();
+    await extractForRoute(model, "self_att", {
+      ...MSG,
+      body: "In",
+      authorName: "Mojib Jalali",
+      history: [
+        { author: "Wasimp", body: "In" },
+        { author: "Mojib Jalali", body: "In" },
+      ],
+    });
+    const user = model.reqs[0].user;
+    // Wasim's identical word is real context and survives; the sender's
+    // own copy of the message under extraction does not.
+    expect(user).toContain("Wasimp: In");
+    expect(user).not.toContain("Mojib Jalali: In");
+    expect(user).toContain("THE MESSAGE (from Mojib Jalali)");
+  });
+
+  it("keeps an identical line from a DIFFERENT person", async () => {
+    const model = echoModel();
+    await extractForRoute(model, "self_att", {
+      ...MSG,
+      body: "In",
+      authorName: "Mojib Jalali",
+      history: [{ author: "Abid Kazmi", body: "In" }],
+    });
+    expect(model.reqs[0].user).toContain("Abid Kazmi: In");
+  });
+
+  it("keeps a DIFFERENT line from the same person", async () => {
+    const model = echoModel();
+    await extractForRoute(model, "self_att", {
+      ...MSG,
+      body: "In",
+      authorName: "Mojib Jalali",
+      history: [{ author: "Mojib Jalali", body: "what time is kickoff?" }],
+    });
+    expect(model.reqs[0].user).toContain("Mojib Jalali: what time is kickoff?");
+  });
+
+  it("omits the RECENT CHAT block entirely when the echo was all there was", async () => {
+    const model = echoModel();
+    await extractForRoute(model, "self_att", {
+      ...MSG,
+      body: "In",
+      authorName: "Mojib Jalali",
+      history: [{ author: "Mojib Jalali", body: "In" }],
+    });
+    expect(model.reqs[0].user).not.toContain("RECENT CHAT");
+  });
+});

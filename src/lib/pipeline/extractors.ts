@@ -557,10 +557,40 @@ export async function extractForRoute(
   const kind = extractorFor(route);
   if (kind === "none") return { facts: { kind: "none" }, degradations: [] };
 
+  // ── THE MESSAGE IS NOT ITS OWN CONTEXT (2026-09-09) ────────────────
+  //
+  // The Pi records every inbound message into its 15-message history
+  // buffer BEFORE it buffers it for the flush (`index.ts`:
+  // `recordHistory(...)` then `enqueueForAnalysis(...)`), and reads the
+  // whole buffer at flush time. So the `history` that arrives here
+  // ALREADY CONTAINS the messages in this batch, and every message was
+  // being shown its own text under "RECENT CHAT" and then again under
+  // "THE MESSAGE".
+  //
+  // That duplication is what made a bare "In" non-deterministic. A model
+  // shown the same line twice reads the second as an ECHO of the first —
+  // an acknowledgement of something already said rather than a fresh
+  // claim — and returns `claims: []` with `affirmation: "yes"`.
+  // MEASURED, `scripts/measure-claimless.ts`, 20 runs each: with the
+  // message present in its own recent chat, "In" comes back claimless
+  // 14 of 20 and "in" 11 of 20; with the same context and the echo
+  // removed, both are 0 of 20. That is the 2026-09-09 incident, in which
+  // Abid and Mojib typed "In" and were silently discarded while Wasim
+  // and habib typed "In" one second later and were registered.
+  //
+  // The block's own header already says what it is for — "context only,
+  // never extract from it". The message under extraction is not context;
+  // it is the subject. Matching on author AND body, so a DIFFERENT
+  // person who happened to type the same word keeps their line: their
+  // message is real context, and it is the sender's own duplicate that
+  // does the damage.
+  const recent = msg.history.filter(
+    (h) => !(h.body === msg.body && (h.author ?? null) === (msg.authorName ?? null)),
+  );
   const context: string[] = [];
-  if (msg.history.length > 0) {
+  if (recent.length > 0) {
     context.push("RECENT CHAT (context only, never extract from it):");
-    for (const h of msg.history.slice(-8)) {
+    for (const h of recent.slice(-8)) {
       context.push(`  ${h.author ?? "(unknown)"}: ${h.body}`);
     }
   }

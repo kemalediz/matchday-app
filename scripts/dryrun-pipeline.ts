@@ -192,6 +192,27 @@ const CASES: Case[] = [
   { id: "C15", who: "Amir", body: "I can't come. Matchtime put my name down as reserve without my confirm", expect: "treat as OUT/grievance; must not silently confirm him" },
   { id: "C15b", who: "Amir", body: "I can't come. Matchtime put my name down as reserve without my confirm", fullSquad: true, expect: "Amir IS on the bench here. Expect he is taken OFF, not left on it" },
 
+  // ── C16–C18: the 2026-09-09 silent-discard, end to end ────────────
+  //
+  // Four players typed "In" for Tuesday inside twenty minutes; two were
+  // registered and two were silently discarded, one second apart in the
+  // same batch. The extractor read the two that died as `claims: []` +
+  // `affirmation: "yes"` and the engine's affirmation branch RETURNED.
+  //
+  // C1 is the same word from a different player and has always been the
+  // control. These three are the phrasings Kemal named when he asked
+  // for the fix to be wider than the literal word "in": "not just in,
+  // anyone can say yes, count me, sure. Many different words."
+  //
+  // The per-phrasing extractor distribution is measured far more
+  // cheaply by `scripts/measure-claimless.ts` (20+ runs, no database).
+  // What these cases add is the END TO END answer over the LIVE squad:
+  // router, extractor, engine and composer, with the real roster and
+  // the real capacity arithmetic underneath.
+  { id: "C16", who: "Zair", body: "In", expect: "THE 2026-09-09 INCIDENT. WRITE Zair CONFIRMED, every run. It was silently discarded twice on the night" },
+  { id: "C17", who: "Zair", body: "count me", expect: "WRITE Zair CONFIRMED — Kemal named this phrasing by name" },
+  { id: "C18", who: "Zair", body: "sure", expect: "MEASURED 7/10 WRITE Zair CONFIRMED, 3/10 silent — the router splits self_att 7/10 · none 3/10 on a bare "sure", and that is the honest answer for a genuinely ambiguous word. Before the fix it was 0/10. The SAME word answering a question routes `none` 19/20 and does nothing" },
+
   // ── X: a pasted roster that ALSO says something (2026-09-07) ──────
   //
   // The defect PR #55 marked `test.fail()`: the analyze route peeled ANY
