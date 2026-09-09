@@ -63,12 +63,20 @@
  *     blast, group→DM Q&A, rating progress, help, the colour swap, the
  *     team swap, a bench-prompt answer, a pasted roster. Nothing failed;
  *     it simply was not the pipeline's business.
- *   • A message an owner OWNED and decided nothing should happen about.
+ *   • A message an owner OWNED and DECIDED nothing should happen about.
  *     That is a decision with a reason and it already gets an
  *     `AnalyzedMessage` row — §11.2's own mitigation, "log the route
  *     alongside the extracted facts, so triage is one query". Paging an
  *     admin because the engine correctly concluded that a joke was a
  *     joke is the nagging above.
+ *
+ *     ⚠️ AMENDED 2026-09-09. That paragraph was doing two jobs and only
+ *     one of them was sound. An owner that DECIDES is covered by the row
+ *     and stays out of the DM, exactly as written. But an owner that
+ *     claims a message and comes away with NOTHING TO DECIDE has made no
+ *     decision at all, and from out here it read identically to one that
+ *     had. Two players' "In" was lost that way. See the second header
+ *     block below and `silentDiscard`.
  *   • A message the ORG's features exclude. That is not a failure; it
  *     is the club saying do not do this, and a note there pages a human
  *     because the system is working.
@@ -106,7 +114,35 @@
  * the batch with no owner. Same DM, same 1-hour dedupe, same audience;
  * the input stopped being prose.
  */
-import type { Route } from "./pipeline/types";
+/**
+ * ─────────────────────────────────────────────────────────────────────
+ * 2026-09-09 — "DID ANYBODY OWN IT?" WAS THE WRONG QUESTION
+ * ─────────────────────────────────────────────────────────────────────
+ *
+ * Two real players typed "In" for Tuesday's match. The attendance engine
+ * CLAIMED both messages, wrote nothing, said nothing, and neither player
+ * was registered:
+ *
+ *   18:47  Abid Kazmi    "In"  self_att  action=none
+ *   18:57  Mojib Jalali  "In"  self_att  action=none
+ *          "short confirmation with no pending set in the bot's last post"
+ *
+ * Kemal saw it in the group. Nothing told him, and the reason is
+ * structural rather than a missing string: this module's input was
+ * MESSAGES NOBODY OWNED, and a message an owner claimed and then did
+ * nothing with is not in that set. It was answering "did anything CLAIM
+ * this?" when the question that matters is "did anything HAPPEN?".
+ *
+ * `owned` below is the second input, and `silentDiscard` is its rule.
+ * That function is the whole of this change and the argument is written
+ * out where it is defined; the short version is that most no-ops really
+ * are correct, so the test has to separate a DECISION with a reason from
+ * an UNDERSTANDING that came away with nothing — and it has to do that
+ * WITHOUT reading anybody's prose, because a deny-list of reason strings
+ * drifts the moment somebody adds a rule, which is exactly the failure
+ * it exists to catch.
+ */
+import type { Disposition, Route } from "./pipeline/types";
 
 /**
  * The substring the 1-hour dedupe query matches on.
@@ -130,11 +166,134 @@ export interface UnownedMessage {
   route: Route | undefined;
 }
 
+/**
+ * A message an owner DID claim, with the typed facts `silentDiscard`
+ * reads. Every field is something the pipeline already produces, and not
+ * one of them is a sentence.
+ */
+export interface OwnedMessage {
+  waMessageId: string;
+  body: string;
+  authorName: string | null;
+  /** The router's answer. An owned message always has one. */
+  route: Route;
+  /** `MessageOutcome.disposition` — the engine's own typed verdict.
+   *  `acted` means it emitted a write or flagged a speech turn. */
+  disposition: Disposition;
+  /** Did MatchTime reply or react to this message? Kept separate from
+   *  `disposition` because a caller can add words the engine never
+   *  flagged (the honest ack, the unresolved-sender nudge), and a player
+   *  who was told something is not a silent discard. */
+  spoke: boolean;
+  /** Did the sender resolve to a squad member? */
+  senderResolved: boolean;
+  /** How many claims the EXTRACTOR came away with, about anybody. The
+   *  count, never the content — see `silentDiscard`. */
+  claimCount: number;
+  /** How many side requests (chase, recruit) it came away with. */
+  sideRequestCount: number;
+  /**
+   * The owner's machine reason line, for the BULLET only.
+   *
+   * ⚠️ DISPLAY, NEVER A TEST. `silentDiscard` does not look at this
+   * field and must not: deciding on prose is the failure this module
+   * exists to catch. Printing prose that a human then reads is the same
+   * thing `reasonFor` already does with `degradations`, and it is the
+   * difference between a DM that says "nothing happened" and one that
+   * says which rule stopped it. Null when the owner did not report one.
+   */
+  why?: string | null;
+}
+
+/**
+ * The routes on which coming away empty-handed is a defect.
+ *
+ * `self_att` is "the SENDER is joining or leaving THIS match themselves"
+ * and `offer` is "a contingent or tentative commitment by anyone". Both
+ * are the router ASSERTING that somebody committed to something. If the
+ * extractor then found nothing at all, the two stages contradict each
+ * other and a real message went nowhere.
+ *
+ * The other two engine routes are deliberately NOT here:
+ *
+ *   • `unsure` MEANS "attendance-shaped but the router genuinely cannot
+ *     tell". An empty extraction is that route's EXPECTED outcome, so
+ *     noting it would page an admin for the router's uncertainty on
+ *     every near-miss — the nagging this module's first header is about.
+ *   • `other_att` is where the interaction contract lives. All three
+ *     production tag refusals were `other_att` and they cannot be
+ *     anything else: `engine.ts`'s `claimNeedsTag` returns false for
+ *     `subject === "sender"`, so a tag is never required for a sender's
+ *     own attendance. Refusing a third-party instruction is the contract
+ *     WORKING.
+ *
+ * A route added later defaults to NOT being noted here, which is the
+ * opposite of `worthNoting`'s default and deliberately so: the unowned
+ * list's failure mode is a coverage hole, so it fails loud; this one's
+ * is a flood, so it fails quiet. The two lists mean different things,
+ * which is the same reason `worthNoting` spells out `ENGINE_ROUTES`
+ * rather than importing it.
+ */
+const SILENCE_IS_SUSPICIOUS_ON: readonly Route[] = ["self_att", "offer"];
+
+/**
+ * SHOULD A HUMAN BE TOLD THAT NOTHING HAPPENED TO THIS OWNED MESSAGE?
+ *
+ * All five must hold, and each is a typed fact rather than a string:
+ *
+ *   1. the ROUTE asserts a commitment was made (above);
+ *   2. the SENDER resolved to a member — an unresolved sender is a
+ *      different failure with a different remedy, and the admin
+ *      console's unresolved queue already lists them;
+ *   3. the engine did not ACT — `disposition` is the engine's own word
+ *      for it, set to `acted` by `emit()` and by every speech branch
+ *      that counts as answering the player;
+ *   4. MatchTime said nothing — no reply, no react;
+ *   5. the extractor came away with NO CLAIM and NO SIDE REQUEST.
+ *
+ * (5) IS THE ONE THAT DOES THE WORK, and it is why this is not a list of
+ * reason strings. Every correct no-op in production had the extractor
+ * resolve SOMETHING which the engine then declined for a stated reason:
+ *
+ *   "no change for Mojib"                  1 claim → already true
+ *   "contingent drop for X: holding"       1 claim → held on purpose
+ *   "requires an @Match Time tag"          1 claim → refused on purpose
+ *   "below the confidence floor"           1 claim → distrusted on purpose
+ *   "availability … not a commitment"      1 claim → held on purpose
+ *   "chase nudge: no attendance change"    1 side request → a nudge
+ *
+ * The defect had NEITHER: `claims: []`, `affirmation: "yes"`, and a
+ * pending set that turned out to be empty. The pipeline was handed a
+ * player's own "In" and came away with nothing at all to decide about.
+ * That is not a decision, it is a hole — and a rule added under
+ * `engine.ts` later cannot quietly join the silent bucket the way a new
+ * reason string would, because joining it requires the EXTRACTOR to have
+ * produced nothing, which no engine rule can arrange.
+ *
+ * `degraded` counts alongside `noop` on purpose: a degraded owner that
+ * also said nothing is exactly as invisible to the club as a noop one.
+ */
+export function silentDiscard(m: OwnedMessage): boolean {
+  if (!SILENCE_IS_SUSPICIOUS_ON.includes(m.route)) return false;
+  if (!m.senderResolved) return false;
+  if (m.disposition === "acted") return false;
+  if (m.spoke) return false;
+  return m.claimCount === 0 && m.sideRequestCount === 0;
+}
+
 export interface OperatorNoteInput {
   /** Named in the DM so an admin of two clubs knows which group to open. */
   orgName: string;
   /** Every fresh message no owner and no deterministic path claimed. */
   messages: UnownedMessage[];
+  /**
+   * Every fresh message an owner DID claim. OPTIONAL, and absent means
+   * "report none of them" — a caller that has not been taught to pass
+   * these keeps the pre-2026-09-09 behaviour exactly, which is the one
+   * direction of default that cannot make an existing note noisier.
+   * Only the ones `silentDiscard` selects reach the DM.
+   */
+  owned?: OwnedMessage[];
   /** Every runner's degradation lines, verbatim. Each already carries
    *  the message id it is about, so they are matched by substring
    *  rather than by a parallel structure that could drift out of step. */
@@ -215,14 +374,64 @@ function reasonFor(id: string, degradations: string[]): string | null {
   return clip(after.length > 0 ? after : hit, 120);
 }
 
+/** What a silent-discard bullet says when no runner wrote a reason line
+ *  for the id. The unowned bullets need no such sentence — the headline
+ *  already says nobody handled them — but "an owner took this and
+ *  produced nothing" is the fact the reader needs here, and it is not
+ *  visible from anywhere else. */
+const SILENT_DISCARD_NOTE = "MatchTime claimed this and recorded nothing";
+
+/**
+ * Drop an owner's `<name> (<route>): ` prefix from a reason line.
+ *
+ * COSMETIC AND NOTHING ELSE. The bullet already prints `[self_att]` one
+ * character earlier, so leaving the prefix on says the route twice in
+ * fifteen characters. This is the same trim `reasonFor` does to a
+ * degradation line, and like that one it cannot change WHETHER a message
+ * is reported — only how the sentence reads. A prefix it does not
+ * recognise is left alone.
+ */
+function stripOwnerPrefix(why: string): string {
+  return why.replace(/^[a-z][a-z0-9 _-]*\([a-z_]+\):\s*/i, "");
+}
+
 export function composeOperatorNote(input: OperatorNoteInput): OperatorNote {
   const noted = input.messages.filter((m) => worthNoting(m.route, input.features));
-  if (noted.length === 0) return { noteIds: [], text: null, dedupeKey: null };
+  // The SAME feature suppression the unowned list gets. Both routes in
+  // `SILENCE_IS_SUSPICIOUS_ON` are attendance routes, so without this an
+  // attendance-off org would be told about every "in" through the new
+  // door — the 2026-09-06 bug arriving a second time.
+  const notedOwned = (input.owned ?? []).filter(
+    (m) => silentDiscard(m) && worthNoting(m.route, input.features),
+  );
+  if (noted.length + notedOwned.length === 0) {
+    return { noteIds: [], text: null, dedupeKey: null };
+  }
 
-  const n = noted.length;
-  const lines = noted.slice(0, MAX_LISTED).map((m) => {
+  // Unowned first: it is the older and broader class, and an admin
+  // reading top-down should see "nothing touched this" before "something
+  // touched this and stopped".
+  const all: Array<{
+    waMessageId: string;
+    body: string;
+    authorName: string | null;
+    route: Route | undefined;
+    fallbackWhy: string | null;
+  }> = [
+    ...noted.map((m) => ({ ...m, fallbackWhy: null })),
+    ...notedOwned.map((m) => ({
+      waMessageId: m.waMessageId,
+      body: m.body,
+      authorName: m.authorName,
+      route: m.route as Route | undefined,
+      fallbackWhy: m.why ? clip(stripOwnerPrefix(m.why), 120) : SILENT_DISCARD_NOTE,
+    })),
+  ];
+
+  const n = all.length;
+  const lines = all.slice(0, MAX_LISTED).map((m) => {
     const who = m.authorName ?? "?";
-    const why = reasonFor(m.waMessageId, input.degradations);
+    const why = reasonFor(m.waMessageId, input.degradations) ?? m.fallbackWhy;
     const routeLabel = m.route ?? "no route";
     return `• "${clip(m.body, MAX_BODY_CHARS)}" by ${who} [${routeLabel}]${why ? ` — ${why}` : ""}`;
   });
@@ -236,9 +445,9 @@ export function composeOperatorNote(input: OperatorNoteInput): OperatorNote {
     `Check the group and act manually if any were attendance changes.`;
 
   return {
-    noteIds: noted.map((m) => m.waMessageId),
+    noteIds: all.map((m) => m.waMessageId),
     text,
-    dedupeKey: noted
+    dedupeKey: all
       .map((m) => m.waMessageId)
       .sort()
       .join(","),

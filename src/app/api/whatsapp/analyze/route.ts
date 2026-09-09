@@ -91,6 +91,7 @@ import {
 import {
   composeOperatorNote,
   OPERATOR_NOTE_MARKER,
+  type OwnedMessage,
   type UnownedMessage,
 } from "@/lib/operator-note";
 import {
@@ -1969,6 +1970,25 @@ async function handleAnalyzeRequest(request: Request) {
   //   the route rather than on the message text.
   const unowned: UnownedMessage[] = [];
 
+  // ── EVERY MESSAGE THE ATTENDANCE ENGINE *DID* OWN ──────────────────
+  //   The second input to `lib/operator-note.ts`, added 2026-09-09 after
+  //   two players' "In" was claimed by the engine, written nowhere and
+  //   reported to nobody. `unowned` answers "did anything CLAIM this?";
+  //   this answers "did anything HAPPEN?".
+  //
+  //   EVERY engine-owned message is pushed, the ones it acted on
+  //   included, and the selection is `composeOperatorNote`'s
+  //   `silentDiscard`. Same argument as `none` being filtered there
+  //   rather than here: the decision about what is worth a human's
+  //   attention is made in ONE place.
+  //
+  //   Only the ATTENDANCE engine feeds this. The predicate reads
+  //   extractor claim counts, which the other four owners do not
+  //   produce, and a lost attendance change is the failure this product
+  //   is named for. Widening it to `answer` / `score` / `balancer` /
+  //   `admin_ops` needs its own predicate and its own production table.
+  const ownedByEngine: OwnedMessage[] = [];
+
   for (const msg of fresh) {
     const sender = senderById.get(msg.waMessageId)!;
 
@@ -2069,6 +2089,37 @@ async function handleAnalyzeRequest(request: Request) {
       ) {
         senderReactAudit.push({ idx: results.length, userId: sender.userId });
       }
+      // ── DID ANYTHING ACTUALLY HAPPEN? (2026-09-09) ────────────────
+      //
+      // Recorded for every engine-owned message; `silentDiscard` picks
+      // the suspicious ones out. `spoke` is computed HERE rather than
+      // read off the outcome because two things above can add words the
+      // engine never flagged — the honest ack and the unresolved-sender
+      // nudge — and a player who was told something is not a silent
+      // discard.
+      //
+      // ⚠️ NOT REACHED BY THE `ack.failed` BRANCH ABOVE, which
+      // `continue`s past this. Deliberate, and not a hole: a write that
+      // threw already gets `handledBy: "error"` on its
+      // `AnalyzedMessage` row, a `console.error`, and an honest reply to
+      // the group saying it did not land. It is the loudest path in this
+      // function, and adding it here would double-report the one failure
+      // that is already impossible to miss.
+      ownedByEngine.push({
+        waMessageId: msg.waMessageId,
+        body: msg.body,
+        authorName: msg.authorName,
+        route: engineOutcome.route,
+        disposition: engineOutcome.disposition,
+        spoke: engineReply !== null || ack.react !== null,
+        senderResolved: !!sender.userId,
+        claimCount: engineOutcome.claimCount,
+        sideRequestCount: engineOutcome.sideRequestCount,
+        // Prose, for the bullet only. The engine writes this same string
+        // to `AnalyzedMessage.reasoning`, so the DM and the admin log
+        // say the same thing, and neither of them decides anything.
+        why: engineOutcome.reasoning,
+      });
       results.push({
         waMessageId: msg.waMessageId,
         // The WIRE field, which `whatsapp-bot/src/api.ts:325` types as a
@@ -2295,53 +2346,91 @@ async function handleAnalyzeRequest(request: Request) {
   //   Best-effort by construction: the note is the last thing that
   //   happens to a batch that already replied, so a failure here must
   //   never cost the group its reply.
-  if (unowned.length > 0) {
+  //
+  //   ⚠️ THE OUTER GUARD IS AN `||` SINCE 2026-09-09, and it has to be:
+  //   a batch in which the engine owned every message and silently
+  //   discarded them has `unowned.length === 0`, so `if (unowned.length
+  //   > 0)` would have skipped the composer, the admin lookup and the DM
+  //   entirely — the new report dead on arrival in exactly the batch it
+  //   exists for. That is `describeEngineBatch`'s own lesson ("one `&&`
+  //   upstream threw them away") and this file's terminal-short-circuit
+  //   family, arriving one level up as a wrapper condition instead of a
+  //   `continue`.
+  if (unowned.length > 0 || ownedByEngine.length > 0) {
     try {
-      const note = composeOperatorNote({
+      const candidates = {
         orgName: org.name,
         messages: unowned,
+        // Every message the attendance engine claimed. Selected by
+        // `silentDiscard` inside the composer, never here.
+        owned: ownedByEngine,
         degradations: ownerDegradations,
-        // A club that switched attendance off must not be paged about
-        // attendance. `attendance-engine-batch.ts` DISOWNS those
-        // messages when the feature is off (it returns `empty()`), so
-        // without this they would arrive here looking like a failure.
-        // This IS an extra `findUnique` — `getOrgFeatures` does no
-        // caching, and I checked rather than assumed, having just spent
-        // a whole pass deleting comments that asserted things nobody
-        // had verified. It is affordable precisely here: the block only
-        // runs when `unowned.length > 0`, and it already does a
-        // `membership.findMany` plus one `botJob.findFirst` per admin.
-        // See `operator-note.ts`'s header — the claim that the caller
-        // filtered these out was false until 2026-09-06.
-        features: { attendance: (await getOrgFeatures(org.id)).attendance },
-      });
-      if (note.text) {
-        console.warn(
-          `[analyze] ${note.noteIds.length} message(s) reached the end of the batch with no owner: ` +
-            note.noteIds.join(", "),
-        );
-        const admins = await db.membership.findMany({
-          where: { orgId: org.id, role: { in: ["ADMIN", "OWNER"] }, leftAt: null },
-          include: { user: { select: { id: true, phoneNumber: true, name: true } } },
+      };
+      // ── ASKED TWICE, ON PURPOSE, AND THE FIRST ASK DOES NO I/O ────
+      //
+      // Absent `features` suppresses NOTHING (the module's documented
+      // default), so this call is a strict SUPERSET of the real one: a
+      // null text here means no combination of feature flags could have
+      // produced a note, and the org lookup below would be a database
+      // read for a DM that was never going to be sent. That matters now
+      // because the `||` above lets in every batch the engine owned —
+      // i.e. most of them — where before it took a stray. Re-composing
+      // rather than restating the route test here is deliberate: one
+      // predicate, one place.
+      if (composeOperatorNote(candidates).text) {
+        const note = composeOperatorNote({
+          ...candidates,
+          // A club that switched attendance off must not be paged about
+          // attendance. `attendance-engine-batch.ts` DISOWNS those
+          // messages when the feature is off (it returns `empty()`), so
+          // without this they would arrive here looking like a failure.
+          // This IS an extra `findUnique` — `getOrgFeatures` does no
+          // caching, and I checked rather than assumed, having just
+          // spent a whole pass deleting comments that asserted things
+          // nobody had verified. It is affordable precisely here: the
+          // superset above has already said there is something to send,
+          // and the block already does a `membership.findMany` plus one
+          // `botJob.findFirst` per admin.
+          // See `operator-note.ts`'s header — the claim that the caller
+          // filtered these out was false until 2026-09-06.
+          features: { attendance: (await getOrgFeatures(org.id)).attendance },
         });
-        const since = new Date(Date.now() - 60 * 60 * 1000); // 1h dedupe window
-        for (const m of admins) {
-          if (!m.user.phoneNumber) continue;
-          const phone = m.user.phoneNumber.replace(/^\+/, "");
-          const recentlySent = await db.botJob.findFirst({
-            where: {
-              orgId: org.id,
-              kind: "dm",
-              phone,
-              text: { contains: OPERATOR_NOTE_MARKER },
-              createdAt: { gte: since },
-            },
-            select: { id: true },
+        // ⚠️ AND THE FEATURE FILTER CAN STILL EMPTY IT. The superset
+        // says only that something MIGHT be worth sending; an
+        // attendance-off org has every candidate suppressed here and
+        // must send nothing at all. The guard NESTS rather than
+        // returning early: this is the middle of the request handler,
+        // and an early `return` would take the react ↔ status
+        // reconciliation, the batch's squad post, the recruit blast and
+        // the response itself with it.
+        if (note.text) {
+          console.warn(
+            `[analyze] ${note.noteIds.length} message(s) in this batch went unanswered: ` +
+              note.noteIds.join(", "),
+          );
+          const admins = await db.membership.findMany({
+            where: { orgId: org.id, role: { in: ["ADMIN", "OWNER"] }, leftAt: null },
+            include: { user: { select: { id: true, phoneNumber: true, name: true } } },
           });
-          if (recentlySent) continue; // already told this admin in the last hour
-          await db.botJob.create({
-            data: { orgId: org.id, kind: "dm", phone, text: note.text },
-          });
+          const since = new Date(Date.now() - 60 * 60 * 1000); // 1h dedupe window
+          for (const m of admins) {
+            if (!m.user.phoneNumber) continue;
+            const phone = m.user.phoneNumber.replace(/^\+/, "");
+            const recentlySent = await db.botJob.findFirst({
+              where: {
+                orgId: org.id,
+                kind: "dm",
+                phone,
+                text: { contains: OPERATOR_NOTE_MARKER },
+                createdAt: { gte: since },
+              },
+              select: { id: true },
+            });
+            if (recentlySent) continue; // already told this admin in the last hour
+            await db.botJob.create({
+              data: { orgId: org.id, kind: "dm", phone, text: note.text },
+            });
+          }
         }
       }
     } catch (err) {
