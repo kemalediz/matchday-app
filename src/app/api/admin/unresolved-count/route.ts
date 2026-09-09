@@ -1,15 +1,20 @@
 import { auth } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { getUserOrg, isOrgAdmin } from "@/lib/org";
+import { unresolvedKey } from "@/lib/unresolved-grouping";
 import { NextResponse } from "next/server";
 
 /**
- * Distinct count of unresolved attendance-relevant pushnames in the
- * last 21 days, for the admin subnav badge (#1 — make silent drops
- * impossible to miss). Cheap: one indexed query + in-memory distinct.
+ * Distinct count of unresolved attendance-relevant senders in the last 21
+ * days, for the admin subnav badge (#1 — make silent drops impossible to
+ * miss). Cheap: one indexed query + in-memory distinct.
+ *
+ * NAMELESS SENDERS ARE INCLUDED since 2026-09-09. This query carried
+ * `authorName: { not: null }`, which meant the badge for "messages nobody
+ * could be attributed to" could not see the messages with no attribution
+ * at all (2026-08-30 audit, §3). They share one key, so a batch of them
+ * adds one to the badge rather than a wall of noise.
  */
-const norm = (s: string) =>
-  s.trim().toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "");
 
 export async function GET() {
   const session = await auth();
@@ -24,7 +29,6 @@ export async function GET() {
     where: {
       orgId: membership.orgId,
       authorUserId: null,
-      authorName: { not: null },
       intent: { in: ["in", "out", "replacement_request"] },
       createdAt: { gte: since },
     },
@@ -40,7 +44,6 @@ export async function GET() {
       createdAt: { gte: since },
     },
   });
-  const count =
-    new Set(rows.map((r) => norm(r.authorName ?? "")).filter(Boolean)).size + failed;
+  const count = new Set(rows.map((r) => unresolvedKey(r.authorName))).size + failed;
   return NextResponse.json({ count });
 }

@@ -144,9 +144,26 @@ describe("@lid sender identity survives a broken injected layer", () => {
     expect(postedMessage().authorName).toBe("Kieran R");
   });
 
-  it("prefers the enriched contact pushname over notifyName when both exist", async () => {
-    // The contact record is the better name (it reflects a rename the
-    // cached payload may not have), so the healthy path must not regress.
+  it("prefers notifyName over the enriched contact pushname when both exist", async () => {
+    // REVERSED 2026-09-09, following the independent audit's
+    // recommendation #1. This test used to assert the opposite, on the
+    // reasoning that "the contact record is the better name (it reflects a
+    // rename the cached payload may not have)".
+    //
+    // That reasoning weighed the wrong thing. The name is not shown to
+    // anyone: it is the KEY the server resolves a sender by (exact match,
+    // UserAlias, fuzzy first token). What matters about a key is that it
+    // is the same key every time. `_data.notifyName` is plain data on the
+    // message and survives any WhatsApp frontend change; `contact.pushname`
+    // comes through the injected layer, which is precisely what dies. So
+    // the old order meant the key CHANGED the moment the layer degraded —
+    // a `UserAlias` curated against the contact name silently stops
+    // matching mid-outage, and a player who resolved on Monday is
+    // unresolvable on Tuesday for a reason nobody can see.
+    //
+    // The rename case the old comment worried about is not lost: a player
+    // who renames themselves changes their pushname, and `notifyName` IS
+    // the pushname, delivered on their very next message.
     const msg = {
       from: LID_GROUP,
       author: LID_AUTHOR,
@@ -154,13 +171,13 @@ describe("@lid sender identity survives a broken injected layer", () => {
       timestamp: 1_756_000_002,
       id: { _serialized: "false_g_C" },
       mentionedIds: [],
-      _data: { body: "in", notifyName: "stale name" },
-      getContact: async () => ({ pushname: "Fresh Name", isMe: false }),
+      _data: { body: "in", notifyName: "Payload Name" },
+      getContact: async () => ({ pushname: "Contact Name", isMe: false }),
     };
     await enqueueForAnalysis(asClient(healthyClient()), asMessage(msg));
     await _test_flushNow(LID_GROUP);
 
-    expect(postedMessage().authorName).toBe("Fresh Name");
+    expect(postedMessage().authorName).toBe("Payload Name");
   });
 
   it("falls back to notifyName when the contact resolves but is nameless", async () => {

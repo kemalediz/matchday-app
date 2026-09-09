@@ -182,6 +182,20 @@ export default function UnresolvedPage() {
                 </div>
               </div>
 
+              {!g.linkable ? (
+                // The unknown-sender bucket. Linking writes a UserAlias
+                // keyed on the pushname and there is none, so the control
+                // is not offered — but the messages are still listed,
+                // which is the whole change: until 2026-09-09 an
+                // unattributable message appeared in no queue at all.
+                <div className="mt-4 border-t border-slate-100 pt-4 text-sm text-slate-600">
+                  These arrived with no name and no number, so MatchTime couldn&apos;t tell
+                  who sent them and didn&apos;t change the squad. There&apos;s nothing to
+                  link here: ask the player to send it again, or add them on the Players
+                  page. Repeats of this usually mean the bot&apos;s WhatsApp connection
+                  needs attention.
+                </div>
+              ) : (
               <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-slate-100 pt-4">
                 <Link2 className="w-4 h-4 text-slate-400" />
                 <span className="text-sm text-slate-600">Link to:</span>
@@ -220,6 +234,7 @@ export default function UnresolvedPage() {
                   Link only
                 </button>
               </div>
+              )}
             </div>
           ))}
         </div>

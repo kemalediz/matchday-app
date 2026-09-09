@@ -346,7 +346,14 @@ export default function PlayersPage() {
         <div className="flex gap-3 rounded-xl border border-amber-200 bg-amber-50/70 p-4">
           <AlertTriangle className="w-5 h-5 shrink-0 text-amber-600" />
           <div>
-            <p className="text-sm font-semibold text-amber-900">WhatsApp group sync is behind</p>
+            {/* Was "WhatsApp group sync is behind", which reads as a
+                queue that will catch up on its own. It will not: the
+                sweep has not run since 2026-07-07 and cannot until the
+                WhatsApp-side breakage is worked around. Say what is
+                actually true, and what it costs. */}
+            <p className="text-sm font-semibold text-amber-900">
+              MatchTime can&apos;t read your WhatsApp group&apos;s member list
+            </p>
             <p className="mt-1 text-sm text-amber-800">{groupSyncWarning}</p>
           </div>
         </div>
