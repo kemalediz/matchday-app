@@ -283,7 +283,11 @@ export interface HealthInput {
   heartbeat: HeartbeatSnapshot | null;
   /** MAX(`AnalyzedMessage.createdAt`) for this org. */
   lastAnalyzedMessageAt: Date | null;
-  /** MAX(`Membership.lastSeenInGroupAt`) for this org — the sweep's clock. */
+  /** `Organisation.lastParticipantSweepAt` — the sweep's own clock, whose
+   *  only writer is `importParticipants`. It was MAX(`Membership.
+   *  lastSeenInGroupAt`) until 2026-09-09; a group message now refreshes
+   *  the sender's sighting, so that MAX measures CHATTER, not the sweep,
+   *  and this rule would have gone quiet during a live outage. */
   lastParticipantSweepAt: Date | null;
   /** The org's next upcoming match, or null. */
   nextMatchAt: Date | null;
@@ -511,10 +515,13 @@ export function assessBotHealth(input: HealthInput): HealthFinding[] {
           ? "MatchTime has never managed to read this group's member list."
           : `The group's member list was last read ${ageText(now - sweepAt.getTime())} ago.`,
       detail:
-        "The startup participant sweep is the only writer of Membership." +
-        "lastSeenInGroupAt. While it is down, players who joined the WhatsApp group " +
-        "recently cannot mark themselves in on the app (replying IN in the group still " +
-        "works), and members who were there before the bot stay invisible.",
+        "The startup participant sweep is the only thing that can read the group's " +
+        "roster, so while it is down MatchTime cannot tell who is in the group. A player " +
+        "who has posted in the group since is fine: their own message confirms them. A " +
+        "player who joined recently and has not typed can only be vouched for by a squad " +
+        "they were already put in; otherwise they cannot mark themselves in on the app " +
+        "(replying IN in the group still works), and members who were there before the " +
+        "bot stay invisible.",
     });
   }
 

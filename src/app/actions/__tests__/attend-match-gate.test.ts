@@ -51,21 +51,35 @@ vi.mock("next/cache", () => ({ revalidatePath: vi.fn() }));
 
 import { attendMatch } from "@/app/actions/attendance";
 
-const MATCH = {
-  id: "match-1",
-  activity: { orgId: "org-1", org: { name: "Sutton FC" } },
-};
+/**
+ * The match row the action reads, carrying its org's SWEEP CLOCK.
+ *
+ * `Organisation.lastParticipantSweepAt` is the sweep's own clock and has
+ * exactly one writer (`importParticipants`). It is deliberately NOT
+ * `MAX(Membership.lastSeenInGroupAt)` any more: since 2026-09-09 an
+ * inbound group message also refreshes the SENDER's sighting, so that
+ * MAX would be permanently fresh and would silently switch the degraded
+ * mode off for everybody else. See the block comment below.
+ */
+function matchRow(sweepAt: Date | null) {
+  return {
+    id: "match-1",
+    activity: {
+      orgId: "org-1",
+      org: { name: "Sutton FC", lastParticipantSweepAt: sweepAt },
+    },
+  };
+}
 
 beforeEach(() => {
   vi.clearAllMocks();
   authMock.mockResolvedValue({ user: { id: "user-1" } });
-  matchFindUnique.mockResolvedValue(MATCH);
+  // Default: the participant sweep ran this morning, so the gate is on
+  // its strict, undegraded path.
+  matchFindUnique.mockResolvedValue(matchRow(new Date()));
   attendanceFindUnique.mockResolvedValue(null);
   attendanceCount.mockResolvedValue(0);
   analyzedMessageCount.mockResolvedValue(0);
-  // Default: the participant sweep ran this morning, so the gate is on
-  // its strict, undegraded path.
-  membershipAggregate.mockResolvedValue({ _max: { lastSeenInGroupAt: new Date() } });
   registerAttendance.mockResolvedValue({
     status: "CONFIRMED",
     position: 1,
@@ -200,41 +214,101 @@ describe("attendMatch — out-of-band group announcement", () => {
 });
 
 /**
- * ── DEGRADED PARTICIPANT SWEEP (2026-08-31) ─────────────────────────────
+ * ── DEGRADED PARTICIPANT SWEEP (2026-08-31, re-based 2026-09-09) ────────
  *
- * `Membership.lastSeenInGroupAt` is written only by the bot's startup
- * participant sweep, and that sweep has been broken since 2026-07-07. When
- * it is stale, a null sighting means "we could not look", not "you are not
- * in the group", and nine real Sutton players were being blocked and told
- * a falsehood.
+ * The sweep has been broken since 2026-07-07. When it is stale, a null
+ * sighting means "we could not look", not "you are not in the group", and
+ * nine real Sutton players were being blocked and told a falsehood.
  *
- * These cases pin the WIRING: where the org's sweep freshness comes from,
- * which fallback evidence is queried, that the healthy path pays no extra
- * query, and that the honest message reaches the user.
+ * ── WHY THE FRESHNESS CLOCK MOVED OFF `Membership` (2026-09-09) ────────
+ *
+ * The degraded mode used to key off `MAX(Membership.lastSeenInGroupAt)`
+ * across the org, which was sound while the sweep was that column's ONLY
+ * writer. Adding inbound group messages as a second writer would have
+ * broken it in the most dangerous way available: one chatty player's
+ * "haha" refreshes his own sighting, the org's MAX goes fresh, and the
+ * gate concludes the sweep is healthy. It is not. Degraded mode would
+ * switch itself off for exactly the people it protects — the never-seen
+ * member who does NOT post and is only vouched for by a squad row — and
+ * they would go back to being told a falsehood, silently, with no banner
+ * on the dashboard and no `sweep-stale` alert either.
+ *
+ * So the two facts are now two columns:
+ *   - `Membership.lastSeenInGroupAt` — did we ever see THIS PERSON in the
+ *     group. Sweep or their own message; both are proof of presence.
+ *   - `Organisation.lastParticipantSweepAt` — when a full roster READ last
+ *     succeeded. Only the sweep can write it, so only it can license the
+ *     inference "never seen ⇒ not in the group".
+ *
+ * These cases pin the WIRING, and pin that split BOTH WAYS.
  */
 const STALE = new Date("2026-07-07T15:08:00Z"); // the real production value
 
 describe("attendMatch — degraded participant sweep", () => {
   const neverSeenPlayer = { leftAt: null, lastSeenInGroupAt: null, role: "PLAYER" as const };
 
-  it("derives sweep freshness from the org's newest lastSeenInGroupAt", async () => {
+  it("derives sweep freshness from Organisation.lastParticipantSweepAt", async () => {
+    matchFindUnique.mockResolvedValue(matchRow(STALE));
     membershipFindUnique.mockResolvedValue(neverSeenPlayer);
-    membershipAggregate.mockResolvedValue({ _max: { lastSeenInGroupAt: STALE } });
     attendanceCount.mockResolvedValue(1);
 
     await attendMatch("match-1");
 
-    expect(membershipAggregate).toHaveBeenCalledWith(
+    // The clock is read off the org row the action already joins, so the
+    // degraded path costs one query FEWER than it used to.
+    expect(matchFindUnique).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: { orgId: "org-1" },
-        _max: { lastSeenInGroupAt: true },
+        include: {
+          activity: {
+            select: {
+              orgId: true,
+              org: { select: { name: true, lastParticipantSweepAt: true } },
+            },
+          },
+        },
       }),
     );
+    // And emphatically NOT off the members' own sightings.
+    expect(membershipAggregate).not.toHaveBeenCalled();
+  });
+
+  it("a chatty team-mate's sighting does NOT switch degraded mode off for everyone else", async () => {
+    // THE REGRESSION THIS WHOLE SPLIT EXISTS TO PREVENT.
+    //
+    // The world of 2026-09-09 after Signal 1 ships: the sweep is still
+    // broken (org clock stuck on 07/07) but the group is chatty, so
+    // plenty of Memberships now carry a sighting from TODAY. Under the
+    // old `MAX(Membership.lastSeenInGroupAt)` rule the org would read as
+    // healthy and this player — never swept, never posted, but put in a
+    // squad by a mate — would be denied with the accusing message.
+    matchFindUnique.mockResolvedValue(matchRow(STALE));
+    membershipFindUnique.mockResolvedValue(neverSeenPlayer);
+    attendanceCount.mockResolvedValue(1);
+
+    await expect(attendMatch("match-1")).resolves.toBeUndefined();
+    expect(registerAttendance).toHaveBeenCalled();
+  });
+
+  it("a WORKING sweep still denies a never-seen player, chatty group or not", async () => {
+    // The other direction. Message sightings must not be able to make a
+    // stale org look fresh; they must not be able to make a FRESH org
+    // look stale either. A healthy sweep that has never seen this person
+    // is still the strict, pre-2026-08-31 answer.
+    matchFindUnique.mockResolvedValue(matchRow(new Date()));
+    membershipFindUnique.mockResolvedValue(neverSeenPlayer);
+    attendanceCount.mockResolvedValue(99);
+    analyzedMessageCount.mockResolvedValue(99);
+
+    await expect(attendMatch("match-1")).rejects.toThrow(
+      /You need to be in the Sutton FC WhatsApp group/,
+    );
+    expect(attendanceCount).not.toHaveBeenCalled();
+    expect(analyzedMessageCount).not.toHaveBeenCalled();
   });
 
   it("ALLOWS a never-seen player who has already been in a squad for this club", async () => {
+    matchFindUnique.mockResolvedValue(matchRow(STALE));
     membershipFindUnique.mockResolvedValue(neverSeenPlayer);
-    membershipAggregate.mockResolvedValue({ _max: { lastSeenInGroupAt: STALE } });
     attendanceCount.mockResolvedValue(2);
 
     await expect(attendMatch("match-1")).resolves.toBeUndefined();
@@ -254,7 +328,7 @@ describe("attendMatch — degraded participant sweep", () => {
 
   it("ALLOWS a never-seen player who has posted in the club's WhatsApp group", async () => {
     membershipFindUnique.mockResolvedValue(neverSeenPlayer);
-    membershipAggregate.mockResolvedValue({ _max: { lastSeenInGroupAt: STALE } });
+    matchFindUnique.mockResolvedValue(matchRow(STALE));
     analyzedMessageCount.mockResolvedValue(4);
 
     await expect(attendMatch("match-1")).resolves.toBeUndefined();
@@ -265,7 +339,7 @@ describe("attendMatch — degraded participant sweep", () => {
 
   it("still DENIES a never-seen player with no evidence, and never registers", async () => {
     membershipFindUnique.mockResolvedValue(neverSeenPlayer);
-    membershipAggregate.mockResolvedValue({ _max: { lastSeenInGroupAt: STALE } });
+    matchFindUnique.mockResolvedValue(matchRow(STALE));
 
     await expect(attendMatch("match-1")).rejects.toThrow(/cannot confirm your place/i);
     expect(registerAttendance).not.toHaveBeenCalled();
@@ -274,7 +348,7 @@ describe("attendMatch — degraded participant sweep", () => {
 
   it("the degraded denial does NOT accuse the player of being outside the group", async () => {
     membershipFindUnique.mockResolvedValue(neverSeenPlayer);
-    membershipAggregate.mockResolvedValue({ _max: { lastSeenInGroupAt: STALE } });
+    matchFindUnique.mockResolvedValue(matchRow(STALE));
 
     const err = await attendMatch("match-1").catch((e: Error) => e);
     const msg = (err as Error).message;
@@ -285,7 +359,7 @@ describe("attendMatch — degraded participant sweep", () => {
 
   it("treats a club whose sweep has NEVER succeeded as degraded too", async () => {
     membershipFindUnique.mockResolvedValue(neverSeenPlayer);
-    membershipAggregate.mockResolvedValue({ _max: { lastSeenInGroupAt: null } });
+    matchFindUnique.mockResolvedValue(matchRow(null));
     attendanceCount.mockResolvedValue(1);
 
     await expect(attendMatch("match-1")).resolves.toBeUndefined();
@@ -297,7 +371,7 @@ describe("attendMatch — degraded participant sweep", () => {
       lastSeenInGroupAt: null,
       role: "PLAYER",
     });
-    membershipAggregate.mockResolvedValue({ _max: { lastSeenInGroupAt: STALE } });
+    matchFindUnique.mockResolvedValue(matchRow(STALE));
     attendanceCount.mockResolvedValue(50);
     analyzedMessageCount.mockResolvedValue(50);
 
@@ -335,7 +409,7 @@ describe("attendMatch — degraded participant sweep", () => {
   it("logs the degraded decision so a running-degraded gate is never silent", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     membershipFindUnique.mockResolvedValue(neverSeenPlayer);
-    membershipAggregate.mockResolvedValue({ _max: { lastSeenInGroupAt: STALE } });
+    matchFindUnique.mockResolvedValue(matchRow(STALE));
     attendanceCount.mockResolvedValue(1);
 
     await attendMatch("match-1");
@@ -358,5 +432,55 @@ describe("attendMatch — degraded participant sweep", () => {
     await attendMatch("match-1");
     expect(warn).not.toHaveBeenCalled();
     warn.mockRestore();
+  });
+});
+
+/**
+ * ── RAIHAN (2026-09-09) ─────────────────────────────────────────────────
+ *
+ * The case that motivated Signal 1, end to end at the gate.
+ *
+ * Raihan was added to the Sutton FC WhatsApp group on Monday. His phone
+ * is on file, so his Membership exists — but the sweep has been dead
+ * since 07/07, so it carries no sighting, he had never been put in a
+ * squad, and he had never been attributed a message. Every fallback the
+ * degraded mode has came back zero and the app turned him away.
+ *
+ * The whole of Signal 1 is: he says something in the group, that
+ * refreshes HIS sighting, and the ordinary `seen-in-group` path takes
+ * over. Note the second test asks for NO evidence and consults NO
+ * fallback — a sighting, whatever wrote it, ends the question.
+ */
+describe("attendMatch — Raihan: a sighting earned by posting", () => {
+  it("BEFORE he posts: no sighting, no evidence, honest refusal", async () => {
+    matchFindUnique.mockResolvedValue(matchRow(STALE));
+    membershipFindUnique.mockResolvedValue({
+      leftAt: null,
+      lastSeenInGroupAt: null,
+      role: "PLAYER",
+    });
+    attendanceCount.mockResolvedValue(0);
+    analyzedMessageCount.mockResolvedValue(0);
+
+    await expect(attendMatch("match-1")).rejects.toThrow(/cannot confirm your place/i);
+    expect(registerAttendance).not.toHaveBeenCalled();
+  });
+
+  it("AFTER one group message: his sighting alone lets him mark himself in", async () => {
+    // The sweep is STILL broken — this must not depend on it being fixed.
+    matchFindUnique.mockResolvedValue(matchRow(STALE));
+    membershipFindUnique.mockResolvedValue({
+      leftAt: null,
+      lastSeenInGroupAt: new Date("2026-09-09T18:40:00Z"), // written by his message
+      role: "PLAYER",
+    });
+    attendanceCount.mockResolvedValue(0);
+    analyzedMessageCount.mockResolvedValue(0);
+
+    await expect(attendMatch("match-1")).resolves.toBeUndefined();
+    expect(registerAttendance).toHaveBeenCalled();
+    // Not the degraded fallback — the plain `seen-in-group` allow.
+    expect(attendanceCount).not.toHaveBeenCalled();
+    expect(analyzedMessageCount).not.toHaveBeenCalled();
   });
 });

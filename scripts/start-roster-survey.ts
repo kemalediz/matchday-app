@@ -12,10 +12,16 @@
  * Skips:
  *   - Members with no phone on file (we can't DM them).
  *   - Soft-removed memberships (leftAt != null).
- *   - Members not seen in the latest WhatsApp group sync — Kemal's
+ *   - Members not recently confirmed in the WhatsApp group — Kemal's
  *     "don't message people who already left the WA group" rule. We
- *     trust Membership.lastSeenInGroupAt set by the bot's startup
- *     sync; require it to be within the last 7 days.
+ *     trust Membership.lastSeenInGroupAt; require it to be within the
+ *     last 7 days.
+ *
+ *     Since 2026-09-09 that column has TWO writers: the bot's startup
+ *     participant sweep and any group message from the member (see
+ *     src/lib/group-sighting.ts). Both are proof of presence, so the
+ *     effect here is strictly to include MORE people who are provably
+ *     in the group; nobody is included on weaker evidence than before.
  */
 import { PrismaPg } from "@prisma/adapter-pg";
 import { PrismaClient } from "../src/generated/prisma/client.ts";

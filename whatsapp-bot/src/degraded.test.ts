@@ -93,11 +93,13 @@ describe("degradedMessage", () => {
 
 describe("the specific consequences we care about", () => {
   it("participant-sync names the web-app self-IN gate", () => {
-    // Membership.lastSeenInGroupAt is written ONLY by
-    // /api/whatsapp/sync-participants. When this sweep never runs, that
-    // column goes stale and real players get blocked from the app.
+    // Organisation.lastParticipantSweepAt is written ONLY by
+    // /api/whatsapp/sync-participants, and it is the only thing that
+    // licenses "never seen ⇒ not in the group". When this sweep never
+    // runs, the gate drops into its degraded mode and real players who
+    // have never posted get blocked from the app.
     const m = degradedMessage("participant-sync", "r");
-    expect(m).toContain("lastSeenInGroupAt");
+    expect(m).toContain("lastParticipantSweepAt");
     expect(m.toLowerCase()).toContain("app");
   });
 

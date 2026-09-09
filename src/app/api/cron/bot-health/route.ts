@@ -73,25 +73,24 @@ export async function GET(request: Request) {
   const now = new Date();
   const orgs = await db.organisation.findMany({
     where: { whatsappBotEnabled: true, whatsappGroupId: { not: null } },
-    select: { id: true, name: true },
+    // `lastParticipantSweepAt` is the sweep's own clock (2026-09-09). It
+    // replaces the `MAX(Membership.lastSeenInGroupAt)` aggregate that used
+    // to be in the Promise.all below: a group message now refreshes the
+    // sender's sighting, so that MAX no longer measures the sweep and
+    // `sweep-stale` would have stopped firing on a live outage.
+    select: { id: true, name: true, lastParticipantSweepAt: true },
   });
 
   const report: Array<{ org: string; codes: string[]; sent: boolean; reason: string }> = [];
 
   for (const org of orgs) {
     try {
-      const [health, lastMsg, sweep, nextMatch, nameless] = await Promise.all([
+      const [health, lastMsg, nextMatch, nameless] = await Promise.all([
         db.botHealth.findUnique({ where: { orgId: org.id } }),
         db.analyzedMessage.findFirst({
           where: { orgId: org.id },
           orderBy: { createdAt: "desc" },
           select: { createdAt: true },
-        }),
-        // Left rows included on purpose, matching `/api/players`: this
-        // measures when a SWEEP last succeeded, not who is on the roster.
-        db.membership.aggregate({
-          where: { orgId: org.id },
-          _max: { lastSeenInGroupAt: true },
         }),
         db.match.findFirst({
           where: {
@@ -148,7 +147,7 @@ export async function GET(request: Request) {
         botEnabled: true,
         heartbeat,
         lastAnalyzedMessageAt: lastMsg?.createdAt ?? null,
-        lastParticipantSweepAt: sweep._max.lastSeenInGroupAt ?? null,
+        lastParticipantSweepAt: org.lastParticipantSweepAt ?? null,
         nextMatchAt: nextMatch?.date ?? null,
         namelessUnattributed24h: nameless,
       });

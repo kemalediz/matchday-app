@@ -126,6 +126,32 @@ model Organisation {
   whatsappGroupId    String?
   whatsappBotEnabled Boolean @default(false)
 
+  /// ─── THE PARTICIPANT SWEEP'S OWN CLOCK (2026-09-09) ──────────────
+  /// When a FULL READ of this group's WhatsApp participant list last
+  /// succeeded. Exactly ONE writer: `importParticipants`, and only when
+  /// it was handed a non-empty roster (an empty one is the sweep's
+  /// QUIET failure mode, not a successful read of an empty group).
+  ///
+  /// This is the ONLY thing that licenses the inference "we have never
+  /// seen this person, therefore they are not in the group". A null
+  /// `Membership.lastSeenInGroupAt` is evidence of ABSENCE only when a
+  /// working sweep could have looked and did not find them.
+  ///
+  /// WHY IT IS NOT `MAX(Membership.lastSeenInGroupAt)`, which is what
+  /// the gate used until today: since 2026-09-09 an inbound group
+  /// message also refreshes the SENDER's sighting (see
+  /// `src/lib/group-sighting.ts`). That MAX would therefore be
+  /// refreshed by any one chatty player and the org would read as
+  /// healthy while the sweep was still dead — silently switching off
+  /// the degraded mode that currently protects nine real Sutton
+  /// players, the admin dashboard's banner, and the `sweep-stale`
+  /// health alert, all at once. Per-person presence and sweep health
+  /// are two different facts and now live in two different columns.
+  ///
+  /// Backfilled from `MAX(Membership.lastSeenInGroupAt)` per org by the
+  /// migration, so behaviour is identical the instant it lands.
+  lastParticipantSweepAt DateTime?
+
   /// ─── Lifecycle: is this club still a club? (2026-09-09) ─────────
   /// NULL = live. A timestamp = a human declared this organisation
   /// dormant on that date: the group is gone, the club has churned or

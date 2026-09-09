@@ -89,17 +89,23 @@ export async function GET(request: Request) {
     _count: m.user._count,
   }));
 
-  // Participant-sweep freshness (2026-08-31). `lastSeenInGroupAt` has one
-  // writer, the bot's startup sweep, and when it stops the app's self-IN
-  // gate quietly starts turning real players away. Surface its age here so
-  // the admin player list can say so out loud. Left rows are included on
-  // purpose: this measures when a SWEEP last succeeded, not who is on the
-  // roster today.
-  const newestSighting = await db.membership.aggregate({
-    where: { orgId: membership.orgId },
-    _max: { lastSeenInGroupAt: true },
+  // Participant-sweep freshness (2026-08-31; re-based 2026-09-09). When
+  // the sweep stops, the app's self-IN gate quietly starts turning real
+  // players away. Surface its age here so the admin player list can say
+  // so out loud.
+  //
+  // This reads the SWEEP's own clock, `Organisation.lastParticipantSweepAt`.
+  // It used to read `MAX(Membership.lastSeenInGroupAt)`, which was the same
+  // fact while the sweep was that column's only writer. It no longer is:
+  // since 2026-09-09 an inbound group message refreshes the sender's
+  // sighting (src/lib/group-sighting.ts), so that MAX would be refreshed by
+  // any one chatty player and this banner would disappear while the sweep
+  // was still dead — the exact opposite of what it is for.
+  const org = await db.organisation.findUnique({
+    where: { id: membership.orgId },
+    select: { lastParticipantSweepAt: true },
   });
-  const lastSyncAt = newestSighting._max.lastSeenInGroupAt ?? null;
+  const lastSyncAt = org?.lastParticipantSweepAt ?? null;
 
   return NextResponse.json({
     players,

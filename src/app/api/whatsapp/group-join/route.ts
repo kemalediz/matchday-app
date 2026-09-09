@@ -9,8 +9,11 @@
  *      parse — @lid recipients, weird numbers, etc.
  *   3. Upsert a `User` row keyed by phone. Brand-new users are created
  *      with `name=null`; admin fills it in later via the portal.
- *   4. Upsert a `Membership` as PLAYER. If one already existed with
- *      `leftAt` set, clear it (a left member has rejoined).
+ *   4. Upsert a `Membership` as PLAYER and stamp `lastSeenInGroupAt` —
+ *      WhatsApp has just told us this person is in the group, which is
+ *      proof of presence in exactly the sense the self-IN gate needs. If
+ *      one already existed with `leftAt` set, clear it (a left member has
+ *      rejoined).
  *   5. Queue a `BotJob` DM to every org admin ONLY on state change —
  *      brand-new user or rejoin after leaving. Already-active members
  *      don't spam admins.
@@ -95,6 +98,23 @@ export async function POST(request: Request) {
     }
 
     // Step 4: upsert membership.
+    //
+    // A `group_join` STAMPS `lastSeenInGroupAt` (2026-09-09). WhatsApp
+    // has just told us this person was added to the group: that is proof
+    // of presence of exactly the same kind as the participant sweep's
+    // sighting or a message they post, and it arrives through the event
+    // stream rather than the injected page code, so it survives the
+    // breakage that has had the sweep down since 2026-07-07.
+    //
+    // Before this, the person the gate most obviously ought to trust —
+    // someone we watched join, seconds ago — was created with a NULL
+    // sighting and could not mark themselves in on the app. That was the
+    // gap; closing it costs one field.
+    //
+    // Refreshed on all three branches because the fact is the same on
+    // all three, and joins are rare enough that the extra write on the
+    // already-active branch is free.
+    const now = new Date();
     const existing = await db.membership.findUnique({
       where: { userId_orgId: { userId: user.id, orgId: org.id } },
       select: { id: true, leftAt: true, role: true },
@@ -103,15 +123,19 @@ export async function POST(request: Request) {
     let alreadyActive = false;
     if (!existing) {
       await db.membership.create({
-        data: { userId: user.id, orgId: org.id, role: "PLAYER" },
+        data: { userId: user.id, orgId: org.id, role: "PLAYER", lastSeenInGroupAt: now },
       });
     } else if (existing.leftAt) {
       await db.membership.update({
         where: { id: existing.id },
-        data: { leftAt: null },
+        data: { leftAt: null, lastSeenInGroupAt: now },
       });
       rejoined = true;
     } else {
+      await db.membership.update({
+        where: { id: existing.id },
+        data: { lastSeenInGroupAt: now },
+      });
       alreadyActive = true;
     }
 

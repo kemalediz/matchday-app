@@ -23,7 +23,18 @@ export async function attendMatch(matchId: string) {
   // here in the server action, not in registerAttendance.
   const match = await db.match.findUnique({
     where: { id: matchId },
-    include: { activity: { select: { orgId: true, org: { select: { name: true } } } } },
+    include: {
+      activity: {
+        select: {
+          orgId: true,
+          // `lastParticipantSweepAt` rides along on a join we were doing
+          // anyway, so the degraded path now costs one query FEWER than
+          // the `MAX(Membership.lastSeenInGroupAt)` aggregate it replaces,
+          // and the healthy path still costs nothing extra.
+          org: { select: { name: true, lastParticipantSweepAt: true } },
+        },
+      },
+    },
   });
   if (!match) throw new Error("Match not found");
 
@@ -39,20 +50,22 @@ export async function attendMatch(matchId: string) {
 
   if (!decision.allowed && decision.reason === "not-in-group") {
     // The only thing standing between this player and the button is a null
-    // `lastSeenInGroupAt`. That column has exactly one writer, the bot's
-    // startup participant sweep, and that sweep has been failing since
-    // 2026-07-07 (MDs/cold-audit-2026-08-31.md). Check whether the signal
-    // can still be trusted before telling someone they are not in a group
-    // they may well be sitting in.
+    // `lastSeenInGroupAt`. Check whether the sweep has been ABLE TO LOOK
+    // before telling someone they are not in a group they may well be
+    // sitting in — it has been failing since 2026-07-07
+    // (MDs/cold-audit-2026-08-31.md).
     //
-    // Freshness comes from existing data: the newest sighting anywhere in
-    // the org, left members included, because this measures when a SWEEP
-    // last succeeded rather than who is on the roster today.
-    const newest = await db.membership.aggregate({
-      where: { orgId: match.activity.orgId },
-      _max: { lastSeenInGroupAt: true },
-    });
-    const sync = { lastSyncAt: newest._max.lastSeenInGroupAt ?? null, now: new Date() };
+    // Freshness comes from `Organisation.lastParticipantSweepAt`, whose
+    // only writer is the sweep itself. It deliberately no longer comes
+    // from `MAX(Membership.lastSeenInGroupAt)`: since 2026-09-09 an
+    // inbound group message refreshes the SENDER's sighting, so that MAX
+    // is kept permanently fresh by any one chatty player and would report
+    // a dead sweep as healthy — switching this degraded mode off for
+    // exactly the never-seen, never-posting players it exists to protect.
+    const sync = {
+      lastSyncAt: match.activity.org.lastParticipantSweepAt ?? null,
+      now: new Date(),
+    };
 
     if (isGroupSyncStale(sync)) {
       // Degraded. Look for positive evidence that this person really is in
