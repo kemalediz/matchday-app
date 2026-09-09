@@ -27,6 +27,7 @@ import { describe, expect, it } from "vitest";
 import {
   composeOperatorNote,
   OPERATOR_NOTE_MARKER,
+  type OwnedMessage,
   type UnownedMessage,
 } from "../operator-note";
 
@@ -316,5 +317,362 @@ describe("a feature the club switched OFF is not an incident", () => {
       features: { attendance: false },
     });
     expect(note.noteIds).toEqual(["b"]);
+  });
+});
+
+/**
+ * ─────────────────────────────────────────────────────────────────────
+ * OWNED, AND STILL SILENT — 2026-09-09
+ * ─────────────────────────────────────────────────────────────────────
+ *
+ * THE INCIDENT, verbatim from `AnalyzedMessage`:
+ *
+ *   18:47  Abid Kazmi    "In"  self_att  action=none
+ *          "attendance-engine (self_att): short confirmation with no
+ *           pending set in the bot's last post"
+ *   18:57  Mojib Jalali  "In"  self_att  action=none
+ *          (same reason)
+ *
+ * Two resolved members typed "In" for Tuesday's match. The attendance
+ * engine CLAIMED both messages, wrote nothing, said nothing, and neither
+ * player was registered. Kemal spotted it in the group. Nothing told
+ * him, and the reason is structural: `route.ts`'s operator note takes
+ * "messages nobody owned" as its input, and a message an owner claimed
+ * and then did nothing with is not in that set. The note was answering
+ * "did anything CLAIM this?" when the question that matters is "did
+ * anything HAPPEN?".
+ *
+ * ── THE PREDICATE IS STRUCTURAL, NOT A LIST OF REASON STRINGS ────────
+ *
+ * Every no-op below carries a reason string, and matching on those is
+ * how this codebase has been burned twice (`recruit-request.ts` records
+ * both deletions). A hand-maintained deny-list of prose drifts the
+ * moment somebody adds a rule — which is precisely the failure this is
+ * meant to catch. So the test is over typed facts the engine already
+ * produces: the route, the disposition, whether anything was said, and
+ * how many facts the extractor came away with.
+ *
+ * THE WHOLE PRODUCTION TABLE (45 engine-visible messages, 30 no-ops)
+ * with this predicate's verdict on each row:
+ *
+ *   22x  no owner: route=none                            SILENT (banter)
+ *    3x  requires an @Match Time tag                     SILENT (other_att)
+ *    2x  short confirmation with no pending set          NOTED  ← the defect
+ *    1x  no change for Mojib                             SILENT (a claim resolved)
+ *    1x  contingent drop for X: holding, no write        SILENT (a claim resolved)
+ *    1x  claim about "Najib" below the confidence floor  SILENT (other_att)
+ *
+ * Each row is a test below, in both directions.
+ */
+describe("a message an owner CLAIMED and then did nothing with", () => {
+  function o(over: Partial<OwnedMessage> = {}): OwnedMessage {
+    return {
+      waMessageId: "wa-owned",
+      body: "In",
+      authorName: "Mojib Jalali",
+      route: "self_att",
+      disposition: "noop",
+      spoke: false,
+      senderResolved: true,
+      claimCount: 0,
+      sideRequestCount: 0,
+      ...over,
+    };
+  }
+
+  it("THE INCIDENT: a resolved member's `In` on self_att that wrote nothing and said nothing is noted", () => {
+    const note = composeOperatorNote({
+      orgName: "Sutton FC",
+      messages: [],
+      owned: [
+        o({ waMessageId: "abid", authorName: "Abid Kazmi" }),
+        o({ waMessageId: "mojib", authorName: "Mojib Jalali" }),
+      ],
+      degradations: [],
+    });
+    expect(note.noteIds).toEqual(["abid", "mojib"]);
+    expect(note.text).toContain("Abid Kazmi");
+    expect(note.text).toContain("Mojib Jalali");
+    expect(note.text).toContain("In");
+    expect(note.text).toContain(OPERATOR_NOTE_MARKER);
+  });
+
+  it("prints the owner's own reason line on the bullet", () => {
+    const note = composeOperatorNote({
+      orgName: "Sutton FC",
+      messages: [],
+      owned: [
+        o({
+          why: "attendance-engine (self_att): short confirmation with no pending set in the bot's last post",
+        }),
+      ],
+      degradations: [],
+    });
+    expect(note.text).toContain("short confirmation with no pending set");
+  });
+
+  it("DECIDES on the typed facts even when the reason line says something reassuring", () => {
+    // The point of the whole exercise: `why` is display, never a test.
+    // A reason string that reads like a deliberate decision must not buy
+    // silence, and one that reads like a failure must not buy a page.
+    const noted = composeOperatorNote({
+      orgName: "Sutton FC",
+      messages: [],
+      owned: [o({ why: "attendance-engine (self_att): everything is completely fine" })],
+      degradations: [],
+    });
+    expect(noted.noteIds).toEqual(["wa-owned"]);
+
+    const silent = composeOperatorNote({
+      orgName: "Sutton FC",
+      messages: [],
+      owned: [
+        o({ claimCount: 1, why: "attendance-engine (self_att): CATASTROPHIC FAILURE, dropped" }),
+      ],
+      degradations: [],
+    });
+    expect(silent.noteIds).toEqual([]);
+  });
+
+  it("falls back to a plain sentence when the owner reported no reason", () => {
+    const note = composeOperatorNote({
+      orgName: "Sutton FC",
+      messages: [],
+      owned: [o({ why: null })],
+      degradations: [],
+    });
+    expect(note.text).toContain("recorded nothing");
+  });
+
+  it("carries the engine's own reason when one was reported for the id", () => {
+    const note = composeOperatorNote({
+      orgName: "Sutton FC",
+      messages: [],
+      owned: [o({ waMessageId: "abid" })],
+      degradations: [
+        "attendance-engine: abid — short confirmation with no pending set in the bot's last post",
+      ],
+    });
+    expect(note.text).toContain("short confirmation with no pending set");
+  });
+
+  // ── ROW: the engine acted. Never noted. ────────────────────────────
+  it("stays silent when the engine ACTED (the 8 `no rule fired` → IN rows)", () => {
+    const note = composeOperatorNote({
+      orgName: "Sutton FC",
+      messages: [],
+      owned: [o({ disposition: "acted", spoke: true, claimCount: 1 })],
+      degradations: [],
+    });
+    expect(note.noteIds).toEqual([]);
+    expect(note.text).toBeNull();
+  });
+
+  it("stays silent when the engine wrote nothing but SPOKE (an ack is not silence)", () => {
+    // "Confirmed" against a pending set everybody had already answered:
+    // zero writes, but `pending_confirmed_ack` answers the player. The
+    // player was told; there is nothing for an admin to chase.
+    const note = composeOperatorNote({
+      orgName: "Sutton FC",
+      messages: [],
+      owned: [o({ spoke: true })],
+      degradations: [],
+    });
+    expect(note.noteIds).toEqual([]);
+  });
+
+  // ── ROW: `no change for Mojib` — idempotent. Never noted. ──────────
+  it('stays silent on an idempotent no-op ("Il go bench" from a player already on the bench)', () => {
+    // The engine RESOLVED a claim to a real person and found the world
+    // already matched. That is a decision with a reason and it has an
+    // `AnalyzedMessage` row; paging on it pages the system working.
+    const note = composeOperatorNote({
+      orgName: "Sutton FC",
+      messages: [],
+      owned: [o({ waMessageId: "bench", body: "Il go bench", claimCount: 1 })],
+      degradations: [],
+    });
+    expect(note.noteIds).toEqual([]);
+    expect(note.text).toBeNull();
+  });
+
+  // ── ROW: contingent drop, holding. Never noted. ────────────────────
+  it('stays silent on a deliberate hold ("If its going to be 9 I will drop out")', () => {
+    const note = composeOperatorNote({
+      orgName: "Sutton FC",
+      messages: [],
+      owned: [
+        o({
+          waMessageId: "abid-cond",
+          authorName: "Abid Kazmi",
+          body: "If its going to be 9 I will drop out",
+          claimCount: 1,
+        }),
+      ],
+      degradations: [
+        "attendance-engine: abid-cond — contingent drop for Abid Kazmi: holding, no write",
+      ],
+    });
+    expect(note.noteIds).toEqual([]);
+  });
+
+  // ── ROW: the interaction contract. Never noted. ────────────────────
+  it.each([
+    ["Najib can drop out", "Wasimp"],
+    ["David is OUT voluntarily to switch to 5aide.", "Kemal Ediz"],
+    ["@DÇ  is out due to unforeseen issue at work", "Kemal Ediz"],
+  ])("stays silent when the interaction contract refused it (%s)", (body, who) => {
+    // All three production rows are `other_att`: a sender's OWN
+    // attendance never needs a tag (`claimNeedsTag` returns false for
+    // `subject === "sender"`), so this refusal cannot reach a self
+    // route. The contract working is not an incident.
+    const note = composeOperatorNote({
+      orgName: "Sutton FC",
+      messages: [],
+      owned: [o({ route: "other_att", body, authorName: who, claimCount: 1 })],
+      degradations: [],
+    });
+    expect(note.noteIds).toEqual([]);
+  });
+
+  // ── ROW: the confidence floor. Never noted. See the report. ────────
+  it('stays silent on the confidence floor ("@Wasim can Najib come please?")', () => {
+    const note = composeOperatorNote({
+      orgName: "Sutton FC",
+      messages: [],
+      owned: [
+        o({
+          waMessageId: "najib",
+          route: "other_att",
+          body: "@Wasim can Najib come please?",
+          authorName: "Kemal Ediz",
+          claimCount: 1,
+        }),
+      ],
+      degradations: [],
+    });
+    expect(note.noteIds).toEqual([]);
+  });
+
+  it("stays silent on a below-floor claim about the SENDER too — the engine understood, it just did not trust it", () => {
+    const note = composeOperatorNote({
+      orgName: "Sutton FC",
+      messages: [],
+      owned: [o({ body: "maybe in?", claimCount: 1 })],
+      degradations: [],
+    });
+    expect(note.noteIds).toEqual([]);
+  });
+
+  // ── ROW: banter the router sent to an attendance route. Silent. ────
+  it("stays silent on `other_att` and `unsure` with nothing extracted", () => {
+    // `unsure` MEANS "attendance-shaped but I cannot tell", so an empty
+    // extraction is that route's expected outcome, not a defect. Paging
+    // there pages the router's uncertainty on every near-miss.
+    for (const route of ["other_att", "unsure"] as const) {
+      const note = composeOperatorNote({
+        orgName: "Sutton FC",
+        messages: [],
+        owned: [o({ route })],
+        degradations: [],
+      });
+      expect(note.noteIds, `route ${route}`).toEqual([]);
+    }
+  });
+
+  it("DOES note an `offer` that came away with nothing — it asserts a commitment was made", () => {
+    const note = composeOperatorNote({
+      orgName: "Sutton FC",
+      messages: [],
+      owned: [o({ waMessageId: "off", route: "offer" })],
+      degradations: [],
+    });
+    expect(note.noteIds).toEqual(["off"]);
+  });
+
+  // ── A side request IS something extracted. Silent. ─────────────────
+  it('stays silent on a chase nudge ("@all we need more players pls")', () => {
+    const note = composeOperatorNote({
+      orgName: "Sutton FC",
+      messages: [],
+      owned: [o({ body: "@all we need more players pls", claimCount: 0, sideRequestCount: 1 })],
+      degradations: [],
+    });
+    expect(note.noteIds).toEqual([]);
+  });
+
+  it("stays silent when the sender never resolved to a member", () => {
+    // An unresolved sender is a different failure with a different
+    // remedy (link the pushname to a player), and the admin console's
+    // unresolved queue already lists them. Own less.
+    const note = composeOperatorNote({
+      orgName: "Sutton FC",
+      messages: [],
+      owned: [o({ senderResolved: false })],
+      degradations: [],
+    });
+    expect(note.noteIds).toEqual([]);
+  });
+
+  it("notes a DEGRADED owner that came away with nothing and said nothing", () => {
+    const note = composeOperatorNote({
+      orgName: "Sutton FC",
+      messages: [],
+      owned: [o({ waMessageId: "deg", disposition: "degraded" })],
+      degradations: ["attendance-engine: deg — extractor returned no facts twice"],
+    });
+    expect(note.noteIds).toEqual(["deg"]);
+  });
+
+  it("obeys the same attendance-OFF suppression the unowned list obeys", () => {
+    const note = composeOperatorNote({
+      orgName: "Sutton Lads",
+      messages: [],
+      owned: [o()],
+      degradations: [],
+      features: { attendance: false },
+    });
+    expect(note.noteIds).toEqual([]);
+    expect(note.text).toBeNull();
+  });
+
+  it("merges with the unowned list into ONE note, unowned first", () => {
+    const note = composeOperatorNote({
+      orgName: "Sutton FC",
+      messages: [
+        m({ waMessageId: "unowned-q", route: "question", body: "@Match Time who is in?" }),
+        m({ waMessageId: "banter", route: "none", body: "😂" }),
+      ],
+      owned: [o({ waMessageId: "mojib" })],
+      degradations: [],
+    });
+    expect(note.noteIds).toEqual(["unowned-q", "mojib"]);
+    expect(note.text).toContain("2 messages");
+  });
+
+  it("leaves the unowned path exactly as it was when no owned list is passed", () => {
+    const note = composeOperatorNote({
+      orgName: "Sutton FC",
+      messages: [m({ waMessageId: "a", route: "self_att" })],
+      degradations: [],
+    });
+    expect(note.noteIds).toEqual(["a"]);
+  });
+
+  it("keeps the dedupe key sensitive to the owned ids too", () => {
+    const withOwned = composeOperatorNote({
+      orgName: "Sutton FC",
+      messages: [],
+      owned: [o({ waMessageId: "x" })],
+      degradations: [],
+    });
+    const other = composeOperatorNote({
+      orgName: "Sutton FC",
+      messages: [],
+      owned: [o({ waMessageId: "y" })],
+      degradations: [],
+    });
+    expect(withOwned.dedupeKey).not.toBe(other.dedupeKey);
+    expect(withOwned.dedupeKey).not.toBeNull();
   });
 });

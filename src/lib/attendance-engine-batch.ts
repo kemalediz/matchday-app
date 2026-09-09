@@ -146,6 +146,7 @@ import { engineOwnsRoute } from "./pipeline/gate";
 import { loadSquadState } from "./pipeline/load-state";
 import type {
   AttendanceFacts,
+  Disposition,
   EngineMessage,
   EngineResult,
   Facts,
@@ -206,6 +207,25 @@ export interface EngineMessageOutcome {
   recordTentativeForUserId: string | null;
   /** A firm IN/OUT answers any open tentative follow-up. */
   resolveTentativeForUserId: string | null;
+  /**
+   * ── THE THREE FIELDS `operator-note.ts` READS (2026-09-09) ─────────
+   *
+   * Two players typed "In", this engine OWNED both messages, wrote
+   * nothing, said nothing, and nobody was told. The operator DM's input
+   * was "messages nobody owned", so a message we claimed and then did
+   * nothing with could not appear on it at any volume.
+   *
+   * These carry the TYPED facts that separate a decision from a hole,
+   * and they are counts and an enum rather than the `reasoning` string
+   * three fields up on purpose: `silentDiscard`'s whole argument is that
+   * a deny-list of reason prose drifts the moment somebody adds a rule
+   * under `engine.ts`. Read that function for what each one does.
+   */
+  disposition: Disposition;
+  /** Claims the EXTRACTOR came away with, about anybody. */
+  claimCount: number;
+  /** Side requests (chase, recruit) it came away with. */
+  sideRequestCount: number;
 }
 
 export interface EngineBatchResult {
@@ -927,6 +947,18 @@ export async function runAttendanceEngineBatch(args: {
       recruitRequest: !!attendanceFacts?.sideRequests.includes("recruit") && m.senderIsAdmin,
       recordTentativeForUserId: tentativeUserId(attendanceFacts, m.senderUserId, landed),
       resolveTentativeForUserId: senderOwnRowMoved ? m.senderUserId : null,
+      // `engineOutcome` cannot actually be missing — `assertCoverage`
+      // throws unless there is exactly one outcome per input id — but
+      // the `.find()` above is typed optional, and the safe default is
+      // the one that makes a message MORE visible to the operator.
+      disposition: engineOutcome?.disposition ?? "degraded",
+      // The EXTRACTOR's facts, not the engine's synthesised claims. An
+      // affirmation resolved against the bot's pending set builds claims
+      // inside `decide()`, and that path either writes or acks, so it is
+      // `disposition` that excludes it. What these count is what the
+      // pipeline came away with from the TEXT.
+      claimCount: attendanceFacts?.claims.length ?? 0,
+      sideRequestCount: attendanceFacts?.sideRequests.length ?? 0,
     });
   }
 
