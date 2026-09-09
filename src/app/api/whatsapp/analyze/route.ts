@@ -73,7 +73,6 @@
  */
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
-import { normalisePhone } from "@/lib/phone";
 import { signMagicLinkToken, MAGIC_LINK_TTL } from "@/lib/magic-link";
 import { buildShortMagicLinkUrl } from "@/lib/short-link";
 import { answerScopedQuestion } from "@/lib/dm-qa";
@@ -251,6 +250,18 @@ import {
   describeMentionOutcomes,
   resolveMentionNames,
 } from "@/lib/pipeline/mention-names";
+// Sender resolution moved OUT of this file on 2026-09-09. It could not be
+// tested here — a Next.js route module may export only its HTTP handlers,
+// so nothing in it can be imported by a test — and the 2026-08-30 audit
+// named that as the reason its attribution hole survived review. Behaviour
+// is unchanged by the move; see `lib/resolve-sender.ts` and its tests.
+import {
+  createProvisionalByName,
+  resolveSender,
+  restoreMembership,
+  type ResolvedSender,
+} from "@/lib/resolve-sender";
+import { planUnresolvedNudge } from "@/lib/unresolved-nudge";
 
 interface InboundMessage {
   waMessageId: string;
@@ -310,12 +321,6 @@ type ActionForBot = {
   react: string | null;
   reply: string | null;
   reasoning?: string;
-};
-
-type ResolvedSender = {
-  userId: string | null;
-  name: string | null;
-  phone: string | null;
 };
 
 /**
@@ -2469,70 +2474,30 @@ async function unresolvedSenderNudge(args: {
   authorName: string | null;
   dropping: boolean;
 }): Promise<{ applies: boolean; reply: string | null }> {
-  const { senderResolved, attendanceRelevant, matchId, authorName, dropping } = args;
-  const pushname = (authorName ?? "").trim();
-  if (senderResolved || !attendanceRelevant || !matchId || pushname.length < 1) {
-    return { applies: false, reply: null };
-  }
-  const normKey = pushname
-    .toLowerCase()
-    .normalize("NFD")
-    .replace(/[̀-ͯ]/g, "");
-  const dedupeKey = `unresolved-sender:${matchId}:${normKey}`;
-  const already = await db.sentNotification.findUnique({ where: { key: dedupeKey } });
+  // The RULE (does it fire, what does it say, under what key) is pure and
+  // unit-tested in `lib/unresolved-nudge.ts`. That is where the 2026-08-30
+  // audit's finding is fixed: this guard used to require
+  // `(authorName ?? "").trim().length >= 1`, so the one mechanism written
+  // for "a sender we could not identify" was blind to the case where we
+  // could not identify the sender AT ALL. This function keeps only the
+  // database half.
+  const plan = planUnresolvedNudge(args);
+  if (!plan.applies || !plan.dedupeKey) return { applies: false, reply: null };
+
+  const already = await db.sentNotification.findUnique({ where: { key: plan.dedupeKey } });
   if (already) {
     // Already nudged for this pushname+match — stay silent, don't
     // repeat. The admin queue still lists it.
     return { applies: true, reply: null };
   }
-  // Plain English — describe what to DO next, no "resolver"/"@lid"/
-  // "pushname" jargon (per the product copy rule).
-  const verb = dropping ? "drop out" : "join";
-  // Never print a raw numeric id as a name in the group (RC4).
-  const reply = isRawDigitName(pushname)
-    ? `Heads up — I got a message to *${verb}* from a number I don't recognise, ` +
-      `so I haven't changed anything yet. Could they reply with the name they're ` +
-      `registered under, or an admin can link it on the dashboard? 🙏`
-    : `Heads up — I got a message to *${verb}* from *${pushname}*, but that name isn't ` +
-      `matching anyone on the squad list, so I haven't changed anything yet. ` +
-      `Could *${pushname}* reply with the name they're registered under, or an admin can link it on the dashboard? 🙏`;
   // Record the dedupe row immediately. Tiny risk: if the bot fails to
   // post we under-notify — acceptable, the admin queue is the backstop,
   // and re-nudging every batch would spam the group (the failure Kemal
   // hates most).
   await db.sentNotification.create({
-    data: { key: dedupeKey, kind: "unresolved-sender-nudge", matchId },
+    data: { key: plan.dedupeKey, kind: "unresolved-sender-nudge", matchId: args.matchId },
   });
-  return { applies: true, reply };
-}
-
-/**
- * Clear `leftAt` on a soft-removed membership when the player has
- * resurfaced in the chat. Preserves history (rating, attendance) and
- * silently re-activates them in the roster.
- */
-async function restoreMembership(membershipId: string, name: string | null) {
-  await db.membership.update({
-    where: { id: membershipId },
-    data: { leftAt: null, provisionallyAddedAt: null },
-  });
-  console.log(`[analyze] restored soft-removed membership ${membershipId} (${name ?? "unknown"})`);
-}
-
-/**
- * True when a "name" is really a raw phone number / numeric @lid id
- * ("447700900123", "123456789012@lid", "+44 7700 900123", "@4477…").
- * Never stamp these as display names or print them in group posts —
- * use a neutral placeholder and let an admin rename. (RC4 of the
- * 2026-06-12 Sutton Lads incident: a bare number showed up as a player
- * name in a group post.)
- */
-function isRawDigitName(raw: string): boolean {
-  const cleaned = raw
-    .trim()
-    .replace(/@?lid$/i, "")
-    .replace(/[@\s+().-]/g, "");
-  return /^\d{5,}$/.test(cleaned);
+  return { applies: true, reply: plan.reply };
 }
 
 /**
@@ -2625,150 +2590,6 @@ async function nameMentionsFromRoster(
     if (described) console.log(`[analyze] mentions ${m.waMessageId}: ${described}`);
     return body === m.body ? m : { ...m, body };
   });
-}
-
-async function resolveSender(orgId: string, msg: InboundMessage): Promise<ResolvedSender> {
-  // Phone first (most accurate). Accept raw digits — prepend '+' if the
-  // bot didn't. @lid senders arrive with empty phone: that's the signal
-  // to try a name-based fallback.
-  if (msg.authorPhone) {
-    const raw = msg.authorPhone.startsWith("+") ? msg.authorPhone : `+${msg.authorPhone}`;
-    const norm = normalisePhone(raw);
-    if (norm) {
-      const user = await db.user.findUnique({
-        where: { phoneNumber: norm },
-        select: { id: true, name: true },
-      });
-      if (user) return { userId: user.id, name: user.name, phone: norm };
-    }
-  }
-  if (msg.authorName && msg.authorName.trim().length >= 2) {
-    // Fuzzy name match — the sender's WhatsApp display name ("Kemal
-    // Ediz") often doesn't exactly match the DB record ("Kemal"), so
-    // we:
-    //   1. First try exact case-insensitive equals (the historic rule)
-    //   2. Fall back to first-token match on either side — DB first
-    //      name vs pushname first name, either direction
-    // Both variants still require a UNIQUE match in the org to avoid
-    // guessing between two players with the same first name.
-    const pushname = msg.authorName.trim();
-    // Include soft-removed memberships in the candidate set: someone
-    // posting in the group is clearly back, so a unique match against a
-    // soft-removed member should restore them rather than provision a
-    // new ghost user. We track leftAt status per-candidate to apply the
-    // restore on the chosen match.
-    const candidates = await db.membership.findMany({
-      where: { orgId },
-      include: { user: { select: { id: true, name: true } } },
-    });
-    const norm = (s: string) =>
-      s.trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-    const pushTokens = norm(pushname).split(/\s+/).filter(Boolean);
-    const pushFirst = pushTokens[0] ?? "";
-
-    const equalsMatches = candidates.filter(
-      (c) => c.user.name && norm(c.user.name) === norm(pushname),
-    );
-    if (equalsMatches.length === 1) {
-      const m = equalsMatches[0];
-      if (m.leftAt) await restoreMembership(m.id, m.user.name);
-      return { userId: m.user.id, name: m.user.name, phone: null };
-    }
-
-    const firstNameMatches = candidates.filter((c) => {
-      if (!c.user.name) return false;
-      const dbTokens = norm(c.user.name).split(/\s+/).filter(Boolean);
-      const dbFirst = dbTokens[0] ?? "";
-      return (
-        dbFirst === pushFirst ||
-        // Relaxed prefix match: as long as one side is ≥3 chars and the
-        // other is ≥2, accept a startsWith. Handles short pushnames like
-        // "ba" → "Baki" and nicknames like "Kara" → "Karahan". The
-        // uniqueness check above still blocks ambiguous cases ("Ed" when
-        // both "Ediz" and "Edward" are in the org).
-        ((dbFirst.length >= 3 && pushFirst.length >= 2 && dbFirst.startsWith(pushFirst)) ||
-          (pushFirst.length >= 3 && dbFirst.length >= 2 && pushFirst.startsWith(dbFirst)))
-      );
-    });
-    if (firstNameMatches.length === 1) {
-      const m = firstNameMatches[0];
-      if (m.leftAt) await restoreMembership(m.id, m.user.name);
-      return { userId: m.user.id, name: m.user.name, phone: null };
-    }
-    // Multiple first-name matches (e.g. two Ibrahims) — try the alias
-    // table FIRST before giving up. UserAlias is admin-curated
-    // (populated by mergePlayers) and unique per (orgId, alias), so an
-    // alias hit disambiguates cleanly regardless of how many fuzzy
-    // candidates also match. Kemal flagged 2026-05-15: Baki's "ba"
-    // pushname matches both Baki and Başar by fuzzy, so the resolver
-    // returned null — but UserAlias["ba"] → Baki was already present
-    // from an earlier merge, and it should have taken precedence.
-    if (firstNameMatches.length > 1) {
-      const aliasKeyEarly = norm(pushname);
-      if (aliasKeyEarly.length >= 2) {
-        const alias = await db.userAlias.findUnique({
-          where: { orgId_alias: { orgId, alias: aliasKeyEarly } },
-        });
-        if (alias) {
-          const m = candidates.find((c) => c.userId === alias.userId);
-          if (m) {
-            if (m.leftAt) await restoreMembership(m.id, m.user.name);
-            console.log(
-              `[analyze] ambiguous fuzzy "${pushname}" resolved via UserAlias → ${m.user.name} (${alias.userId})`,
-            );
-            return { userId: m.user.id, name: m.user.name, phone: null };
-          }
-        }
-      }
-      console.warn(
-        `[analyze] ambiguous fuzzy match for "${pushname}" in org ${orgId} — ${firstNameMatches.length} candidates: ${firstNameMatches
-          .map((m) => m.user.name)
-          .join(", ")} (no alias to disambiguate)`,
-      );
-      return { userId: null, name: pushname, phone: null };
-    }
-
-    // Alias lookup. Admin merges populate UserAlias rows (Nunu →
-    // Elnur Mammadov, etc.) so the next time the same pushname
-    // arrives we resolve to the real user instead of creating
-    // another ghost. Letter-overlap-based fuzzy could never bridge
-    // "Nunu" → "Elnur" — admin curation is the right tool for
-    // nicknames + privacy-mode pushnames.
-    const aliasKey = norm(pushname);
-    if (aliasKey.length >= 2) {
-      const alias = await db.userAlias.findUnique({
-        where: { orgId_alias: { orgId, alias: aliasKey } },
-      });
-      if (alias) {
-        const m = candidates.find((c) => c.userId === alias.userId);
-        if (m) {
-          if (m.leftAt) await restoreMembership(m.id, m.user.name);
-          return { userId: m.user.id, name: m.user.name, phone: null };
-        }
-      }
-    }
-  }
-  // Auto-create a provisional member when we couldn't match.
-  //   Rationale: the message came from the org's monitored WhatsApp
-  //   group, so by construction the sender is in the roster. Silently
-  //   dropping their IN/OUT is a worse failure mode than occasionally
-  //   creating a duplicate that an admin has to merge. Admin dashboard
-  //   surfaces provisional members (via Membership.provisionallyAddedAt)
-  //   so they can set phone/position/rating or remove them.
-  const provisional = await createProvisionalMember(orgId, msg);
-  if (provisional) return provisional;
-  // Never surface a raw numeric id as a display name — downstream
-  // replies address the sender by this field.
-  const fallbackName =
-    msg.authorName && !isRawDigitName(msg.authorName) ? msg.authorName : null;
-  return { userId: null, name: fallbackName, phone: null };
-}
-
-async function createProvisionalMember(
-  orgId: string,
-  msg: InboundMessage,
-): Promise<ResolvedSender | null> {
-  return createProvisionalByName(orgId, msg.authorName?.trim() ?? null, msg.authorPhone);
 }
 
 /**
@@ -2873,79 +2694,6 @@ async function resolveOrProvisionByName(
   const provisioned = await createProvisionalByName(orgId, name, null);
   if (provisioned) return { userId: provisioned.userId!, name: provisioned.name };
   return null;
-}
-
-async function createProvisionalByName(
-  orgId: string,
-  rawName: string | null,
-  rawPhone: string | null,
-): Promise<ResolvedSender | null> {
-  const trimmed = rawName?.trim();
-  // Never stamp a raw phone number / @lid numeric id as a display name
-  // (RC4, 2026-06-12): provision under a neutral placeholder instead
-  // and let the admin rename from the dashboard — the membership is
-  // flagged provisional either way, and group posts must never show
-  // bare digits as a player.
-  const name = trimmed && isRawDigitName(trimmed) ? "New player" : trimmed;
-  // Require ≥3 chars: 2-char pushnames like "ba" are almost always
-  // truncations of a real name we already have (e.g. "Baki Sutton") and
-  // provisioning them creates duplicate ghost users. The relaxed fuzzy
-  // matcher (see firstNameMatches) now resolves short pushnames to
-  // existing members; provisioning is reserved for genuinely new names.
-  if (!name || name.length < 3) return null;
-  // Skip obvious non-player authors (bot itself, group admin system messages).
-  const blocked = /^(match time|matchtime|whatsapp|system)$/i;
-  if (blocked.test(name)) return null;
-
-  const normPhone = rawPhone
-    ? normalisePhone(rawPhone.startsWith("+") ? rawPhone : `+${rawPhone}`)
-    : null;
-
-  // Synthetic email keeps the User.email unique constraint happy — users
-  // can claim their account later via a real email address when they
-  // log in (onboarding flow overwrites this placeholder).
-  const emailSlug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "player";
-  const syntheticEmail = `provisional+${emailSlug}-${Date.now().toString(36)}@matchtime.local`;
-
-  try {
-    // Phone is unique globally, so if a user with that phone already
-    // exists (from another org), reuse them rather than failing.
-    let user = normPhone
-      ? await db.user.findUnique({ where: { phoneNumber: normPhone } })
-      : null;
-    if (!user) {
-      user = await db.user.create({
-        data: {
-          name,
-          email: syntheticEmail,
-          phoneNumber: normPhone,
-          onboarded: false,
-          isActive: true,
-        },
-      });
-    }
-
-    // Upsert membership: if user already exists in this org (e.g. re-joined),
-    // just clear leftAt and mark as provisional again.
-    await db.membership.upsert({
-      where: { userId_orgId: { userId: user.id, orgId } },
-      create: {
-        userId: user.id,
-        orgId,
-        role: "PLAYER",
-        provisionallyAddedAt: new Date(),
-      },
-      update: {
-        leftAt: null,
-        provisionallyAddedAt: new Date(),
-      },
-    });
-    console.log(`[analyze] auto-created provisional member ${user.id} (${name}) in org ${orgId}`);
-    return { userId: user.id, name: user.name, phone: normPhone };
-  } catch (err) {
-    console.error("[analyze] provisional member creation failed:", err);
-    return null;
-  }
 }
 
 // `KEYCAP` is deleted with `executeVerdict` (§10 step 8). The

@@ -374,12 +374,21 @@ describe("inbound counters + empty-flush heartbeat", () => {
 
   it("_test_reset clears the counters between cases", () => {
     _test_reset();
+    // Every counter, not just the five the log line prints: since
+    // 2026-09-09 these leave the Pi in the heartbeat and are what the
+    // server's alert rules read, so a counter leaking between cases would
+    // make a health test pass for the wrong reason.
     expect(_test_getInboundStats()).toEqual({
       seen: 0,
       buffered: 0,
       synthetic: 0,
       reconstructed: 0,
       notGroup: 0,
+      degradedEnrichment: 0,
+      nameless: 0,
+      reactFailures: 0,
+      flushFailures: 0,
+      droppedMessages: 0,
     });
   });
 });

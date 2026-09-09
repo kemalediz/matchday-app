@@ -8,6 +8,12 @@ import {
   parseAttendanceFailureAction,
   describeAttendanceFailure,
 } from "@/lib/attendance-write-outcome";
+import {
+  groupUnresolved,
+  UNKNOWN_SENDER_KEY,
+  unresolvedKey,
+  type UnresolvedGroup,
+} from "@/lib/unresolved-grouping";
 import { revalidatePath } from "next/cache";
 
 /**
@@ -23,18 +29,7 @@ const ATTENDANCE_INTENTS = ["in", "out", "replacement_request"];
 const norm = (s: string) =>
   s.trim().toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "");
 
-export interface UnresolvedGroup {
-  /** Normalised pushname key (what an alias would store). */
-  key: string;
-  /** Display pushname (most recent raw form). */
-  pushname: string;
-  count: number;
-  /** Most recent attendance-relevant intent seen for this pushname. */
-  lastIntent: string;
-  lastBody: string;
-  lastAt: string;
-  sampleBodies: string[];
-}
+export type { UnresolvedGroup } from "@/lib/unresolved-grouping";
 
 /**
  * List unresolved attendance-relevant messages for the current org,
@@ -47,11 +42,17 @@ export async function listUnresolved(orgId: string): Promise<UnresolvedGroup[]> 
   await requireOrgAdmin(session.user.id, orgId);
 
   const since = new Date(Date.now() - 21 * 24 * 60 * 60 * 1000);
+  // `authorName: { not: null }` was here until 2026-09-09, and it made
+  // this queue blind to the messages it most exists for: a sender with no
+  // phone AND no name is the least attributable message there is, and it
+  // was the one kind the queue could not show (2026-08-30 audit, §3).
+  // Nameless rows now collapse into one clearly-labelled bucket — see
+  // `lib/unresolved-grouping.ts` for why one bucket and why it cannot be
+  // linked to a player.
   const rows = await db.analyzedMessage.findMany({
     where: {
       orgId,
       authorUserId: null,
-      authorName: { not: null },
       intent: { in: ATTENDANCE_INTENTS },
       createdAt: { gte: since },
     },
@@ -59,33 +60,7 @@ export async function listUnresolved(orgId: string): Promise<UnresolvedGroup[]> 
     select: { authorName: true, intent: true, body: true, createdAt: true },
   });
 
-  const byKey = new Map<string, UnresolvedGroup>();
-  for (const r of rows) {
-    const name = (r.authorName ?? "").trim();
-    if (!name) continue;
-    const key = norm(name);
-    if (!key) continue;
-    const existing = byKey.get(key);
-    if (!existing) {
-      byKey.set(key, {
-        key,
-        pushname: name,
-        count: 1,
-        lastIntent: r.intent ?? "?",
-        lastBody: (r.body ?? "").slice(0, 160),
-        lastAt: r.createdAt.toISOString(),
-        sampleBodies: [(r.body ?? "").slice(0, 160)],
-      });
-    } else {
-      existing.count += 1;
-      if (existing.sampleBodies.length < 4) {
-        existing.sampleBodies.push((r.body ?? "").slice(0, 160));
-      }
-    }
-  }
-  return [...byKey.values()].sort(
-    (a, b) => new Date(b.lastAt).getTime() - new Date(a.lastAt).getTime(),
-  );
+  return groupUnresolved(rows);
 }
 
 /** Lightweight count for the subnav badge. */
@@ -93,11 +68,13 @@ export async function unresolvedCount(orgId: string): Promise<number> {
   const session = await auth();
   if (!session?.user?.id) return 0;
   const since = new Date(Date.now() - 21 * 24 * 60 * 60 * 1000);
+  // Nameless rows included since 2026-09-09 — see `listUnresolved` above.
+  // They all share one key, so twelve unattributable messages add ONE to
+  // the badge, not twelve.
   const rows = await db.analyzedMessage.findMany({
     where: {
       orgId,
       authorUserId: null,
-      authorName: { not: null },
       intent: { in: ATTENDANCE_INTENTS },
       createdAt: { gte: since },
     },
@@ -111,9 +88,10 @@ export async function unresolvedCount(orgId: string): Promise<number> {
       createdAt: { gte: since },
     },
   });
-  return (
-    new Set(rows.map((r) => norm(r.authorName ?? "")).filter(Boolean)).size + failed
-  );
+  // `.filter(Boolean)` used to drop every nameless row here as well as in
+  // the query. `unresolvedKey` maps them all to one bucket instead, so
+  // they are counted — once.
+  return new Set(rows.map((r) => unresolvedKey(r.authorName))).size + failed;
 }
 
 export interface FailedAttendanceWrite {
@@ -183,6 +161,17 @@ export async function assignUnresolvedToPlayer(args: {
   await requireOrgAdmin(session.user.id, args.orgId);
 
   const key = norm(args.pushname);
+  // The unknown-sender bucket has no pushname to alias. The UI does not
+  // offer the control for it, but the server action is the thing that
+  // actually protects the alias table: a `UserAlias` row keyed on a
+  // placeholder would match nobody forever, and would quietly make the
+  // NEXT nameless sender look resolved.
+  if (key === UNKNOWN_SENDER_KEY || unresolvedKey(args.pushname) === UNKNOWN_SENDER_KEY) {
+    throw new Error(
+      "Those messages arrived with no name at all, so there's nothing to link. " +
+        "Ask the player to send another message, or add them from the Players page.",
+    );
+  }
   if (key.length < 2) throw new Error("Pushname too short to alias");
 
   const membership = await db.membership.findUnique({
@@ -272,6 +261,11 @@ export async function assignUnresolvedToPlayer(args: {
     where: {
       orgId: args.orgId,
       authorUserId: null,
+      // `authorName: { not: null }` STAYS here, unlike in the two list
+      // queries above. This backfill claims rows for ONE linked pushname,
+      // and a nameless row belongs to no pushname: sweeping it up would
+      // silently attribute an anonymous message to whichever player
+      // happened to be linked next.
       authorName: { not: null },
       intent: { in: ATTENDANCE_INTENTS },
       createdAt: { gte: since2 },
