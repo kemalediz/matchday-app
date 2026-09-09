@@ -3,8 +3,11 @@ import { db } from "@/lib/db";
 import { redirect } from "next/navigation";
 import Link from "next/link";
 import { getCurrentOrgId, isSuperadmin } from "@/lib/org";
-import { Plus, Check, Users, Calendar, CalendarDays } from "lucide-react";
+import { Plus, Check, Users, Calendar, CalendarDays, Moon } from "lucide-react";
 import { DeleteOrgButton } from "./delete-org-button";
+import { DormancyButton } from "./dormancy-button";
+import { isOrgDormant } from "@/lib/org-lifecycle";
+import { format } from "date-fns";
 
 /**
  * Lists every org the signed-in user is a member of (active memberships
@@ -28,6 +31,7 @@ export default async function OrganisationsPage() {
           name: true,
           slug: true,
           whatsappGroupId: true,
+          dormantAt: true,
           createdAt: true,
           _count: {
             select: {
@@ -85,6 +89,7 @@ export default async function OrganisationsPage() {
           {memberships.map((m, i) => {
             const isCurrent = m.org.id === currentOrgId;
             const matchCount = matchCounts[i];
+            const dormant = isOrgDormant(m.org);
             return (
               <div
                 key={m.id}
@@ -99,6 +104,18 @@ export default async function OrganisationsPage() {
                       <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-green-100 text-green-700 text-[10px] font-semibold uppercase">
                         <Check className="w-3 h-3" />
                         Active
+                      </span>
+                    )}
+                    {dormant && (
+                      <span
+                        title={`No fixtures are being created for this club (dormant since ${format(
+                          m.org.dormantAt!,
+                          "d MMM yyyy",
+                        )})`}
+                        className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-slate-200 text-slate-600 text-[10px] font-semibold uppercase"
+                      >
+                        <Moon className="w-3 h-3" />
+                        Dormant
                       </span>
                     )}
                     <span
@@ -155,6 +172,14 @@ export default async function OrganisationsPage() {
                     >
                       Manage
                     </Link>
+                  )}
+                  {(superuser || m.role === "OWNER") && (
+                    <DormancyButton
+                      orgId={m.org.id}
+                      orgName={m.org.name}
+                      orgSlug={m.org.slug}
+                      isDormant={dormant}
+                    />
                   )}
                   {(superuser || m.role === "OWNER") && (
                     <DeleteOrgButton

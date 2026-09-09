@@ -114,6 +114,110 @@ export async function deleteOrganisation(orgId: string, confirmSlug: string) {
   revalidatePath("/");
 }
 
+/**
+ * Shared guard for the two lifecycle actions below. Same bar as
+ * `deleteOrganisation`: superadmin, or this org's OWNER. A plain ADMIN
+ * runs the club week to week; deciding the club is over is not that job.
+ */
+async function requireOrgOwner(userId: string, orgId: string): Promise<void> {
+  const { isSuperadmin } = await import("@/lib/org");
+  if (await isSuperadmin(userId)) return;
+  const membership = await db.membership.findUnique({
+    where: { userId_orgId: { userId, orgId } },
+    select: { role: true, leftAt: true },
+  });
+  if (!membership || membership.leftAt !== null || membership.role !== "OWNER") {
+    throw new Error("Only the org owner can change an organisation's lifecycle");
+  }
+}
+
+/**
+ * Declare an organisation DORMANT: the club has churned, the group is
+ * gone, MatchTime stops acting on its own initiative for it. Sets the
+ * single `dormantAt` timestamp and nothing else.
+ *
+ * This is the only writer of that field — it is declared by a human,
+ * never inferred (the full argument, and the reason
+ * `whatsappBotEnabled` is NOT this signal, is in
+ * `src/lib/org-lifecycle.ts`).
+ *
+ * What it stops: the weekly `/api/cron/generate-matches` fixture roll.
+ * What it does NOT do, on purpose:
+ *  - it does not delete or anonymise anything (retaining the history is
+ *    the point of dormancy existing at all — `deleteOrganisation` is
+ *    the other door);
+ *  - it does not touch `whatsappBotEnabled`, the feature flags, or any
+ *    `Activity.isActive` — different axes, left where the operator put
+ *    them, so waking the club up restores exactly what it had;
+ *  - it does not retire fixtures ALREADY generated. Those are existing
+ *    rows with attendance attached, and quietly cancelling them from
+ *    here would be a surprise; `scripts/cancel-dormant-org-fixtures.ts`
+ *    does that deliberately, with a dry run first.
+ *
+ * Guard: superadmin or OWNER, plus the org slug typed back — the same
+ * two-step as deletion, because the consequence (no more fixtures) is
+ * silent and would otherwise be discovered at kickoff.
+ */
+export async function markOrganisationDormant(orgId: string, confirmSlug: string) {
+  const session = await auth();
+  if (!session?.user?.id) throw new Error("Not authenticated");
+
+  const org = await db.organisation.findUnique({
+    where: { id: orgId },
+    select: { id: true, name: true, slug: true, dormantAt: true },
+  });
+  if (!org) throw new Error("Organisation not found");
+  if (org.slug !== confirmSlug) throw new Error("Slug confirmation didn't match");
+
+  await requireOrgOwner(session.user.id, orgId);
+
+  // Idempotent, and deliberately NOT a re-stamp: `dormantAt` records
+  // when the club actually went, which is what the cleanup script and
+  // any later "when did we lose them?" both read. A second click must
+  // not rewrite history.
+  if (org.dormantAt !== null) return;
+
+  await db.organisation.update({
+    where: { id: orgId },
+    data: { dormantAt: new Date() },
+  });
+
+  revalidatePath("/admin/organisations");
+  revalidatePath("/admin");
+}
+
+/**
+ * Wake a dormant organisation back up — a club that comes back next
+ * season is the same club, with the same history. Clears `dormantAt`;
+ * the next `/api/cron/generate-matches` run resumes its fixtures.
+ *
+ * No typed confirmation: this is the reversible direction. Fixtures
+ * cancelled while it was dormant stay cancelled (restore them from
+ * /admin/block-bookings, which already has a bulk restore).
+ */
+export async function reactivateOrganisation(orgId: string) {
+  const session = await auth();
+  if (!session?.user?.id) throw new Error("Not authenticated");
+
+  const org = await db.organisation.findUnique({
+    where: { id: orgId },
+    select: { id: true, dormantAt: true },
+  });
+  if (!org) throw new Error("Organisation not found");
+
+  await requireOrgOwner(session.user.id, orgId);
+
+  if (org.dormantAt === null) return; // already live — nothing to undo
+
+  await db.organisation.update({
+    where: { id: orgId },
+    data: { dormantAt: null },
+  });
+
+  revalidatePath("/admin/organisations");
+  revalidatePath("/admin");
+}
+
 export async function switchOrg(orgId: string) {
   const session = await auth();
   if (!session?.user?.id) throw new Error("Not authenticated");
