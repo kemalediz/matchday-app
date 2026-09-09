@@ -1,17 +1,29 @@
 /**
- * Weekly cron: for each active Activity, generate the upcoming Match
- * record for its next scheduled weekday + time. Time is stored as a
- * London wall clock on the Activity (`time: "21:30"`) — we convert
- * that to a UTC instant here so Match.date is a real, unambiguous
- * timestamp. DST is handled via date-fns-tz.
+ * Weekly cron: for each active Activity OF A CLUB THAT STILL EXISTS,
+ * generate the upcoming Match record for its next scheduled weekday +
+ * time. Time is stored as a London wall clock on the Activity
+ * (`time: "21:30"`) — we convert that to a UTC instant here so
+ * Match.date is a real, unambiguous timestamp. DST is handled via
+ * date-fns-tz.
  *
  * Before this version the code used `setHours()` which, running on
  * Vercel's UTC servers, mis-stamped every match by +1h (BST offset).
+ *
+ * 2026-09-09: this route used to ask only whether the ACTIVITY was
+ * active, and never whether the ORGANISATION still existed. So a club
+ * that churned kept generating fixtures forever — Sutton Lads churned
+ * on 2026-06-18 and was still being handed a Thursday fixture in
+ * September, spotted only because one appeared in a status report. It
+ * now checks both axes via `src/lib/org-lifecycle.ts`, which is also
+ * where the argument for `Organisation.dormantAt` (an explicit,
+ * human-set field) over `whatsappBotEnabled` (a mute switch, routinely
+ * flipped on live clubs) lives.
  */
 import { db } from "@/lib/db";
 import { NextResponse } from "next/server";
 import { londonWallClockToUtc, formatLondon } from "@/lib/london-time";
 import { hasMatchForSlot } from "@/lib/match-slot";
+import { partitionGeneratable } from "@/lib/org-lifecycle";
 
 export async function GET(request: Request) {
   const authHeader = request.headers.get("authorization");
@@ -19,10 +31,33 @@ export async function GET(request: Request) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const activities = await db.activity.findMany({
+  // `isActive` narrows at the DB; the ORG's lifecycle is then decided by
+  // the pure rule below. Dormancy is deliberately NOT pushed into this
+  // `where` — a skipped club has to be countable, otherwise "we stopped
+  // generating for a dead club" and "there was nothing to generate" look
+  // identical in the cron log, which is how this bug survived a quarter.
+  const candidates = await db.activity.findMany({
     where: { isActive: true },
-    include: { sport: true },
+    include: { sport: true, org: { select: { name: true, dormantAt: true } } },
   });
+
+  // Filtered BEFORE the loop, not with a `continue` inside it: this repo
+  // has had six terminal-short-circuit incidents where an early exit
+  // added near the top of a loop silently deleted the guards beneath it,
+  // and the guard beneath this one is the ghost-match slot dedupe. An
+  // activity that reaches the loop has already cleared both axes.
+  const { generate: activities, skipped, skippedDormantOrgs } =
+    partitionGeneratable(candidates);
+
+  // Dormant skips are logged; `activity-inactive` skips are routine and
+  // stay silent. (A `filter`, not a `continue` — same reason as above.)
+  for (const s of skipped.filter((x) => x.reason === "org-dormant")) {
+    console.log(
+      `[generate-matches] skipping "${s.item.name}" — org "${s.item.org.name}" is dormant ` +
+        `(since ${s.item.org.dormantAt?.toISOString()})`,
+    );
+  }
+
   let created = 0;
 
   for (const activity of activities) {
@@ -97,5 +132,5 @@ export async function GET(request: Request) {
     created++;
   }
 
-  return NextResponse.json({ created });
+  return NextResponse.json({ created, skippedDormantOrgs });
 }

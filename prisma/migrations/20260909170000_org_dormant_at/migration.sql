@@ -1,0 +1,54 @@
+-- Organisation."dormantAt": the explicit "this club is gone" signal (2026-09-09).
+--
+-- WHY THIS COLUMN EXISTS
+-- ----------------------
+-- `/api/cron/generate-matches` filtered on `Activity."isActive"` and
+-- never looked at the organisation, so a club that churned kept being
+-- handed a weekly fixture forever. Sutton Lads churned on 2026-06-18
+-- (MatchTime was removed from their group after an incident; the org was
+-- left dormant and its data deliberately retained) and was still being
+-- given a Thursday fixture in September — one surfaced in a status
+-- report nearly three months later.
+--
+-- There was no lifecycle column to check. The four boolean flags that
+-- LOOK like one — "whatsappBotEnabled", "paymentTrackingEnabled",
+-- "paymentCollectionEnabled", "stripeChargesEnabled" — are all feature
+-- switches, and the first is specifically a MUTE: Sutton FC, very much
+-- alive, was muted with it twice in the week of 2026-09-06 during
+-- engineering work while its fixtures kept generating, correctly.
+-- Reusing it as a lifecycle state would mean an hour of maintenance
+-- silently costs a live club its next squad, which is a worse bug than
+-- the one being fixed.
+--
+-- So: one nullable timestamp. NULL = live. A value = a human declared
+-- this org dormant on that date. Declared, never inferred — no
+-- heuristic can distinguish a churned club from a club on a summer
+-- break, and guessing wrong loses a real squad silently.
+--
+-- WHAT APPLYING THIS DOES TO A LIVE DATABASE
+-- ------------------------------------------
+-- Strictly additive, and a no-op for every existing row: one
+-- ADD COLUMN "dormantAt" TIMESTAMP(3) — NULLABLE, no DEFAULT, so
+-- Postgres does not rewrite the table and every existing org reads back
+-- as live, exactly as it behaves today.
+--
+-- No index: "Organisation" holds single-digit rows and every read of
+-- this column is part of a scan of all of them. An index here would be
+-- schema drift with no query behind it.
+--
+-- It does NOT: backfill anything (Sutton Lads is marked dormant by an
+-- operator afterwards, not by this file), drop or rename anything,
+-- touch "Activity"."isActive", change any existing constraint, or
+-- change the behaviour of any query that does not name the new column.
+--
+-- Rolling back is `ALTER TABLE "Organisation" DROP COLUMN "dormantAt"`,
+-- with no data loss outside the new column.
+--
+-- NOTE ON APPLYING: this repo historically manages schema with
+-- `prisma db push` (there is no full migration history — see
+-- prisma.config.ts and the same note on the prior migrations). This
+-- file is the canonical, reviewable DDL. `prisma db push` produces an
+-- identical result here.
+
+-- AlterTable
+ALTER TABLE "Organisation" ADD COLUMN "dormantAt" TIMESTAMP(3);
