@@ -49,6 +49,7 @@
  * (`handlers.ts:7-10`), when the LLM took every message. They crept back
  * one incident at a time. This is a return to a decision already made.
  */
+import { mergeOneReply } from "./pipeline/clause-peel";
 
 /**
  * Merge the LLM's reply and the server's recruit line into EXACTLY ONE
@@ -61,18 +62,19 @@
  *
  * Whitespace-only counts as silence; two identical lines collapse rather
  * than being said twice.
+ *
+ * THE RULE MOVED, THE NAME STAYED (2026-09-09). Clause peeling
+ * (`pipeline/clause-peel.ts`) produces exactly this shape for every fast
+ * path that takes half a message, not just for the recruit blast, so the
+ * implementation lives there as `mergeOneReply` and this delegates to it.
+ * Two copies of "MatchTime replies once" is one copy too many: the
+ * invariant must not be able to hold in one caller and drift in another.
  */
 export function mergeRecruitReply(
   llmReply: string | null | undefined,
   recruitReply: string | null | undefined,
 ): string | null {
-  const a = (llmReply ?? "").trim();
-  const b = (recruitReply ?? "").trim();
-  if (!a && !b) return null;
-  if (!a) return b;
-  if (!b) return a;
-  if (a === b) return a;
-  return `${a}\n\n${b}`;
+  return mergeOneReply(llmReply, recruitReply);
 }
 
 /**

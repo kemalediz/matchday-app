@@ -240,6 +240,12 @@ import { messageTagsBot } from "@/lib/interaction-contract";
 import { mergeRecruitReply } from "@/lib/recruit-request";
 import { readBenchPromptAnswer } from "@/lib/bench-prompt-answer";
 import {
+  peelClause,
+  applyClauseReports,
+  type ClausePeel,
+  type ClauseReport,
+} from "@/lib/pipeline/clause-peel";
+import {
   decideSwap,
   parseSwapNames,
   resolveSwapSide,
@@ -479,6 +485,142 @@ async function handleAnalyzeRequest(request: Request) {
     senderById.set(m.waMessageId, await resolveSender(org.id, m));
   }
 
+  // ═══════════════════════════════════════════════════════════════════
+  // A FAST PATH CLAIMS A CLAUSE, NOT A MESSAGE (2026-09-09)
+  // ═══════════════════════════════════════════════════════════════════
+  //
+  // THE BUG CLASS, SIX INCIDENTS. Every fast path below used to do this:
+  //
+  //     fastPathHandledIds.add(m.waMessageId);   // the WHOLE message
+  //     continue;                                // skip every guard below
+  //
+  // and the one splice further down removed the message from `fresh`. So
+  // whichever fast path matched FIRST owned the entire message and every
+  // other clause in it was destroyed. The recruit regex (2026-09-01),
+  // PR #29's guest-name ask, step 6's engine short-circuit, the pasted
+  // list (2026-09-06), the BENCH clause (2026-09-08) and the swap peel
+  // are one defect wearing six hats. `lib/pipeline/clause-peel.ts` has
+  // the full roll-call and the argument.
+  //
+  // THE FIX IS THE SAME MOVE `registerForEntryRequiresTag` MADE ONE
+  // LAYER DOWN on 2026-09-08: ask the question PER CLAUSE. A fast path
+  // takes the clause it recognises; what is left carries on.
+  //
+  // ── THE THREE SETS, AND WHY THEY ARE THREE ─────────────────────────
+  //
+  //   `fastPathHandledIds`   "a fast path has dealt with this message"
+  //                          — read by every LATER fast path so two
+  //                          cannot claim one message. It was called
+  //                          `statsRequestIds` and was doing this job
+  //                          AND the splice's, which is how "handled"
+  //                          and "gone from the pipeline" became the
+  //                          same fact. They are not the same fact.
+  //   `clauseResidualById`   the message is handled but NOT gone: this
+  //                          is the body the rest of the pipeline sees.
+  //                          Its presence is exactly what spares the
+  //                          message from the splice.
+  //   `clauseReports`        the fast path's own row + words, DEFERRED
+  //                          so they can be merged into the ONE result
+  //                          the loop produces for that message. Same
+  //                          shape as `pastedRosterReports` below and
+  //                          the recruit blast's merge above.
+  //
+  // ── WHAT A RESIDUAL IS EXPOSED TO, AND WHAT IT IS NOT ──────────────
+  //
+  //   THE ROUTER GATE       YES. It labels, it does not decide. One
+  //                         extra line in a batched Haiku call.
+  //   THE ATTENDANCE ENGINE YES, AND THIS IS THE WHOLE POINT. The
+  //                         residual is where "and I'm out" lives, and
+  //                         losing an attendance change is the worst
+  //                         thing this file does.
+  //   THE FOUR STEP-7       NO. Excluded from `ownerBase`, exactly as a
+  //   OWNERS                pasted roster is and for the same reason: a
+  //                         fragment left over from "…and share us the
+  //                         teams" must not be answered as a question or
+  //                         taken as a team instruction. That exposure
+  //                         would be NEW with this change, so it is
+  //                         closed here rather than argued about. THE
+  //                         COST, stated: "@Match Time swap A with B.
+  //                         What time is kickoff?" still answers only
+  //                         the swap.
+  //   THE OPERATOR NOTE     NO. `unowned` skips a residual. The message
+  //                         WAS handled — its `AnalyzedMessage` row
+  //                         carries both halves via `augmentAnalysis` —
+  //                         and paging a human on every "…and share us
+  //                         the teams" would be a regression dressed as
+  //                         observability. This is the pasted roster's
+  //                         own argument, unchanged.
+  //
+  // ── THE ONE-REPLY INVARIANT ────────────────────────────────────────
+  //
+  // Two owners may now WRITE for one message; only one SPEAKS. The
+  // fast path's words are merged into the loop's single result by
+  // `mergeOneReply` — never pushed as a second result — which is
+  // `mergeRecruitReply`'s rule generalised (it now delegates to the same
+  // function). `applyClauseReports` below is the only place that merges,
+  // and the duplicate-result backstop at the end of this function still
+  // says so out loud.
+  const fastPathHandledIds = new Set<string>();
+  const clauseResidualById = new Map<string, string>();
+  const clauseReports = new Map<string, ClauseReport>();
+
+  /** The body the REST of the pipeline sees. The ORIGINAL body for
+   *  everything a fast path did not touch; the residual for anything it
+   *  peeled a clause off. `messageTagsBot` is deliberately NOT computed
+   *  from this — the tag is a property of what the sender WROTE, and a
+   *  peel must not be able to change what the contract permits. */
+  const pipelineBody = (m: InboundMessage): string =>
+    clauseResidualById.get(m.waMessageId) ?? m.body;
+
+  /**
+   * ONE fast path has decided one message. Called by every peel below
+   * instead of the old `add(id)` + `recordAnalysis` + `results.push`.
+   *
+   * With NO residual it does exactly what shipped: the row and the
+   * result are written here and the splice removes the message. With a
+   * residual it writes neither — both are deferred into `clauseReports`
+   * and merged into whatever the pipeline concludes about the rest of
+   * the message, so the batch still ends with one result and one row per
+   * waMessageId.
+   */
+  const claimFastPath = async (
+    m: InboundMessage,
+    peel: ClausePeel | null,
+    report: ClauseReport,
+  ) => {
+    fastPathHandledIds.add(m.waMessageId);
+    const sender = senderById.get(m.waMessageId);
+    if (peel && peel.residual) {
+      clauseResidualById.set(m.waMessageId, peel.residual);
+      clauseReports.set(m.waMessageId, report);
+      console.log(
+        `[analyze] clause peel (${report.intent}) on ${m.waMessageId}: took ` +
+          `"${peel.consumed.slice(0, 60)}", the pipeline still sees ` +
+          `"${peel.residual.slice(0, 60)}"`,
+      );
+      return;
+    }
+    await recordAnalysis({
+      orgId: org.id,
+      groupId: body.groupId,
+      msg: m,
+      handledBy: report.handledBy,
+      intent: report.intent,
+      action: report.action,
+      confidence: 1,
+      reasoning: report.reasoning,
+      authorUserId: sender?.userId,
+      authorName: m.authorName ?? null,
+    });
+    results.push({
+      waMessageId: m.waMessageId,
+      handledBy: report.handledBy,
+      intent: report.intent,
+      react: report.react,
+      reply: report.reply,
+    });
+  };
+
   // ── Fast-path: "my stats" / "wrapped" personal-stats request ────────
   //   Deterministic (NO LLM cost — Kemal is cost-conscious about
   //   per-message LLM use). When a resolved sender asks for THEIR OWN
@@ -488,18 +630,23 @@ async function handleAnalyzeRequest(request: Request) {
   //   "wrapped" so it never collides with group-level stats questions
   //   ("who's most consistent?") which the LLM still answers from the
   //   Recent History block.
+  //
+  //   CLAUSE-PEELED. The DM is composed from the SENDER, never from the
+  //   body, so which clause carried "my stats" changes nothing about
+  //   what is sent — only about what is left over. "@Match Time my
+  //   stats. Also put me down for Thursday" now DMs the link AND
+  //   registers him.
   const STATS_REQUEST = /\bwrapped\b|\bmy\s+(stats|season|ratings?|performance|form|card)\b/i;
-  const statsRequestIds = new Set<string>();
   for (const m of fresh) {
-    if (!STATS_REQUEST.test(m.body)) continue;
     // Interaction contract: a stats request is an ANSWER-y action MT
     // performs for a player → requires an @Match Time tag. Untagged
     // "my stats" is ordinary chat; stay silent (don't DM, don't peel).
     if (!messageTagsBot(m)) continue;
+    const statsPeel = peelClause(m.body, (c) => STATS_REQUEST.test(c));
+    if (!statsPeel) continue;
     const sender = senderById.get(m.waMessageId)!;
     const phone = (sender.phone || m.authorPhone || "").replace(/^\+/, "");
     if (!sender.userId || !phone) continue; // can't DM an unresolved sender
-    statsRequestIds.add(m.waMessageId);
     try {
       const token = signMagicLinkToken({
         userId: sender.userId,
@@ -522,22 +669,11 @@ async function handleAnalyzeRequest(request: Request) {
     } catch (err) {
       console.error("[analyze] my-stats DM queue failed:", err);
     }
-    await recordAnalysis({
-      orgId: org.id,
-      groupId: body.groupId,
-      msg: m,
+    await claimFastPath(m, statsPeel, {
       handledBy: "fast-path",
       intent: "stats_link",
       action: "dm-stats-link",
-      confidence: 1,
       reasoning: "personal stats request — DM'd a magic link to /profile/stats",
-      authorUserId: sender.userId,
-      authorName: m.authorName ?? null,
-    });
-    results.push({
-      waMessageId: m.waMessageId,
-      handledBy: "fast-path",
-      intent: "stats_link",
       react: "📊",
       reply: null,
     });
@@ -548,15 +684,28 @@ async function handleAnalyzeRequest(request: Request) {
   //   their stats"). Each active member with a phone gets a DM with
   //   their OWN never-expiring magic link to /profile/stats. Gated to
   //   OWNER/ADMIN so randoms can't trigger a DM blast. No LLM cost.
+  //
+  //   ⚠️ THIS PEEL IS NOT TAG-GATED, and the clause peel is why that now
+  //   matters less. The brief for this change asserted every fast path
+  //   requires an `@Match Time` tag; this one and the rating-progress
+  //   one below do not, so an ORDINARY sentence could reach them. The
+  //   tag requirement is a different axis and is NOT changed here (it
+  //   was settled on 2026-09-08) — but a DENIED blast used to peel the
+  //   whole message too, so "can someone send the ratings to all the
+  //   lads? I'm out btw" answered 🔒 and lost the OUT. It no longer can.
+  //
+  //   CLAUSE-PEELED. Like the personal link above, nothing in the blast
+  //   is composed from the body, so peeling a clause changes only what
+  //   is left over.
   const blastTrigger = (text: string) =>
     /\b(dm|send|share|message)\b/i.test(text) &&
     /\b(stats|ratings?)\b/i.test(text) &&
     /\b(everyone|all|active|players|squad|the team|the group)\b/i.test(text);
   for (const m of fresh) {
-    if (statsRequestIds.has(m.waMessageId)) continue; // already handled as personal
-    if (!blastTrigger(m.body)) continue;
+    if (fastPathHandledIds.has(m.waMessageId)) continue; // already handled as personal
+    const blastPeel = peelClause(m.body, blastTrigger);
+    if (!blastPeel) continue;
     const sender = senderById.get(m.waMessageId)!;
-    statsRequestIds.add(m.waMessageId); // peel off the LLM batch regardless
     // Admin gate.
     let isAdmin = false;
     if (sender.userId) {
@@ -567,18 +716,13 @@ async function handleAnalyzeRequest(request: Request) {
       isAdmin = mem?.role === "OWNER" || mem?.role === "ADMIN";
     }
     if (!isAdmin) {
-      results.push({
-        waMessageId: m.waMessageId,
+      await claimFastPath(m, blastPeel, {
         handledBy: "fast-path",
         intent: "stats_blast_denied",
+        action: null,
+        reasoning: "non-admin asked to DM stats to everyone — ignored",
         react: "🔒",
         reply: null,
-      });
-      await recordAnalysis({
-        orgId: org.id, groupId: body.groupId, msg: m,
-        handledBy: "fast-path", intent: "stats_blast_denied", action: null,
-        confidence: 1, reasoning: "non-admin asked to DM stats to everyone — ignored",
-        authorUserId: sender.userId, authorName: m.authorName ?? null,
       });
       continue;
     }
@@ -615,16 +759,11 @@ async function handleAnalyzeRequest(request: Request) {
         console.error(`[analyze] stats-blast DM failed for ${u.id}:`, err);
       }
     }
-    await recordAnalysis({
-      orgId: org.id, groupId: body.groupId, msg: m,
-      handledBy: "fast-path", intent: "stats_blast", action: `dm-stats-blast:${queued}`,
-      confidence: 1, reasoning: `admin stats blast — queued ${queued} personal stats-link DMs`,
-      authorUserId: sender.userId, authorName: m.authorName ?? null,
-    });
-    results.push({
-      waMessageId: m.waMessageId,
+    await claimFastPath(m, blastPeel, {
       handledBy: "fast-path",
       intent: "stats_blast",
+      action: `dm-stats-blast:${queued}`,
+      reasoning: `admin stats blast — queued ${queued} personal stats-link DMs`,
       react: "✅",
       reply: `📊 Done — DM'd ${queued} player${queued === 1 ? "" : "s"} their personal stats link. They'll arrive over the next few minutes.`,
     });
@@ -638,22 +777,31 @@ async function handleAnalyzeRequest(request: Request) {
   //   (dm-qa.ts: only group-public + the asker's own data). React 📩 in
   //   the group so it's clear it was handled. Personal stats requests
   //   are already handled above (they DM a stats link), so skip those.
+  //
+  //   CLAUSE-PEELED, AND THIS IS THE ONE WHERE THE CONSUMED CLAUSE IS
+  //   LOAD-BEARING. Every other peel ignores the body once it has
+  //   matched; this one FEEDS it to `answerScopedQuestion`, so what gets
+  //   answered is the clause that asked, not the whole message. That is
+  //   why the splitter refuses to break on a bare "and": "dm me who's in
+  //   and who's out" is ONE question and must stay one
+  //   (`clause-peel.ts` pins it). "@Match Time dm me the fixtures. Also
+  //   I'm out" answers the fixtures privately AND drops him.
   const DM_ME = /\b(dm|pm|message)\s+me\b/i;
   for (const m of fresh) {
-    if (statsRequestIds.has(m.waMessageId)) continue;
-    if (!DM_ME.test(m.body)) continue;
+    if (fastPathHandledIds.has(m.waMessageId)) continue;
     // Interaction contract: "DM me <question>" is an answer MT gives →
     // requires an @Match Time tag. Untagged → ordinary chat, stay silent.
     if (!messageTagsBot(m)) continue;
+    const dmPeel = peelClause(m.body, (c) => DM_ME.test(c));
+    if (!dmPeel) continue;
     const sender = senderById.get(m.waMessageId)!;
     const phone = (sender.phone || m.authorPhone || "").replace(/^\+/, "");
     if (!sender.userId || !phone) continue; // can't DM an unresolved sender
-    statsRequestIds.add(m.waMessageId); // peel off the LLM batch + drop set
     try {
       const result = await answerScopedQuestion({
         userId: sender.userId,
         orgId: org.id,
-        question: m.body,
+        question: dmPeel.consumed,
         askerName: sender.name,
       });
       if (result) {
@@ -664,16 +812,11 @@ async function handleAnalyzeRequest(request: Request) {
     } catch (err) {
       console.error("[analyze] group→DM Q&A failed:", err);
     }
-    await recordAnalysis({
-      orgId: org.id, groupId: body.groupId, msg: m,
-      handledBy: "fast-path", intent: "dm-qa", action: "dm-scoped-answer",
-      confidence: 1, reasoning: "group request to be DM'd — answered privately via scoped Q&A",
-      authorUserId: sender.userId, authorName: m.authorName ?? null,
-    });
-    results.push({
-      waMessageId: m.waMessageId,
+    await claimFastPath(m, dmPeel, {
       handledBy: "fast-path",
       intent: "dm-qa",
+      action: "dm-scoped-answer",
+      reasoning: "group request to be DM'd — answered privately via scoped Q&A",
       react: "📩",
       reply: null,
     });
@@ -702,12 +845,25 @@ async function handleAnalyzeRequest(request: Request) {
   //    picked MoM?" ────────────────────────────────────────────────────
   //   Grounded rating-completion answer (the analyzer's normal context
   //   has no rating data, so the LLM would otherwise guess). Admin-gated.
+  //
+  //   ⚠️ ALSO NOT TAG-GATED, and the WIDEST trigger of the six peels:
+  //   `looksLikeRatingProgressRequest` is (a rating word) AND (a
+  //   progress word), which "I haven't rated yet and I'm out Thursday"
+  //   satisfies without addressing anybody. That message used to be
+  //   peeled whole, answered with SILENCE (the sender is not an admin),
+  //   and the OUT went with it. The tag requirement is a separate axis
+  //   and is deliberately unchanged; the clause peel is what stops the
+  //   silence taking the drop down with it.
+  //
+  //   CLAUSE-PEELED. The answer is loaded from the DATABASE
+  //   (`loadRatingProgress(org.id)`) and never from the body, so which
+  //   clause matched changes nothing about the reply.
   const { looksLikeRatingProgressRequest } = await import("@/lib/rating-progress");
   for (const m of fresh) {
-    if (statsRequestIds.has(m.waMessageId)) continue;
-    if (!looksLikeRatingProgressRequest(m.body)) continue;
+    if (fastPathHandledIds.has(m.waMessageId)) continue;
+    const ratingPeel = peelClause(m.body, looksLikeRatingProgressRequest);
+    if (!ratingPeel) continue;
     const sender = senderById.get(m.waMessageId)!;
-    statsRequestIds.add(m.waMessageId); // peel off the LLM batch regardless
     let isAdmin = false;
     if (sender.userId) {
       const { isOrgAdmin } = await import("@/lib/org");
@@ -715,24 +871,26 @@ async function handleAnalyzeRequest(request: Request) {
     }
     if (!isAdmin) {
       // Non-admins shouldn't see who-hasn't-rated; stay silent (no react).
-      results.push({ waMessageId: m.waMessageId, handledBy: "fast-path", intent: "rating_progress_denied", react: null, reply: null });
-      await recordAnalysis({
-        orgId: org.id, groupId: body.groupId, msg: m,
-        handledBy: "fast-path", intent: "rating_progress_denied", action: null,
-        confidence: 1, reasoning: "non-admin asked rating progress — ignored",
-        authorUserId: sender.userId, authorName: m.authorName ?? null,
+      await claimFastPath(m, ratingPeel, {
+        handledBy: "fast-path",
+        intent: "rating_progress_denied",
+        action: null,
+        reasoning: "non-admin asked rating progress — ignored",
+        react: null,
+        reply: null,
       });
       continue;
     }
     const { loadRatingProgress, formatRatingProgressReply } = await import("@/lib/rating-progress");
     const reply = formatRatingProgressReply(await loadRatingProgress(org.id));
-    await recordAnalysis({
-      orgId: org.id, groupId: body.groupId, msg: m,
-      handledBy: "fast-path", intent: "rating_progress", action: "rating-progress",
-      confidence: 1, reasoning: "admin rating-progress query",
-      authorUserId: sender.userId, authorName: m.authorName ?? null,
+    await claimFastPath(m, ratingPeel, {
+      handledBy: "fast-path",
+      intent: "rating_progress",
+      action: "rating-progress",
+      reasoning: "admin rating-progress query",
+      react: "📋",
+      reply,
     });
-    results.push({ waMessageId: m.waMessageId, handledBy: "fast-path", intent: "rating_progress", react: "📋", reply });
   }
 
   // ── Fast-path: "@Match Time help [topic]" → usage / topic explainer ─
@@ -744,13 +902,25 @@ async function handleAnalyzeRequest(request: Request) {
   //   topic menu + the how-to block. The regex still REQUIRES the help
   //   keyword and stays single-token-anchored (no mid-sentence "help"
   //   triggers), allowing only an optional topic token after it.
+  //
+  //   ── NOT CLAUSE-PEELED, AND THAT IS ARGUED, NOT DEFERRED ──────────
+  //   `HELP_RE` is anchored `^…$` over the WHOLE body and allows only a
+  //   single optional topic token after the keyword. A message it
+  //   matches is STRUCTURALLY incapable of carrying a second clause:
+  //   there is no compound "@Match Time help, and I'm out" that this
+  //   regex accepts, because the comma alone fails the anchor. So this
+  //   peel legitimately owns the whole message and `peelClause` would
+  //   return `{consumed: body, residual: ""}` on every input it sees —
+  //   the same behaviour with an extra call. The one below it, the
+  //   bench-prompt answer, is left terminal for the same kind of reason
+  //   (a whole-message allowlist); see its own header.
   const HELP_RE =
     /^\s*(?:@?\s*match\s*time|@mt|matchtime)?\s*\bhelp\b(?:\s+[\w &]+?)?\s*$/i;
   for (const m of fresh) {
-    if (statsRequestIds.has(m.waMessageId)) continue;
+    if (fastPathHandledIds.has(m.waMessageId)) continue;
     if (!HELP_RE.test(m.body)) continue;
     if (!messageTagsBot(m)) continue;
-    statsRequestIds.add(m.waMessageId); // peel off the LLM batch
+    fastPathHandledIds.add(m.waMessageId); // peel off the LLM batch
     const feats = await getOrgFeatures(org.id);
     const topic = parseHelpTopic(m.body);
     const reply = buildHelpReply(topic, {
@@ -823,7 +993,7 @@ async function handleAnalyzeRequest(request: Request) {
   // This file's worst bug class is a terminal branch that silently
   // deletes every guard beneath it — three incidents in two days. A peel
   // is terminal by construction: it pushes a result and adds the id to
-  // `statsRequestIds`, which the ONE splice below removes from `fresh`.
+  // `fastPathHandledIds`, which the ONE splice below removes from `fresh`.
   // So the message skips EVERYTHING after this point. Enumerated, with
   // why each is covered, subsumed or inapplicable:
   //
@@ -895,21 +1065,27 @@ async function handleAnalyzeRequest(request: Request) {
   //   Order matters and is preserved from the loop: COLOUR first, so
   //   "swap the colours" can never be read as a player swap.
   for (const m of fresh) {
-    if (statsRequestIds.has(m.waMessageId)) continue;
+    if (fastPathHandledIds.has(m.waMessageId)) continue;
     if (!messageTagsBot(m)) continue;
-    const sender = senderById.get(m.waMessageId)!;
-    const colourResult = await handleColorSwapIfApplicable(org.id, m.body);
+    // CLAUSE-PEELED. `looksLikeColourSwapPhrase` is the handler's own
+    // literal-colour detection, lifted out so the clause can be chosen
+    // WITHOUT a database read. It is deliberately the label-free half:
+    // when it finds nothing, the WHOLE body still goes to the handler,
+    // so the custom-team-label branch (which needs the match row to know
+    // what this org calls its sides) is reached exactly as it is today.
+    const colourPeel = peelClause(m.body, looksLikeColourSwapPhrase);
+    const colourResult = await handleColorSwapIfApplicable(
+      org.id,
+      colourPeel?.consumed ?? m.body,
+    );
     if (colourResult) {
-      statsRequestIds.add(m.waMessageId);
-      await recordAnalysis({
-        orgId: org.id, groupId: body.groupId, msg: m,
-        handledBy: "fast-path", intent: "team_colour_swap", action: "colour-swap",
-        confidence: 1, reasoning: colourResult.logReason,
-        authorUserId: sender.userId, authorName: m.authorName ?? null,
-      });
-      results.push({
-        waMessageId: m.waMessageId, handledBy: "fast-path",
-        intent: "team_colour_swap", react: "✅", reply: colourResult.reply,
+      await claimFastPath(m, colourPeel, {
+        handledBy: "fast-path",
+        intent: "team_colour_swap",
+        action: "colour-swap",
+        reasoning: colourResult.logReason,
+        react: "✅",
+        reply: colourResult.reply,
       });
       continue;
     }
@@ -937,19 +1113,29 @@ async function handleAnalyzeRequest(request: Request) {
     // so "no swap needed" (which used to yield `need` + `ed` and was
     // saved only by neither half resolving) now matches nothing at all.
     //
-    // WHAT A MESSAGE IN THAT NEW STATE LOSES BY BEING PEELED: every
-    // OTHER clause in it. A peel is terminal — the id goes into
-    // `statsRequestIds` and the one splice below removes the message
-    // from `fresh` — so "@Match Time swap Elvin with Raihan, and I'm
-    // out" now applies the slot move and drops the sender's own OUT on
-    // the floor. That exposure is NOT new (it is the hazard already
-    // flagged on the colour peel, and the both-CONFIRMED swap has
-    // always carried it); what is new is the set of DB states in which
-    // this peel fires, so the same hazard reaches a few more real
-    // messages. Accepted, because these two peels are the only things
-    // in this file that model a `TeamAssignment` move at all, and a
-    // dropped self-OUT is recoverable in one message where a team sheet
-    // naming a man who has gone home is not.
+    // ✅ FIXED 2026-09-09 — WHAT THAT WIDENING COST, AND WHAT PAID IT.
+    //
+    // The paragraph that stood here said: "a peel is terminal — the id
+    // goes into `fastPathHandledIds` and the one splice below removes
+    // the message from `fresh` — so '@Match Time swap Elvin with
+    // Raihan, and I'm out' now applies the slot move and drops the
+    // sender's own OUT on the floor", and accepted it. That was the
+    // SIXTH instance of this file's worst bug class, and it is the
+    // headline case the clause peel exists for.
+    //
+    // The peel now takes the SWAP CLAUSE. "and I'm out" stays in the
+    // batch, reaches the router and the attendance engine, and the
+    // sender is dropped in the same request that moves the slot. Both
+    // halves land; one message is sent. `e2e/api/clause-peel.spec.ts`
+    // is that sentence, verbatim.
+    //
+    // THE LIMIT, STATED: the splitter refuses to break on a bare "and",
+    // because "swap the reds and yellows" is one request and splitting
+    // it would break the colour peel above. So "swap A with B and I'm
+    // out", with NO comma, is still peeled whole and still loses the
+    // OUT. Half the incident's phrasings, not all of them, and the
+    // reason is written down in `clause-peel.ts` rather than left to be
+    // rediscovered.
     //
     // AND THE ALTERNATIVE IS MEASURED, not assumed: before this change
     // a replacement-shaped swap fell through to the router, reached
@@ -962,18 +1148,24 @@ async function handleAnalyzeRequest(request: Request) {
     // returns null for all five refusal reasons in `team-slot-swap.ts`,
     // so an ambiguous state reaches the router and the owners exactly
     // as it does today, and the peel owns no message it cannot act on.
-    const swapResult = await handleTeamSwapIfApplicable(org.id, m.body);
+    //
+    // AND THE PEEL SELECTS ITS CLAUSE WITH THE HANDLER'S OWN PARSER.
+    // `peelClause` applies `parseSwapNames` to the whole body FIRST and
+    // returns null if it finds nothing — which is precisely when
+    // `handleTeamSwapIfApplicable` would have returned null on its first
+    // line. The two are equivalent, so this owns not one message more
+    // than it did; only the residual is new.
+    const swapPeel = peelClause(m.body, (c) => parseSwapNames(c) !== null);
+    if (!swapPeel) continue;
+    const swapResult = await handleTeamSwapIfApplicable(org.id, swapPeel.consumed);
     if (swapResult) {
-      statsRequestIds.add(m.waMessageId);
-      await recordAnalysis({
-        orgId: org.id, groupId: body.groupId, msg: m,
-        handledBy: "fast-path", intent: "team_swap", action: "team-swap",
-        confidence: 1, reasoning: swapResult.logReason,
-        authorUserId: sender.userId, authorName: m.authorName ?? null,
-      });
-      results.push({
-        waMessageId: m.waMessageId, handledBy: "fast-path",
-        intent: "team_swap", react: "✅", reply: swapResult.reply,
+      await claimFastPath(m, swapPeel, {
+        handledBy: "fast-path",
+        intent: "team_swap",
+        action: "team-swap",
+        reasoning: swapResult.logReason,
+        react: "✅",
+        reply: swapResult.reply,
       });
     }
   }
@@ -1006,6 +1198,15 @@ async function handleAnalyzeRequest(request: Request) {
   //   open-prompt list". Changing it here would be inventing new product
   //   semantics inside a change that is meant to preserve them, so it is
   //   preserved and flagged instead.
+  //
+  //   ── NOT CLAUSE-PEELED, AND THAT IS ARGUED, NOT DEFERRED ──────────
+  //   `readBenchPromptAnswer` is a WHOLE-MESSAGE allowlist, never a
+  //   substring: this section's own header says so, and it is why "yes
+  //   but I can only do the first half" comes back null and falls
+  //   through. A message it accepts is a bare "yes"/"no" and has no
+  //   second clause to lose — `peelClause` would return
+  //   `{consumed: body, residual: ""}` for every input it can see.
+  //   Adding the call would be ceremony, not a guard.
   if (nextMatchForReply) {
     const openPrompts = await db.pendingBenchConfirmation.findMany({
       where: { matchId: nextMatchForReply.id, resolvedAt: null },
@@ -1014,12 +1215,12 @@ async function handleAnalyzeRequest(request: Request) {
     const prompted = new Set(openPrompts.map((p) => p.userId));
     if (prompted.size > 0) {
       for (const m of fresh) {
-        if (statsRequestIds.has(m.waMessageId)) continue;
+        if (fastPathHandledIds.has(m.waMessageId)) continue;
         const sender = senderById.get(m.waMessageId)!;
         if (!sender.userId || !prompted.has(sender.userId)) continue;
         const answer = readBenchPromptAnswer(m.body);
         if (!answer) continue;
-        statsRequestIds.add(m.waMessageId);
+        fastPathHandledIds.add(m.waMessageId);
         // The server posts its own group announcement on a confirm, so
         // the reply here is null in every branch and only the react
         // speaks — byte-identical to `route.ts:3199-3206`.
@@ -1074,7 +1275,7 @@ async function handleAnalyzeRequest(request: Request) {
   //   IT IS NO LONGER TERMINAL (2026-09-07) — AND THAT IS THE FIX
   //   ═════════════════════════════════════════════════════════════════
   //
-  //   It used to do `statsRequestIds.add(m.waMessageId)`, which peels
+  //   It used to do `fastPathHandledIds.add(m.waMessageId)`, which peels
   //   the WHOLE message out of `fresh` before the router runs. So a
   //   message that was BOTH a list and its sender's own drop lost the
   //   drop: Pat writes "can't make it lads, someone take my spot" above
@@ -1135,7 +1336,7 @@ async function handleAnalyzeRequest(request: Request) {
   if (nextMatchForReply) {
     const confirmedNames = nextMatchForReply.attendances.map((a) => a.user.name ?? "");
     for (const m of fresh) {
-      if (statsRequestIds.has(m.waMessageId)) continue;
+      if (fastPathHandledIds.has(m.waMessageId)) continue;
       const sender = senderById.get(m.waMessageId)!;
       const decision = decidePastedRosterRegistration({
         body: m.body,
@@ -1143,7 +1344,7 @@ async function handleAnalyzeRequest(request: Request) {
         senderNames: [sender.name, m.authorName],
       });
       if (decision.kind === "not_a_roster") continue;
-      // NOT `statsRequestIds` — that set is what the splice below reads,
+      // NOT `fastPathHandledIds` — that set is what the splice below reads,
       // and peeling the message is the defect this section's header is
       // about. This one only says "the list has been dealt with".
       pastedRosterIds.add(m.waMessageId);
@@ -1221,11 +1422,20 @@ async function handleAnalyzeRequest(request: Request) {
     }
   }
 
-  // Drop every peeled message from the batch the pipeline sees. ONE
-  // splice for all of them, after the last peel, so a peel added later
-  // cannot leave its message in the batch for an owner to claim as well.
+  // Drop every FULLY peeled message from the batch the pipeline sees.
+  // ONE splice for all of them, after the last peel, so a peel added
+  // later cannot leave its message in the batch for an owner to claim as
+  // well.
+  //
+  // "FULLY" is the 2026-09-09 change and it is the whole mechanism in
+  // one line. A fast path that took a CLAUSE registers a residual, and a
+  // message with a residual is NOT spliced: it stays in `fresh` with the
+  // rest of its body, so the router labels it and the attendance engine
+  // can act on the half nobody claimed. Being handled and being gone
+  // stopped being the same fact.
   for (let i = fresh.length - 1; i >= 0; i--) {
-    if (statsRequestIds.has(fresh[i].waMessageId)) fresh.splice(i, 1);
+    const id = fresh[i].waMessageId;
+    if (fastPathHandledIds.has(id) && !clauseResidualById.has(id)) fresh.splice(i, 1);
   }
 
   const history = (body.history ?? []).map((h) => ({
@@ -1287,7 +1497,12 @@ async function handleAnalyzeRequest(request: Request) {
       ? await gateBatch(
           fresh.map((m) => ({
             waMessageId: m.waMessageId,
-            body: m.body,
+            // `pipelineBody`, not `m.body`: a message a fast path peeled
+            // a clause off is routed on WHAT IS LEFT. Routing the whole
+            // body would label the message by the half that has already
+            // been dealt with — "swap Elvin with Raihan, and I'm out"
+            // routes `balancer`, and the drop is never seen.
+            body: pipelineBody(m),
             authorName: m.authorName,
           })),
           // The ONE thing the router was missing, and the reason PR #42
@@ -1372,11 +1587,17 @@ async function handleAnalyzeRequest(request: Request) {
             const s = senderById.get(m.waMessageId)!;
             return {
               waMessageId: m.waMessageId,
-              body: m.body,
+              // The RESIDUAL for a clause-peeled message. This is the
+              // line that rescues "and I'm out" from a swap message.
+              body: pipelineBody(m),
               authorName: m.authorName,
               senderUserId: s.userId,
               senderName: s.name,
               senderIsAdmin: !!s.userId && engineAdminIds.has(s.userId),
+              // NOT from the residual. The tag is a property of what the
+              // sender WROTE, and peeling the clause that carried
+              // "@Match Time" must not be able to change what the
+              // interaction contract permits — in either direction.
               tagged: messageTagsBot(m),
               route: gateRouteById.get(m.waMessageId),
               gated: gatedIds.has(m.waMessageId),
@@ -1486,8 +1707,20 @@ async function handleAnalyzeRequest(request: Request) {
   // score, or taken as a team instruction. The attendance engine sees it
   // (clamped to the sender's own drop) because that is the whole point
   // of not peeling; the other four do not.
+  //
+  // AND A SECOND EXCLUSION, added 2026-09-09 with the clause peel. A
+  // message a fast path took a clause off is not spliced any more, so a
+  // step-7 owner could see its RESIDUAL — and a residual is a fragment,
+  // torn out of the sentence that gave it meaning. "…and share us the
+  // teams", left over from a swap, must not reach `balancer`; "the
+  // ratings", left over from a stats blast, must not be answered as a
+  // question. The attendance engine sees it (that is the entire point of
+  // not splicing); the other four do not. THE COST, stated: "@Match Time
+  // swap A with B. What time is kickoff?" still answers only the swap.
   const ownerBase = fresh
-    .filter((m) => !pastedRosterIds.has(m.waMessageId))
+    .filter(
+      (m) => !pastedRosterIds.has(m.waMessageId) && !clauseResidualById.has(m.waMessageId),
+    )
     .map((m) => {
       const s = senderById.get(m.waMessageId)!;
       return {
@@ -1962,12 +2195,25 @@ async function handleAnalyzeRequest(request: Request) {
     // after the loop. `composeOperatorNote` drops `none` there; it is
     // NOT dropped here, because the row is what makes the nightly
     // `none`-bucket sweep possible.
-    unowned.push({
-      waMessageId: msg.waMessageId,
-      body: msg.body,
-      authorName: msg.authorName,
-      route: gateRouteById.get(msg.waMessageId),
-    });
+    //
+    // A CLAUSE RESIDUAL IS DELIBERATELY NOT PAGED. This message WAS
+    // handled — a fast path took its clause, and `applyClauseReports`
+    // below merges that outcome into the row and the reply — so putting
+    // "nobody handled this" on the operator DM for the leftover half of
+    // "…and share us the teams" would page a human on every swap. That
+    // is the pasted roster's own argument twenty lines above, unchanged.
+    // It is also NOT a regression: before the clause peel the WHOLE
+    // message was spliced out and no note was raised either. The
+    // `AnalyzedMessage` row is still written, so the nightly sweep can
+    // still see it.
+    if (!clauseResidualById.has(msg.waMessageId)) {
+      unowned.push({
+        waMessageId: msg.waMessageId,
+        body: msg.body,
+        authorName: msg.authorName,
+        route: gateRouteById.get(msg.waMessageId),
+      });
+    }
     await recordAnalysis({
       orgId: org.id,
       groupId: body.groupId,
@@ -2340,6 +2586,58 @@ async function handleAnalyzeRequest(request: Request) {
       console.error("[analyze] verdict-driven recruit failed:", err);
     }
   }
+
+  // ── THE CLAUSE A FAST PATH TOOK, MERGED INTO THE ONE REPLY ─────────
+  //
+  //   The other half of the clause peel. A fast path that owned only
+  //   PART of a message deferred its row and its words here rather than
+  //   pushing a result of its own, because the loop above has already
+  //   pushed one for the residual. Two owners WROTE; exactly one message
+  //   is sent. That is `mergeRecruitReply`'s rule (which now delegates to
+  //   the same `mergeOneReply`) and it is the invariant the whole tail of
+  //   this function protects.
+  //
+  //   ── WHY IT RUNS HERE, LAST, AND NOT WHERE THE LOOP PUSHED ────────
+  //
+  //   Every pass between the loop and this point reasons about the
+  //   OWNER's reply, and none of them should see the fast path's:
+  //
+  //     the react/status audit   Indexes into `results` by position and
+  //                              rewrites a registration react from the
+  //                              final DB row. This merge mutates in
+  //                              place and pushes nothing, so those
+  //                              indices stay valid — but it must not
+  //                              fill a react the audit was about to
+  //                              check, so it runs after.
+  //     the batch's squad post   Attaches `[SQUAD]` to the LAST result
+  //                              already speaking. Unchanged: the choice
+  //                              is made over owner replies exactly as
+  //                              before this change existed.
+  //     the squad COMPOSER       The reason this ordering is not
+  //                              cosmetic. It replaces any `llm` reply
+  //                              that shows squad state with text
+  //                              composed from the database. A swap's
+  //                              team sheet merged in BEFORE that pass
+  //                              would arrive as part of an `llm` reply
+  //                              and be eligible for replacement — the
+  //                              composer would silently eat the very
+  //                              line-up the message asked for. Merging
+  //                              after means the composer only ever sees
+  //                              what the owner said.
+  //     the recruit merge        Same shape, same rule, and it finds its
+  //                              result by id, so order does not matter
+  //                              between the two. A message carrying a
+  //                              peeled clause AND a recruit ask ends
+  //                              with all three sentences in ONE send.
+  //
+  //   The marker strip and the duplicate-result backstop run AFTER this,
+  //   deliberately: a merged reply must still be stripped of `[SQUAD]`,
+  //   and the backstop must still be the last word on "reply once".
+  await applyClauseReports({
+    reports: clauseReports,
+    results,
+    augment: augmentAnalysis,
+  });
 
   // ── The marker is never posted to a group ───────────────────────────
   //   The prompt asks the model to end a squad-state reply with
@@ -2850,6 +3148,17 @@ async function augmentAnalysis(args: {
   waMessageId: string;
   action: string;
   reasoningSuffix: string;
+  /**
+   * RELABEL the row, not just append to it. Passed by
+   * `applyClauseReports` and ONLY when the pipeline recorded nothing for
+   * the message — a `noise`/`ignored` row whose residual reached the end
+   * of the batch unclaimed. Without it the admin log would say a swap
+   * message was `noise` while the team sheet moved, which is exactly the
+   * kind of quiet disagreement between the log and the world that makes
+   * an incident take a day to read. Omitted → the existing label stands.
+   */
+  handledBy?: string;
+  intent?: string;
 }) {
   try {
     const existing = await db.analyzedMessage.findUnique({
@@ -2863,7 +3172,12 @@ async function augmentAnalysis(args: {
       : args.reasoningSuffix;
     await db.analyzedMessage.update({
       where: { waMessageId: args.waMessageId },
-      data: { action: action.slice(0, 2000), reasoning: reasoning.slice(0, 2000) },
+      data: {
+        action: action.slice(0, 2000),
+        reasoning: reasoning.slice(0, 2000),
+        ...(args.handledBy ? { handledBy: args.handledBy } : {}),
+        ...(args.intent ? { intent: args.intent } : {}),
+      },
     });
   } catch (err) {
     console.error("[analyze] augmentAnalysis failed:", err);
@@ -3205,6 +3519,32 @@ async function handleTeamSwapIfApplicable(
  * null when it isn't a colour swap or no teams exist yet — caller falls
  * through to normal handling.
  */
+/**
+ * The LITERAL-colour half of the colour-swap detection: "swap/flip the
+ * colours", "swap red and yellow". No database, no org labels, no
+ * `await` — which is the whole reason it is a function of its own.
+ *
+ * The clause peel needs to choose WHICH clause of a message the colour
+ * swap belongs to, and it must do that before deciding whether to spend
+ * a query at all. Lifted verbatim out of `handleColorSwapIfApplicable`,
+ * which still calls it, so there is one definition and the peel can
+ * never disagree with the handler about what a colour swap looks like.
+ *
+ * It is deliberately NOT the whole test: an org with custom team labels
+ * ("swap the Bibs and the Skins") is recognised only inside the handler,
+ * where the match row says what this org calls its sides. When this
+ * returns false the peel hands the handler the WHOLE body, so that
+ * branch is reached exactly as it was before clause peeling existed.
+ */
+function looksLikeColourSwapPhrase(rawBody: string): boolean {
+  const body = (rawBody || "").trim();
+  return (
+    /\b(swap|switch|flip|reverse|invert|change)\b[\s\S]{0,40}\bcolou?rs?\b/i.test(body) ||
+    /\bcolou?rs?\b[\s\S]{0,40}\b(swap|switch|flip|reverse|invert|change)\b/i.test(body) ||
+    /\bswap\b[\s\S]{0,25}\b(red|yellow|reds|yellows)\b[\s\S]{0,25}\b(red|yellow|reds|yellows)\b/i.test(body)
+  );
+}
+
 async function handleColorSwapIfApplicable(
   orgId: string,
   rawBody: string,
@@ -3214,10 +3554,7 @@ async function handleColorSwapIfApplicable(
   // Fast path: "swap/flip the colours" or "swap red and yellow" need no DB
   // lookup — the literal colour words / "colours" keyword are enough.
   const hasSwapVerb = /\b(swap|switch|flip|reverse|invert|change)\b/i.test(body);
-  let isColourSwap =
-    /\b(swap|switch|flip|reverse|invert|change)\b[\s\S]{0,40}\bcolou?rs?\b/i.test(body) ||
-    /\bcolou?rs?\b[\s\S]{0,40}\b(swap|switch|flip|reverse|invert|change)\b/i.test(body) ||
-    /\bswap\b[\s\S]{0,25}\b(red|yellow|reds|yellows)\b[\s\S]{0,25}\b(red|yellow|reds|yellows)\b/i.test(body);
+  let isColourSwap = looksLikeColourSwapPhrase(body);
 
   // Cheap pre-gate before touching the DB: only orgs with a swap verb in
   // the message can possibly be a "swap <labelA> and <labelB>" — anything
