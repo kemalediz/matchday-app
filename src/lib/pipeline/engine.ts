@@ -157,6 +157,30 @@ export function decide(input: EngineInput): EngineResult {
   const degradations: Degradation[] = [];
   /** Did anything change the squad? Drives the single status post. */
   let squadChanged = false;
+  /**
+   * Did a row move for somebody who did NOT type the message that moved
+   * it?
+   *
+   * The ✅ / 🪑 / 👋 react is the acknowledgement for an attendance
+   * write, and it lands on the SENDER's message. `reactFor(status, self)`
+   * gives a status emoji only when the sender's own row moved, and a
+   * plain 👍 otherwise. So a player benched, dropped or added by someone
+   * ELSE'S message has no react of their own: 👍 tells the person who
+   * asked that it is done, and tells the person it happened to nothing
+   * at all.
+   *
+   * `queueSlotEmojiRefresh` does retro-react their last IN message with
+   * 🪑 on a CONFIRMED→BENCH demote, which is real but is not enough to
+   * rest on: it only covers that one transition, it needs an
+   * `AnalyzedMessage` with `intent: "in"` on this match to exist, it is
+   * asynchronous, and it rides the same WhatsApp reaction layer that
+   * silently placed nothing at all for days in the 2026-08-31 incident.
+   *
+   * So this is the one squad change that still says something unprompted.
+   * See the speech assembly at the bottom of `decide` for the full list
+   * of what does NOT, and why each is already covered.
+   */
+  let movedSomeoneElsesRow = false;
   /** Question speech that the squad post would subsume (§3.2 S36). */
   const deferredSquadQuestions: SpeechIntent[] = [];
 
@@ -891,6 +915,11 @@ export function decide(input: EngineInput): EngineResult {
         }
         emit(write);
         squadChanged = true;
+        // `self` is the SAME condition `reactFor` reads one line down, so
+        // the two cannot disagree about who was told: a status react on
+        // the sender's message, or the batch's roster post for a row that
+        // moved without one. See `movedSomeoneElsesRow`'s declaration.
+        if (!self) movedSomeoneElsesRow = true;
         out.react = out.react ?? reactFor(write.status, self);
 
         // A player who was DROPPED and is back closes the offer that
@@ -1683,14 +1712,83 @@ export function decide(input: EngineInput): EngineResult {
   });
 
   // ── Speech assembly (§3.2 S36 · one authoritative post per batch) ────
-  if (squadChanged) {
+  //
+  // ═══════════════════════════════════════════════════════════════════
+  // THE ROSTER POST IS DEMAND-DRIVEN, NOT CHANGE-DRIVEN (2026-09-09)
+  // ═══════════════════════════════════════════════════════════════════
+  //
+  // WHAT STOOD HERE: `if (squadChanged) speech.push({ kind:
+  // "squad_status" })`. ANY batch that moved a row posted the whole
+  // fourteen-line roster. S36 de-duplicated those posts WITHIN a batch
+  // and nothing limited them ACROSS batches, so on the morning of
+  // 2026-09-09 three INs landing in two flushes gave the live Sutton FC
+  // group two full roster posts on top of the ✅ each message already
+  // got. Kemal: "for every IN, MT is responding with the squad. I think
+  // that is overmessaging. Only a tick is enough to confirm the
+  // attendance is taken and a 5pm update about the squad is what we
+  // agreed."
+  //
+  // He is describing the contract this file already claims to follow:
+  // MatchTime is conservative about SPEAKING, and
+  // `whatsapp-bot/src/react-fallback.ts` states the mechanism in the
+  // opposite direction — the react "is why the bot does not reply in
+  // words to every 'in' (twenty text confirmations in an evening would
+  // be intolerable in a customer's group)". A batch post per squad
+  // change was that reply, wearing a roster.
+  //
+  // WHAT SURVIVES, AND WHY EVERYTHING ELSE DOES NOT. Every occasion
+  // worth an unprompted post was checked against the path that already
+  // covers it, rather than assumed:
+  //
+  //   • SQUAD BECOMES FULL → `registerAttendance` calls
+  //     `announceSquadFullIfJustFilled` on every confirm
+  //     (`attendance.ts:380`), which posts "✅ *Squad complete — N/N*"
+  //     with the line-up and the bench, deduped on
+  //     `<matchId>:squad-locked` and re-armed on a confirmed drop
+  //     (`attendance.ts:462`). `bot-scheduler.ts`'s 17:00 block already
+  //     relies on it in these words: "the squad-just-filled announcement
+  //     is fired by the analyze route at the moment the 14th IN lands,
+  //     which is enough confirmation."
+  //   • A SLOT OPENS ON A FULL SQUAD → `bench_offer_open`, emitted 700
+  //     lines up and composed as "A slot just opened 🎟 …, first to say
+  //     IN takes it." With an empty bench there is no offer, and then
+  //     `need > 0` puts the 17:00 chase back on.
+  //   • A FORMAT SWITCH → never reaches this engine at all. It is an
+  //     admin PORTAL action (`app/actions/matches.ts:157`) that queues
+  //     its own "🔁 *Match switched*" post carrying the roster.
+  //   • A PASTED ROSTER → acked by `route.ts`'s `SQUAD_POST_MARKER`,
+  //     which is independent of this branch.
+  //
+  // TWO SURVIVE, both because nothing else covers them:
+  //
+  //   • SOMEBODY ASKED — `deferredSquadQuestions`, the `squad` and
+  //     `count` topics. One post answers all of them (S36) instead of
+  //     several separately-composed ones.
+  //   • A ROW MOVED FOR SOMEBODY WHO DID NOT SPEAK —
+  //     `movedSomeoneElsesRow`. The react is the ack for an attendance
+  //     write and it lands on the sender's message, so a player benched
+  //     or dropped by an admin's message is otherwise never told. Read
+  //     that flag's declaration for why the retro-react is not enough to
+  //     rest on.
+  //
+  // ⚠️ NEITHER ARM RETURNS OR CONTINUES. This is the last statement
+  // before `assertCoverage`, both arms fall into it, and there is no
+  // guard between them and it. (The terminal-short-circuit class — six
+  // incidents in this repo where a branch silently deleted what sat
+  // below it — is the reason that sentence is written down rather than
+  // left to a reading.)
+  if (squadChanged && (deferredSquadQuestions.length > 0 || movedSomeoneElsesRow)) {
+    // Somebody ASKED about the squad, or a row moved with no react to
+    // carry it, in a batch that also changed the squad. ONE post,
+    // composed from the projected state, covers both and answers every
+    // deferred question. Four contradictory posts in one batch is the
+    // 2026-06-12 Sutton Lads incident, and it is what S36 exists to stop.
     speech.push({ kind: "squad_status", messageId: null });
-    for (const q of deferredSquadQuestions) {
-      // The count question is answered BY that post. Four contradictory
-      // posts in one batch is the 2026-06-12 Sutton Lads incident.
-      void q;
-    }
   } else {
+    // Either nothing here needs saying — and then this pushes NOTHING,
+    // which is the whole change: the ✅ on each message is the
+    // acknowledgement — or the squad did not move, and each question is
+    // answered on its own message exactly as before.
     speech.push(...deferredSquadQuestions);
   }
 

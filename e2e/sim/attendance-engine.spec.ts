@@ -659,7 +659,19 @@ const LIVE = process.env.MT_SIM_LIVE_LLM === "1";
     expect(res.results[0].reply ?? "").not.toMatch(/already full|no open spots/i);
   });
 
-  test("one reply per message, and one squad post per batch", async ({ request, db }) => {
+  test("three INs in one batch: three ✅ and NOTHING said (2026-09-09)", async ({ request, db }) => {
+    // WAS: "one reply per message, and one squad post per batch", which
+    // asserted exactly one speaker carrying "3/". It did that, and on the
+    // live group it did it for EVERY batch containing an "in" — Kemal,
+    // 2026-09-09: "for every IN, MT is responding with the squad. I think
+    // that is overmessaging. Only a tick is enough to confirm the
+    // attendance is taken and a 5pm update about the squad is what we
+    // agreed."
+    //
+    // The half of the old assertion that mattered survives below: one
+    // outcome per message, three distinct ids, no `[SQUAD]` marker
+    // leaking into a group message. What changed is the count of
+    // speakers, from one to none.
     const g = await createGroup(request, db, { attendance: [] });
     engineOn({
       in: { route: "self_att", facts: IN() },
@@ -674,13 +686,16 @@ const LIVE = process.env.MT_SIM_LIVE_LLM === "1";
     ]);
 
     expect(res.results).toHaveLength(3);
-    const spoke = res.results.filter((r) => (r.reply ?? "").length > 0);
-    expect(spoke).toHaveLength(1);
-    // Composed from the DATABASE after the writes landed, not from the
-    // engine's projection and not from anyone's memory.
-    expect(spoke[0].reply).toContain("3/");
-    expect(spoke[0].reply).not.toContain("[SQUAD]");
+    expect(res.results.filter((r) => (r.reply ?? "").length > 0)).toHaveLength(0);
+    // The players ARE told — by the tick on each of their own messages,
+    // which is the acknowledgement the roster post was doubling.
+    expect(res.results.map((r) => r.react)).toEqual(["✅", "✅", "✅"]);
+    for (const r of res.results) expect(r.reply ?? "").not.toContain("[SQUAD]");
+    // …and nothing was queued as a group post instead.
+    expect(res.groupPosts).toEqual([]);
     expect(new Set(res.results.map((r) => r.waMessageId)).size).toBe(3);
+    // The writes all landed, whatever the bot did or did not say.
+    expect((await g.counts()).confirmed).toBe(3);
   });
 
   test("the banter-drop guard survives: a wind-up does not drop a protesting player", async ({
@@ -877,13 +892,30 @@ const LIVE = process.env.MT_SIM_LIVE_LLM === "1";
     // `SquadState` snapshot and "Yes, you're 2/14" beside somebody's own
     // "in" is a claim about a squad that no longer exists.
     //
-    // So the batch has one speaker by design, and this test now asserts
-    // BOTH halves: the single post still carries the batch-final roster
-    // read from the database (the original point), and the question is
-    // declined rather than answered from stale state (the stronger
-    // guarantee that replaced "both deciders, one post"). The step-7
-    // route is turned ON via `engineRoutes` so the decline is a real
-    // decision by a live owner and not the flag being off.
+    // ── UPDATED 2026-09-09 — WHO the one speaker is has changed ──────
+    //
+    // It used to be the attendance engine's unprompted roster post, and
+    // the question was DECLINED. Both halves moved:
+    //
+    //   • The engine no longer posts the roster for a plain "in"
+    //     (`engine.ts`'s speech assembly — Kemal: "for every IN, MT is
+    //     responding with the squad. I think that is overmessaging").
+    //   • Which is exactly why `answer-batch.ts` had to stop declining
+    //     the question. The roster post was answering it BY ACCIDENT;
+    //     with the post gone, the decline would have turned a tagged
+    //     "how many are we now?" into silence.
+    //
+    // The old decline rested on "composed from a pre-write snapshot",
+    // which is false for attendance traffic: `route.ts` awaits the
+    // attendance owner and its writes at `:1360`, and the answer owner
+    // loads its own state at `:1512`.
+    //
+    // So the batch still has ONE speaker, still carrying the batch-final
+    // roster read from the database. It is now felix's message rather
+    // than a batch-level post — which is also better, because the answer
+    // is attached to the question. The step-7 route is turned ON via
+    // `engineRoutes` so this is a real decision by a live owner and not
+    // the flag being off.
     const g = await createGroup(request, db, { attendance: [] });
     setRouterStub({
       floor: false,
@@ -913,13 +945,17 @@ const LIVE = process.env.MT_SIM_LIVE_LLM === "1";
     const spoke = res.results.filter((r) => (r.reply ?? "").length > 0);
     expect(spoke).toHaveLength(1);
     expect(res.groupPosts).toEqual([]);
-    // The one send carries the roster, composed from the database.
+    // The one send carries the roster, composed from the database AFTER
+    // the two INs landed — 2/, never the 0/ the pre-batch state had.
     expect(spoke[0].reply).toContain("2/");
     expect(spoke[0].reply).not.toContain("[SQUAD]");
-    // …and it is NOT the question's answer. A batch that writes must not
-    // also answer from the pre-write snapshot.
-    expect(spoke[0].waMessageId).not.toBe(res.results[2].waMessageId);
-    expect(res.results[2].reply).toBeNull();
+    // …and it IS the question's answer, on the question's own message.
+    expect(spoke[0].waMessageId).toBe(res.results[2].waMessageId);
+    // The two INs said nothing at all; their ✅ is the acknowledgement.
+    expect(res.results[0].reply).toBeNull();
+    expect(res.results[1].reply).toBeNull();
+    expect(res.results[0].react).toBe("✅");
+    expect(res.results[1].react).toBe("✅");
     // Both writes landed.
     expect(await g.attendanceOf("pete")).toMatchObject({ status: "CONFIRMED" });
     expect(await g.attendanceOf("dan")).toMatchObject({ status: "CONFIRMED" });

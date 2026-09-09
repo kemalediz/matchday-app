@@ -1058,6 +1058,254 @@ describe("S36 · one authoritative squad post per batch", () => {
   });
 });
 
+// ── S36b · the roster post is DEMAND-driven ────────────────────────────
+
+describe("S36b · a routine attendance change gets the react and nothing else (2026-09-09)", () => {
+  // Kemal, on the live Sutton FC group: "for every IN, MT is responding
+  // with the squad. I think that is overmessaging. Only a tick is enough
+  // to confirm the attendance is taken and a 5pm update about the squad
+  // is what we agreed."
+  //
+  // The batch-level roster post used to ride on `squadChanged`, so ANY
+  // batch that moved a row posted the whole fourteen-line squad. Three
+  // INs across two batches on the morning of 2026-09-09 produced two
+  // full roster posts on top of the ✅ each message already gets.
+  const SQUAD_Q = {
+    kind: "question",
+    topic: "squad",
+    personRef: null,
+    statedCount: null,
+  } as const;
+  const COUNT_Q = {
+    kind: "question",
+    topic: "count",
+    personRef: null,
+    statedCount: null,
+  } as const;
+
+  it("one IN on a short squad: a ✅ and NO roster post", () => {
+    const state = world({ confirmed: ["kemal", "elvin", "sait"] });
+    const r = decide({
+      now: NOW,
+      state,
+      messages: [
+        msg({ from: "usama", body: "in", route: "self_att", facts: attendanceFacts([claim({})]) }),
+      ],
+    });
+    expect(statusOf(r.nextState, "usama")).toBe("CONFIRMED");
+    // The react IS the acknowledgement. §9's failure to avoid is
+    // "message understood, action silently not taken", and a tick is not
+    // silence — see `whatsapp-bot/src/react-fallback.ts` for what happens
+    // when the WhatsApp layer cannot place one.
+    expect(r.outcomes[0].react).toBe("✅");
+    expect(r.speech).toHaveLength(0);
+  });
+
+  it("three INs in one batch: three ✅, still no roster post", () => {
+    const state = world({ confirmed: ["kemal", "elvin", "sait"] });
+    const r = decide({
+      now: NOW,
+      state,
+      messages: [
+        msg({ from: "usama", body: "in", route: "self_att", facts: attendanceFacts([claim({})]) }),
+        msg({ from: "karahan", body: "in", route: "self_att", facts: attendanceFacts([claim({})]) }),
+        msg({ from: "zair", body: "im in", route: "self_att", facts: attendanceFacts([claim({})]) }),
+      ],
+    });
+    expect(confirmedCount(r.nextState)).toBe(6);
+    expect(r.outcomes.map((o) => o.react)).toEqual(["✅", "✅", "✅"]);
+    expect(r.speech.filter((s) => s.kind === "squad_status")).toHaveLength(0);
+  });
+
+  it("the IN that FILLS the squad posts nothing either — `squad-announce.ts` owns that", () => {
+    // `registerAttendance` calls `announceSquadFullIfJustFilled` on every
+    // confirm (`attendance.ts:380`), which posts "✅ *Squad complete —
+    // 14/14*" with the full line-up, deduped on `<matchId>:squad-locked`
+    // and re-armed on a confirmed drop. An engine post here would be a
+    // SECOND roster one line away from it.
+    const state = world({ confirmed: FULL_14.slice(0, 13) });
+    const r = decide({
+      now: NOW,
+      state,
+      messages: [
+        msg({ from: "habib", body: "in", route: "self_att", facts: attendanceFacts([claim({})]) }),
+      ],
+    });
+    expect(confirmedCount(r.nextState)).toBe(14);
+    expect(r.outcomes[0].react).toBe("✅");
+    expect(r.speech.filter((s) => s.kind === "squad_status")).toHaveLength(0);
+  });
+
+  it("a drop from a full squad speaks the BENCH OFFER, not the roster", () => {
+    const state = world({ confirmed: [...FULL_14], bench: ["habib"] });
+    const r = decide({
+      now: NOW,
+      state,
+      messages: [
+        msg({
+          from: "zair",
+          body: "sorry lads, can't make it",
+          route: "self_att",
+          facts: attendanceFacts([claim({ polarity: "out" })]),
+        }),
+      ],
+    });
+    expect(statusOf(r.nextState, "zair")).toBe("DROPPED");
+    expect(r.speech.map((s) => s.kind)).toEqual(["bench_offer_open"]);
+  });
+
+  it("\"who's in?\" is still answered with the roster", () => {
+    const state = world({ confirmed: ["kemal", "elvin", "sait"] });
+    const r = decide({
+      now: NOW,
+      state,
+      messages: [
+        msg({
+          from: "adam",
+          body: "@Match Time who's in?",
+          route: "question",
+          tagged: true,
+          facts: SQUAD_Q,
+        }),
+      ],
+    });
+    expect(r.speech.map((s) => s.kind)).toEqual(["answer_squad"]);
+  });
+
+  it("a count question in the SAME batch as an IN is still answered", () => {
+    // The subtle half. `deferredSquadQuestions` rode on `squadChanged`:
+    // the question was answered BY the roster post. Take the post away
+    // unconditionally and the question gets nothing at all — §9's
+    // signature failure, arrived at from the other direction.
+    const state = world({ confirmed: ["kemal", "elvin", "sait"] });
+    const r = decide({
+      now: NOW,
+      state,
+      messages: [
+        msg({ from: "usama", body: "in", route: "self_att", facts: attendanceFacts([claim({})]) }),
+        msg({
+          from: "zair",
+          body: "@Match Time how many are we now?",
+          route: "question",
+          tagged: true,
+          facts: COUNT_Q,
+        }),
+      ],
+    });
+    // Answered ONCE, by the single authoritative post (S36) — not by a
+    // second, separately-composed sentence beside it.
+    expect(r.speech.filter((s) => s.kind === "squad_status")).toHaveLength(1);
+    expect(r.speech.filter((s) => s.kind === "answer_count")).toHaveLength(0);
+  });
+
+  it("an admin BENCHING somebody else DOES post the roster — that player has no react", () => {
+    // The other survivor. `reactFor(status, self)` gives the sender a
+    // plain 👍 when the row that moved was not theirs, so a 🪑 never
+    // reaches Pete's side of the conversation: the 👍 tells the admin it
+    // is done and tells Pete nothing. `queueSlotEmojiRefresh` retro-
+    // reacts his last IN, which is real but is one transition, is
+    // asynchronous, and rides the reaction layer that placed nothing at
+    // all for days in the 2026-08-31 incident.
+    const state = world({ confirmed: [...FULL_14] });
+    const r = decide({
+      now: NOW,
+      state,
+      messages: [
+        msg({
+          from: "kemal",
+          body: "@Match Time move Zair to the bench please",
+          route: "other_att",
+          tagged: true,
+          facts: attendanceFacts([
+            claim({ subject: "other", personRef: "Zair", personNamed: true, polarity: "bench" }),
+          ]),
+        }),
+      ],
+    });
+    expect(statusOf(r.nextState, "zair")).toBe("BENCH");
+    expect(r.outcomes[0].react).toBe("👍");
+    expect(r.speech.filter((s) => s.kind === "squad_status")).toHaveLength(1);
+  });
+
+  it("an admin dropping somebody else posts it too, beside the bench offer", () => {
+    const state = world({ confirmed: [...FULL_14], bench: ["habib"] });
+    const r = decide({
+      now: NOW,
+      state,
+      messages: [
+        msg({
+          from: "kemal",
+          body: "@Match Time Zair is out tonight",
+          route: "other_att",
+          tagged: true,
+          facts: attendanceFacts([
+            claim({ subject: "other", personRef: "Zair", personNamed: true, polarity: "out" }),
+          ]),
+        }),
+      ],
+    });
+    expect(statusOf(r.nextState, "zair")).toBe("DROPPED");
+    expect(r.speech.map((s) => s.kind)).toEqual(["bench_offer_open", "squad_status"]);
+  });
+
+  it("a SELF drop in the same batch as a third-party move posts ONCE, not twice", () => {
+    // Both survivors and a deferred question at the same time still make
+    // exactly one post. That is S36, and it is the invariant this whole
+    // block is a narrowing of rather than a replacement for.
+    const state = world({ confirmed: [...FULL_14] });
+    const r = decide({
+      now: NOW,
+      state,
+      messages: [
+        msg({
+          from: "wasim",
+          body: "out sorry lads",
+          route: "self_att",
+          facts: attendanceFacts([claim({ polarity: "out" })]),
+        }),
+        msg({
+          from: "kemal",
+          body: "@Match Time Zair is out too",
+          route: "other_att",
+          tagged: true,
+          facts: attendanceFacts([
+            claim({ subject: "other", personRef: "Zair", personNamed: true, polarity: "out" }),
+          ]),
+        }),
+        msg({
+          from: "adam",
+          body: "@Match Time how many are we now?",
+          route: "question",
+          tagged: true,
+          facts: COUNT_Q,
+        }),
+      ],
+    });
+    expect(r.speech.filter((s) => s.kind === "squad_status")).toHaveLength(1);
+    expect(r.speech.filter((s) => s.kind === "answer_count")).toHaveLength(0);
+  });
+
+  it("a roster question in the SAME batch as an IN is still answered", () => {
+    const state = world({ confirmed: ["kemal", "elvin", "sait"] });
+    const r = decide({
+      now: NOW,
+      state,
+      messages: [
+        msg({ from: "usama", body: "in", route: "self_att", facts: attendanceFacts([claim({})]) }),
+        msg({
+          from: "adam",
+          body: "@Match Time list the players",
+          route: "question",
+          tagged: true,
+          facts: SQUAD_Q,
+        }),
+      ],
+    });
+    expect(r.speech.filter((s) => s.kind === "squad_status")).toHaveLength(1);
+    expect(r.speech.filter((s) => s.kind === "answer_squad")).toHaveLength(0);
+  });
+});
+
 // ── S37 · the confidence floor ─────────────────────────────────────────
 
 describe("S37 · the confidence floor is per fact, not per verdict", () => {
@@ -2995,9 +3243,12 @@ describe("2026-09-08 · an admin's untagged [OUT + BENCH] (David / Mojib)", () =
   it("SPEECH: MatchTime says what it did NOT do", () => {
     // §9: "message understood, action silently not taken" is this
     // product's signature failure, and a partially-applied instruction
-    // the owner does not know was partial is exactly that. The sentence
-    // rides a turn MatchTime is already taking (the drop landed, so the
-    // squad post goes out anyway), so it costs no extra message.
+    // the owner does not know was partial is exactly that.
+    //
+    // The sentence rides a turn MatchTime is already taking (David's
+    // drop landed, and it was an ADMIN moving somebody else's row, which
+    // is one of the two things that still posts the roster — S36b), so
+    // it costs no extra message.
     const r = decide({
       now: NOW,
       state: squad(),
