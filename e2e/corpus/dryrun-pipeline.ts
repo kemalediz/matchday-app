@@ -368,6 +368,10 @@ export async function loadStateViaSql(grp: SimGroup): Promise<SquadState> {
         }
       : null,
     appearances: appearances.map((a) => ({ userId: a.userId, matches: Number(a.matches) })),
+    // The window the query above uses. Same 30 days as
+    // `load-state.ts`'s `LOOKBACK_DAYS`; carried so the stats answer
+    // names what it counted rather than implying "all time".
+    appearanceWindowDays: 30,
     lastBotPost: null,
     features: {
       attendance: org?.featureAttendance ?? true,

@@ -446,6 +446,25 @@ export interface SquadState {
   /** Appearances per user across completed matches, for stats answers
    *  that today cost a whole extra LLM call. */
   appearances: Array<{ userId: string; matches: number }>;
+  /**
+   * How many days back `appearances` was counted over.
+   *
+   * CARRIED RATHER THAN ASSUMED, because the composer has to SAY it. The
+   * loader's window is 30 days (`load-state.ts`'s `LOOKBACK_DAYS`) and
+   * the question people actually ask is "who's been most consistent this
+   * SEASON?" — measured live on 2026-09-09, where the answer was three
+   * players tied on two appearances each. Counting a month and calling
+   * it a season is a quiet wrong answer, and the fix is to name the
+   * window in the sentence.
+   *
+   * It is a FIELD and not a constant in `compose.ts` because that module
+   * cannot import `load-state.ts` (Prisma; see its header), so the only
+   * two ways to print the number are to carry it or to duplicate it. A
+   * duplicated window would drift the day the loader's changes, and the
+   * drift would be invisible: a correct-looking sentence about the wrong
+   * month.
+   */
+  appearanceWindowDays: number;
   /** MatchTime's own most recent post in the group, verbatim. A known
    *  object, not a guess: it is how a bare "Confirmed" resolves. */
   lastBotPost: string | null;

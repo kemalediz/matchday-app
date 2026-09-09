@@ -230,6 +230,9 @@ export async function loadSquadState(
       userId,
       matches: matchesPlayed,
     })),
+    // The window the line above was counted over, carried so the stats
+    // answer can name it rather than imply "all time". See the field.
+    appearanceWindowDays: LOOKBACK_DAYS,
     lastBotPost: lastBotJob?.text ?? null,
     features: {
       attendance: features.attendance,

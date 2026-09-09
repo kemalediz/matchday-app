@@ -520,9 +520,37 @@ const QUESTION_CASES: QuestionCase[] = [
   { id: "Q19", who: "Amir", body: "@Match Time is Zair in?", expect: "ANSWERED", wants: /Zair/, why: "person_status, resolvable" },
   { id: "Q20", who: "Amir", body: "@Match Time is my mate down for tuesday", expect: "HANDED BACK", why: "person_status that cannot resolve to one member" },
   { id: "Q21", who: "Amir", body: "@Match Time anyone in the squad without a number?", expect: "ANSWERED", why: "phones" },
-  { id: "Q22", who: "Amir", body: "@Match Time who's been most consistent this season?", expect: "HANDED BACK", why: "stats — the composed leaderboard trips displaysSquadState (2026-05-14)" },
-  { id: "Q23", who: "Amir", body: "@Match Time we're short, what are our options?", expect: "HANDED BACK", why: "options — the lead carries a count and would be replaced by the roster" },
+  { id: "Q22", who: "Amir", body: "@Match Time who's been most consistent this season?", expect: "ANSWERED", wants: /—\s\d+\smatch/, why: "stats — the leaderboard row shape must survive displaysSquadState (2026-05-14)" },
+  { id: "Q23", who: "Amir", body: "@Match Time we're short, what are our options?", expect: "ANSWERED", wants: /\bof \d+\b/, why: "options — the lead spells the count out so rule (c) cannot fire" },
   { id: "Q24", who: "Elvin", body: "@Match Time show me the teams", expect: "ANSWERED", why: "balancer/show — a real post if teams exist, the shipped 'no teams generated yet' if not" },
+
+  // ── THE RESULT OF THE LAST MATCH (topic `score`) ──────────────────
+  //
+  // Q3 ("whats the score situation") is the AMBIGUOUS one and it stays
+  // where it is, expecting a count. These four settle what the
+  // UNAMBIGUOUS phrasings do, so Q3's reading can be measured against
+  // something rather than asserted.
+  { id: "Q25", who: "Zair", body: "@Match Time what was the score last week", expect: "ANSWERED", why: "score — unambiguously the RESULT" },
+  { id: "Q26", who: "Zair", body: "@Match Time did we win on tuesday?", expect: "ANSWERED", why: "score — the result, phrased as a yes/no" },
+  { id: "Q27", who: "Ali", body: "@Match Time what was the final score", expect: "ANSWERED", why: "score — the result" },
+  { id: "Q28", who: "Ali", body: "@Match Time how did we get on last night", expect: "ANSWERED", why: "score — the result, phrased the way the group phrases it" },
+
+  // ── WHO HAS NOT PAID (topic `payments`) ───────────────────────────
+  { id: "Q29", who: "Elvin", body: "@Match Time who hasn't paid", expect: "ANSWERED", why: "payments — the question that started this, from the money collector" },
+  { id: "Q30", who: "Ali", body: "@Match Time has everyone paid for last week", expect: "ANSWERED", why: "payments — the same question from an ordinary member" },
+  { id: "Q31", who: "Zair", body: "@Match Time how many still owe for tuesday", expect: "ANSWERED", why: "payments — asked as a number rather than as names" },
+  { id: "Q32", who: "Elvin", body: "@Match Time any payments outstanding?", expect: "ANSWERED", why: "payments — the collector's phrasing" },
+
+  // ── NEGATIVE CONTROLS ─────────────────────────────────────────────
+  //
+  // Two questions that must NOT be answered from payment data, and one
+  // that must not be answered at all. Q34 is the sharp one: it carries
+  // the word "pay" and asks something MatchTime cannot answer from
+  // `Attendance.paidAt` — the FEE is a number no field in `SquadState`
+  // holds. A payments answer here would be a confident non sequitur.
+  { id: "Q33", who: "Ali", body: "@Match Time who's in for tuesday", expect: "ANSWERED", wants: /Playing:/, why: "NEGATIVE CONTROL — a roster question phrased near payment vocabulary must stay a roster question" },
+  { id: "Q34", who: "Ali", body: "@Match Time how much do we pay each", expect: "HANDED BACK", why: "NEGATIVE CONTROL — the FEE, which is not in SquadState. Naming who has not paid would be answering a different question" },
+  { id: "Q35", who: "Amir", body: "@Match Time is my mate down for tuesday", expect: "HANDED BACK", why: "TIER 4 CONTROL — an unresolvable person_status. Nothing can answer it; the hand-back is correct and must survive this change" },
 ];
 
 /**

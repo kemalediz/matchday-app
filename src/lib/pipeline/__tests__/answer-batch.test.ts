@@ -300,16 +300,18 @@ describe("shapes that stay with the analyzer", () => {
 describe("a shape the composer cannot answer well is answered by nobody", () => {
   it.each([
     ["other", { topic: "other", personRef: "", statedCount: -1 }],
-    ["stats", { topic: "stats", personRef: "", statedCount: -1 }],
-    ["options", { topic: "options", personRef: "", statedCount: -1 }],
   ])("question topic %s", async (_topic, facts) => {
     // This describe block was titled "…goes to the analyzer" and
     // asserted /analyzer/i, which was true until §10 step 8 deleted
-    // `analyzeBatch` and the 19,850-token `SYSTEM_PROMPT`. These three
-    // topics are now answered by NOBODY: silence in the group plus one
-    // line on the operator DM. The refusal is still right (see
-    // `ANSWERABLE_TOPICS`'s essay on the composed-format traps), and the
-    // degradation is now the only signal, so it is what gets asserted.
+    // `analyzeBatch` and the 19,850-token `SYSTEM_PROMPT`. `other` is
+    // now answered by NOBODY: silence in the group plus one line on the
+    // operator DM.
+    //
+    // `stats` and `options` USED TO BE IN THIS LIST. They were removed
+    // when their composed FORMAT was fixed — the refusal was never about
+    // the answers, which have been correct since the day they were
+    // written, but about `composeSquadStateReply` replacing them with
+    // the squad roster on the way out. See section 6 below.
     const body = "@Match Time what do you reckon?";
     const { model } = stubModel({ [body]: facts });
     const res = await run({ messages: [msg({ body, route: "question" })], model });
@@ -319,8 +321,8 @@ describe("a shape the composer cannot answer well is answered by nobody", () => 
     expect(res.degradations.join(" ")).not.toMatch(/analyzer/i);
   });
 
-  it("owns the six topics answered from the database", async () => {
-    for (const topic of ["count", "bench", "phones", "squad", "fixture"]) {
+  it("owns the topics answered from the database", async () => {
+    for (const topic of ["count", "bench", "phones", "squad", "fixture", "stats", "options"]) {
       const body = `@Match Time ${topic}?`;
       const { model } = stubModel({ [body]: { topic, personRef: "", statedCount: -1 } });
       const res = await run({ messages: [msg({ body, route: "question" })], model });
@@ -923,9 +925,9 @@ describe("zero writes, structurally", () => {
   });
 });
 
-// ── 6. Why `stats` and `options` are NOT owned — measured, not asserted ──
+// ── 6. Why `stats` and `options` ARE owned now — measured, not asserted ──
 
-describe("the measured reason three topics stay with the analyzer", () => {
+describe("the format fix that let the last two built answers speak", () => {
   /**
    * The strings under test are produced by the REAL composer, not typed
    * out here. A hand-written approximation would keep passing after
@@ -958,33 +960,65 @@ describe("the measured reason three topics stay with the analyzer", () => {
     ],
   });
 
-  it("the composed STATS answer would be replaced by the squad post — the 2026-05-14 incident", () => {
-    // `compose.ts`'s `answer_stats` renders "1. Kemal Ediz (24)" lines.
-    // `isLeaderboardLine` (`group-copy.ts:129`) recognises a leaderboard
-    // by an em dash, a percentage, "wins/votes/matches" or an "N/M ("
-    // pattern — and that shape has none of them. So `displaysSquadState`
-    // sees a numbered run of 2+ lines and says yes, and once this path
-    // is wired into the analyze route the step-4 composer would swap a
-    // "most consistent" answer for the upcoming-squad roster. That is
-    // the exact incident §3.2 S16 cites for 2026-05-14.
+  it("the composed STATS answer reads as a LEADERBOARD, not as squad state (2026-05-14)", () => {
+    // THE FIX, AND WHAT IT REPLACED. `compose.ts`'s `answer_stats` used
+    // to render "1. Kemal Ediz (24)" lines. `isLeaderboardLine`
+    // (`group-copy.ts:129`) recognises a leaderboard by an em dash, a
+    // percentage, "wins/votes/matches" or an "N/M (" pattern, and that
+    // shape carried NONE of them — so `displaysSquadState` saw a
+    // numbered run of 2+ lines and said yes, and `route.ts:2480` would
+    // have swapped a "most consistent" answer for the upcoming-squad
+    // roster. That is the exact incident §3.2 S16 cites for 2026-05-14,
+    // and it is why the topic was refused rather than answered.
+    //
+    // The answer now uses the house leaderboard format
+    // (`match-history.ts:336`), which carries both an em dash and the
+    // word "matches". The refusal could then be dropped. This test is
+    // the reason it can be: it fails the day the format regresses.
     const text = say({ kind: "answer_stats", messageId: "wa-1" }, APPEARANCES);
     expect(text).toContain("Kemal Ediz");
-    expect(displaysSquadState(text)).toBe(true);
+    expect(text).toMatch(/1\. Kemal Ediz — 24 matches/);
+    expect(text).toContain("last 30 days");
+    expect(displaysSquadState(text)).toBe(false);
   });
 
-  it("the composed OPTIONS answer would be replaced by the squad post, losing the format-switch line", () => {
-    // The lead carries "8/14" and "need", which is rule (c) of
+  it("the composed OPTIONS answer carries no N/M, so nothing replaces it", () => {
+    // The lead used to read "We're 8/14, need 6 more 🙏" — an "N/M"
+    // beside squad vocabulary, which is rule (c) of
     // `displaysSquadState`. `composeSquadStateReply` keeps a lead only
-    // when the model asked for a squad post AND the lead makes no claim
-    // of its own, so this whole answer — including the arithmetic
-    // `format-switch.ts` computed — is dropped, not appended to.
+    // when it makes no claim of its own, so the WHOLE answer — including
+    // the arithmetic `format-switch.ts` computed — was dropped rather
+    // than appended to.
+    //
+    // The count is now spelled out ("8 of 14") instead of fractioned.
+    // Same fact, same words to a human, invisible to rule (c).
     const state = world({
       confirmed: ELEVEN.slice(0, 8),
       smallerFormats: [{ sportName: "5-a-side", totalPlayers: 10 }],
     });
     const text = say({ kind: "answer_options", messageId: "wa-1" }, state);
-    expect(text).toContain("8/14");
-    expect(displaysSquadState(text)).toBe(true);
+    expect(text).toContain("8 of 14");
+    expect(text).not.toMatch(/\d+\/\d+/);
+    expect(displaysSquadState(text)).toBe(false);
+  });
+
+  it("the OPTIONS answer still names exactly who a switch would bench, from the format TOTAL", () => {
+    // The 2026-08-30 incident, from the other side: the model computed
+    // 8 − 5 (players per TEAM) instead of 8 − 10 (the format TOTAL) and
+    // named three real people as losing their place when a switch would
+    // have benched nobody. `benchedOnFormatSwitch` takes the total, so
+    // twelve confirmed dropping to a ten-player format benches the LAST
+    // TWO by position and nobody else.
+    const state = world({
+      confirmed: ELEVEN.concat(["wasim"]),
+      smallerFormats: [{ sportName: "5-a-side", totalPlayers: 10 }],
+    });
+    const text = say({ kind: "answer_options", messageId: "wa-1" }, state);
+    expect(text).toContain(fullName("amir"));
+    expect(text).toContain(fullName("wasim"));
+    // …and NOT the eight who keep their place.
+    expect(text).not.toContain(fullName("kemal"));
+    expect(displaysSquadState(text)).toBe(false);
   });
 
   it("the composed BENCH, PHONES and PERSON answers survive untouched", () => {

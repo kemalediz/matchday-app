@@ -114,6 +114,7 @@ export interface WorldOpts {
    *  accepts three statuses, a payment credit accepts one) says so. */
   completedMatch?: Partial<NonNullable<SquadState["completedMatch"]>> & { id: string };
   appearances?: SquadState["appearances"];
+  appearanceWindowDays?: number;
   features?: Partial<SquadState["features"]>;
   smallerFormats?: SquadState["smallerFormats"];
   guestAskedUserIds?: string[];
@@ -153,6 +154,7 @@ export function world(opts: WorldOpts = {}): SquadState {
         }
       : null,
     appearances: opts.appearances ?? [],
+    appearanceWindowDays: opts.appearanceWindowDays ?? 30,
     lastBotPost: opts.lastBotPost ?? null,
     features: {
       attendance: true,

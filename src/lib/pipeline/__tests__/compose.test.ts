@@ -238,6 +238,98 @@ describe("questions are answered from state, not from the model", () => {
     expect(text).not.toMatch(/(Najib|Mojib|Mustafa)[^.\n]{0,60}\bbench\b/);
     expect(text).not.toMatch(/\bgo(?:es)? on the bench\b/);
   });
+
+  // ── THE TWO ANSWERS THAT WERE BUILT AND THEN REFUSED ───────────────
+  //
+  // `answer_stats` and `answer_options` were composed correctly and
+  // never allowed to speak, because `route.ts:2480` runs
+  // `composeSquadStateReply` over every step-7 reply (they are pushed
+  // into `results` with `handledBy: "llm"`, `route.ts:2126`) and both
+  // shapes tripped `displaysSquadState`. A tripped reply is REPLACED by
+  // the upcoming-squad roster — the 2026-05-14 incident where "top 3
+  // most consistent" came back as the squad list.
+  //
+  // So the fix is in the FORMAT, and this is where it is pinned: these
+  // two must be invisible to that composer, in the two states that
+  // matter (a real answer, and the empty-data answer).
+  it("the composed STATS answer is not mistaken for squad state (2026-05-14)", () => {
+    const state = world({
+      confirmed: TEN.slice(0, 6),
+      appearances: [
+        { userId: "u-kemal", matches: 9 },
+        { userId: "u-elvin", matches: 7 },
+        { userId: "u-sait", matches: 2 },
+      ],
+    });
+    const { out } = composeFor(state, [
+      msg({
+        from: "shaz",
+        body: "@Match Time who's been the most consistent?",
+        route: "question",
+        tagged: true,
+        facts: { kind: "question", topic: "stats", personRef: null, statedCount: null },
+      }),
+    ]);
+    const text = out.utterances[0].text;
+    expect(text).toContain("Kemal");
+    expect(displaysSquadState(text)).toBe(false);
+  });
+
+  it("the STATS answer with no appearances yet is not mistaken for squad state", () => {
+    const state = world({ confirmed: TEN.slice(0, 6), appearances: [] });
+    const { out } = composeFor(state, [
+      msg({
+        from: "shaz",
+        body: "@Match Time who's been the most consistent?",
+        route: "question",
+        tagged: true,
+        facts: { kind: "question", topic: "stats", personRef: null, statedCount: null },
+      }),
+    ]);
+    expect(displaysSquadState(out.utterances[0].text)).toBe(false);
+  });
+
+  it("the composed OPTIONS answer is not mistaken for squad state", () => {
+    // TEN confirmed, not eight: `buildFormatSwitchFacts` only proposes a
+    // switch the squad would actually FILL, so eight players produce the
+    // "no smaller format would be filled" answer and never exercise the
+    // arithmetic. Ten fills a 10-player 5-a-side and benches nobody —
+    // which is the 2026-08-30 incident's own numbers, read the right way
+    // round.
+    const state = world({
+      confirmed: TEN,
+      smallerFormats: [{ sportName: "Football 5-a-side", totalPlayers: 10 }],
+    });
+    const { out } = composeFor(state, [
+      msg({
+        from: "kemal",
+        body: "@Match Time we're only 8, what are our options?",
+        route: "question",
+        tagged: true,
+        facts: { kind: "question", topic: "options", personRef: null, statedCount: null },
+      }),
+    ]);
+    const text = out.utterances[0].text;
+    // The arithmetic still has to be THERE — the point of the answer is
+    // that eight players fill a ten-player format and nobody is benched.
+    expect(text).toMatch(/5-a-side/);
+    expect(text).toContain("nobody goes on the bench");
+    expect(displaysSquadState(text)).toBe(false);
+  });
+
+  it("the OPTIONS answer with no smaller format configured is not mistaken for squad state", () => {
+    const state = world({ confirmed: TEN.slice(0, 8), smallerFormats: [] });
+    const { out } = composeFor(state, [
+      msg({
+        from: "kemal",
+        body: "@Match Time we're short, what are our options?",
+        route: "question",
+        tagged: true,
+        facts: { kind: "question", topic: "options", personRef: null, statedCount: null },
+      }),
+    ]);
+    expect(displaysSquadState(out.utterances[0].text)).toBe(false);
+  });
 });
 
 describe("the guest name ask", () => {

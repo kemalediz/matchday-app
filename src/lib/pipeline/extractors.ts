@@ -135,7 +135,7 @@ Report nothing (an empty claims array) only when the message genuinely makes no 
                "person_status" whether a specific named person is playing
                "phones" who has a phone number on record
                "fixture" the match itself: whether it is on, what time it kicks off, where it is played ("what time is kickoff?", "where are we playing?", "are we playing tuesday?", "is the game still on?", "same place as usual?")
-               "stats" form, appearances, most consistent, man of the match
+               "stats" how OFTEN someone plays, or how they rate, ACROSS matches — appearances, form over a run of games, most consistent, man of the match. Never the RESULT of a single match: "did we win?" and "what was the score?" are not stats.
                "options" what to do about being short (smaller format, alternatives)
                "other" anything else
   personRef    the person the question is about, verbatim, or "" when it names nobody
