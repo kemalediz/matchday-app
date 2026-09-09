@@ -190,12 +190,42 @@ describe("the engine owns the three routes and writes through the shipped apply"
     expect(r.outcomes.get("wa-1")).toMatchObject({ intent: "in", action: "IN" });
   });
 
-  it("puts a squad post on the message that acted, once", async () => {
+  it("puts NO squad post on a batch that only changed the squad (2026-09-09)", async () => {
+    // WAS: "puts a squad post on the message that acted, once". It did,
+    // and that was the bug — on the LIVE path this runner is the only
+    // thing that ever composed one, so every batch containing an "in"
+    // posted the whole roster. Kemal, watching it happen on Sutton FC:
+    // "for every IN, MT is responding with the squad. I think that is
+    // overmessaging. Only a tick is enough to confirm the attendance is
+    // taken and a 5pm update about the squad is what we agreed."
+    //
+    // `squadPostForMessageId` is the marker the analyze route expands
+    // into the roster (`route.ts:2132`). Null means nothing is expanded,
+    // so the group gets the reacts and nothing else. The mechanism is
+    // NOT deleted: it still fires when a squad question shares the batch
+    // (`pipeline/__tests__/engine.test.ts`'s S36b block), which on this
+    // path cannot happen because a `question` message reaches `decide()`
+    // here with `facts: {kind:"none"}`.
     const d = deps();
-    const r = await run([msg({ waMessageId: "a" }), msg({ waMessageId: "b" })], d);
-    expect(r.squadPostForMessageId).not.toBeNull();
-    // ONE, not two.
-    expect([r.squadPostForMessageId].filter(Boolean)).toHaveLength(1);
+    const r = await run(
+      [
+        msg({ waMessageId: "a" }),
+        msg({
+          waMessageId: "b",
+          senderUserId: "u-dan",
+          senderName: "Dan Drummer",
+          authorName: "Dan Drummer",
+        }),
+      ],
+      d,
+    );
+    expect(r.squadPostForMessageId).toBeNull();
+    // Both writes still landed, and both players were still told.
+    expect(d.registered).toEqual(["u-pete", "u-dan"]);
+    expect(r.outcomes.get("a")?.react).toBe("✅");
+    expect(r.outcomes.get("b")?.react).toBe("✅");
+    expect(r.outcomes.get("a")?.reply).toBeNull();
+    expect(r.outcomes.get("b")?.reply).toBeNull();
   });
 
   it("gives every owned message an outcome, even one that wrote nothing", async () => {

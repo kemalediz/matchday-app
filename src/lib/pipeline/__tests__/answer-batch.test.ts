@@ -398,16 +398,56 @@ describe("a shape the composer cannot answer well is answered by nobody", () => 
     expect([...res.ownedIds]).toEqual([]);
   });
 
-  it("hands back a count question when the batch may also change the squad", async () => {
-    // §3.2 S36 — one authoritative squad post per batch. Two batch
-    // runners each calling `decide()` cannot enforce that between them,
-    // so the count question goes to the analyzer, where the shipped
-    // squad-status collapse already owns the problem.
+  it.each([
+    ["count", COUNT_Q, COUNT_FACTS],
+    ["squad", "@Match Time who's playing?", { topic: "squad", personRef: "", statedCount: -1 }],
+  ])(
+    "STILL ANSWERS a %s question when the rest of the batch is attendance (2026-09-09)",
+    async (_topic, body, facts) => {
+      // WAS: "hands back a count question when the batch may also change
+      // the squad", on two premises. One is dead and one is now
+      // satisfied:
+      //
+      //   • "an answer here is composed from a PRE-WRITE snapshot" —
+      //     FALSE for attendance traffic. `route.ts` awaits
+      //     `runAttendanceEngineBatch` (:1360), writes and all, BEFORE it
+      //     calls `runAnswerBatch` (:1512), and this module does its own
+      //     `loadSquadState`. The snapshot is post-write.
+      //   • "two batch runners each calling `decide()` cannot enforce
+      //     S36 between them" — they no longer have to. The attendance
+      //     engine stopped composing an unprompted batch-level roster
+      //     post (`engine.ts`'s speech assembly, 2026-09-09), so there is
+      //     nothing here to collide with.
+      //
+      // And it MUST answer, because the roster post used to answer this
+      // question by accident. Take the post away and leave the hand-back
+      // in place and a tagged "how many are we?" beside somebody's "in"
+      // gets silence — §9's signature failure.
+      const { model } = stubModel({ [body as string]: facts });
+      const res = await run({
+        messages: [
+          msg({ body: body as string, route: "question" }),
+          msg({ body: "I'm in", route: "self_att", waMessageId: "wa-in" }),
+        ],
+        model,
+      });
+      expect([...res.ownedIds]).toHaveLength(1);
+      const reply = [...res.outcomes.values()][0].reply!;
+      expect(displaysSquadState(reply)).toBe(true);
+    },
+  );
+
+  it("hands a count question back when the batch carries a route that writes LATER", async () => {
+    // The carve-out above is not "attendance is fine, so everything is".
+    // It is sequencing: the attendance owner has already written by the
+    // time this module loads its state. `score` and `admin_ops` run
+    // AFTER it (`route.ts:1528`, `:1540`), so their traffic keeps the
+    // original hand-back.
     const { model, calls } = stubModel({ [COUNT_Q]: COUNT_FACTS });
     const res = await run({
       messages: [
         msg({ body: COUNT_Q, route: "question" }),
-        msg({ body: "I'm in", route: "self_att", waMessageId: "wa-in" }),
+        msg({ body: "we won 5-3", route: "score", waMessageId: "wa-score" }),
       ],
       model,
     });
@@ -415,8 +455,8 @@ describe("a shape the composer cannot answer well is answered by nobody", () => 
     expect(res.degradations.join(" ")).toMatch(/does not own|S36|snapshot/i);
     // The topic is only knowable after extraction, so this carve-out
     // costs one extractor call (~$0.002) on a batch that also carried
-    // attendance. §11.1's asymmetry, priced: a false positive costs one
-    // small call; the alternative costs the group a contradiction.
+    // something else. §11.1's asymmetry, priced: a false positive costs
+    // one small call; the alternative costs the group a contradiction.
     expect(calls).toHaveLength(1);
   });
 
@@ -427,14 +467,22 @@ describe("a shape the composer cannot answer well is answered by nobody", () => 
   ])(
     "hands back a %s question too when the batch may also change the squad",
     async (_topic, facts) => {
-      // The carve-out is NOT only about the squad post. Every answer here
-      // is composed from the state loaded at the top of the batch, and
-      // this module runs BEFORE `analyzeBatch` and before
-      // `executeVerdict`. "Yes, Zair has a slot for Tue 21:30" beside
-      // Zair's own "sorry lads can't make it" is a claim about a squad
-      // that no longer exists — and `composeSquadStateReply` cannot
-      // catch it, because it recognises squad POSTS and the
-      // `MOVE_CLAIM_PATTERNS` phrasings, and that sentence is neither.
+      // THESE THREE ARE UNCHANGED BY THE 2026-09-09 CARVE-OUT, AND THAT
+      // IS A CHOICE RATHER THAN AN OVERSIGHT.
+      //
+      // The roster post that vanished had been answering exactly two
+      // topics by accident — `squad` and `count`, the two `engine.ts`
+      // defers into it. Restoring an answer for those is a repair.
+      // `bench`, `person_status` and `phones` never got one from it: a
+      // batch with an "in" and "who's on the bench?" has always ended in
+      // a roster post that does not answer the question asked. Widening
+      // the carve-out to them would ADD replies MatchTime does not make
+      // today, on a change whose whole point is to make it quieter, so
+      // it is left for a separate decision with its own evidence.
+      //
+      // What is NOT the reason any more: "composed from a PRE-WRITE
+      // snapshot". `route.ts` awaits the attendance owner and its writes
+      // before this module loads its state.
       const body = "@Match Time question?";
       const { model } = stubModel({ [body]: facts });
       const res = await run({

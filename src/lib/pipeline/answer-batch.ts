@@ -358,6 +358,70 @@ function batchCarriesAnythingElse(messages: AnswerBatchMessage[]): boolean {
 }
 
 /**
+ * The routes whose owner has ALREADY WRITTEN by the time this module
+ * loads its state.
+ *
+ * `route.ts` awaits `runAttendanceEngineBatch` — extraction, `decide()`,
+ * `applyEngineWrites`, all of it — at `:1360`, and only then calls
+ * `runAnswerBatch` at `:1512`, which does its own `loadSquadState`. So
+ * for these four routes the snapshot this module answers from is the
+ * POST-write one. They are the only routes in the system that can move
+ * an attendance row from a group message.
+ *
+ * Kept as a list rather than reusing `ENGINE_ROUTES` from `gate.ts`: the
+ * property that matters here is the ORDERING in `route.ts`, not
+ * ownership, and a future owner could share the routes without sharing
+ * the sequence. If that ordering ever changes, this constant is what has
+ * to change with it — and `__tests__/answer-batch.test.ts` pins both
+ * directions.
+ */
+const ROUTES_THAT_WRITE_BEFORE_THIS_STEP: ReadonlyArray<Route> = [
+  "self_att",
+  "other_att",
+  "offer",
+  "unsure",
+];
+
+/**
+ * The narrower question: could another message in this batch change the
+ * squad AFTER this answer is composed?
+ *
+ * `batchCarriesAnythingElse` asks whether anything else is in the batch
+ * at all. This asks whether anything else is in the batch whose WRITES
+ * HAVE NOT LANDED YET — `score` and `admin_ops` run after this module
+ * (`route.ts:1528`, `:1540`), an ungated `none` has no owner, and an id
+ * the router never mentioned is a coverage hole rather than a decision.
+ * All of those still block. Attendance does not.
+ */
+function batchCarriesAnUnsettledWriter(messages: AnswerBatchMessage[]): boolean {
+  return messages.some(
+    (m) =>
+      !m.gated &&
+      m.route !== "question" &&
+      m.route !== "balancer" &&
+      !(m.route !== undefined && ROUTES_THAT_WRITE_BEFORE_THIS_STEP.includes(m.route)),
+  );
+}
+
+/**
+ * The two topics the attendance engine used to answer BY ACCIDENT.
+ *
+ * Until 2026-09-09 `engine.ts` posted the whole roster on any batch that
+ * moved a row, so a tagged "how many are we?" or "who's playing?" beside
+ * an "I'm in" was answered — not by this module, which handed it back,
+ * but by a post that happened to contain the count and the names. That
+ * post is gone (it was overmessaging: one per IN), and with it the
+ * accident. These two topics are carved out of the hand-back so the
+ * questions keep their answer; every other topic keeps the behaviour it
+ * has today, which for a mixed batch is silence plus an operator note.
+ *
+ * These are exactly the topics `engine.ts` defers into `squad_status`
+ * (`deferredSquadQuestions`). The two lists are one decision and must
+ * not drift apart.
+ */
+const SQUAD_SHAPED_TOPICS: ReadonlySet<string> = new Set(["squad", "count"]);
+
+/**
  * Prefix on every degradation this module reports.
  *
  * ⚠️ LOG-ONLY TODAY, and saying so matters: step 6's equivalent
@@ -596,10 +660,16 @@ export async function runAnswerBatch(args: {
 
   // See `batchCarriesAnythingElse`. Two batch runners each calling
   // `decide()` cannot enforce §3.2 S36's single squad post between
-  // them, and — the sharper half — an answer composed here is composed
-  // from a PRE-WRITE snapshot, so a question answered beside an
-  // attendance change is a claim about a squad that no longer exists.
+  // them, and — the sharper half — an answer composed here may be
+  // composed from a PRE-WRITE snapshot, so a question answered beside a
+  // squad change is a claim about a squad that no longer exists.
   const otherTraffic = batchCarriesAnythingElse(messages);
+  // …and the narrower one, for the two SQUAD-SHAPED topics only. Both
+  // halves above are settled for attendance traffic: its writes have
+  // landed before this module loads its state, and since 2026-09-09
+  // `engine.ts` composes no unprompted squad post for them to collide
+  // with. See `batchCarriesAnUnsettledWriter` and `SQUAD_SHAPED_TOPICS`.
+  const unsettledTraffic = batchCarriesAnUnsettledWriter(messages);
 
   const eligible = candidates.filter((m) => {
     if (m.route === "balancer" && !features.teamBalancing) {
@@ -726,13 +796,33 @@ export async function runAnswerBatch(args: {
         hand(`question topic "${facts.topic}" is not answered from the database`);
         continue;
       }
-      if (otherTraffic) {
-        // EVERY topic, not just the squad-shaped ones. An answer here is
-        // composed from a pre-write snapshot, and "Yes, Idris has a slot
-        // for Tue 21:30" beside Idris's own "sorry lads can't make it"
-        // is a claim about a squad that no longer exists — invisible to
-        // `composeSquadStateReply`, which only recognises squad POSTS
-        // and the `MOVE_CLAIM_PATTERNS` phrasings.
+      // ── THE MIXED-BATCH HAND-BACK, AND ITS ONE CARVE-OUT ──────────
+      //
+      // For every topic but two: an answer here is composed from a
+      // snapshot that another owner's writes may land after, and "Yes,
+      // Idris has a slot for Tue 21:30" beside Idris's own "sorry lads
+      // can't make it" is a claim about a squad that no longer exists —
+      // invisible to `composeSquadStateReply`, which only recognises
+      // squad POSTS and the `MOVE_CLAIM_PATTERNS` phrasings.
+      //
+      // For `squad` and `count`, the same test is applied to a smaller
+      // set of neighbours: attendance traffic is EXCLUDED because its
+      // writes have already landed (`route.ts` awaits the attendance
+      // owner at `:1360`, this module runs at `:1512` and loads its own
+      // state) and because `engine.ts` no longer composes an unprompted
+      // roster post to collide with. That post is what used to answer
+      // these two questions in a mixed batch — by accident, at the price
+      // of one roster per IN — and removing it without this carve-out
+      // would turn a tagged "how many are we?" into silence, which is
+      // §9's signature failure wearing the other hat.
+      //
+      // ⚠️ TERMINAL BRANCH. The `continue` skips the `person_status`
+      // resolution guard below and `ownedIds.add`, which is the whole
+      // intent: an unowned message is answered by nobody. It skips no
+      // write, no send and no state mutation — there are none in this
+      // loop (see the `continue`s note above it) — and the reason is
+      // already on `degradations` before it runs.
+      if (SQUAD_SHAPED_TOPICS.has(facts.topic) ? unsettledTraffic : otherTraffic) {
         hand(
           `the batch also carries messages this step does not own, which may change the ` +
             `squad after this answer is composed (S36, and the pre-write snapshot)`,

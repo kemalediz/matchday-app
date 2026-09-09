@@ -95,7 +95,14 @@ test.describe("a bench alongside open slots is impossible", () => {
     // from the write the engine actually made — so this is now an
     // assertion about the composer rather than about a patcher.
     expect((r.reply ?? "").toLowerCase()).not.toContain("bench");
-    expect(r.reply).toContain("11/14");
+    // It used to end `expect(r.reply).toContain("11/14")`, because a
+    // self IN posted the whole roster. Since 2026-09-09 it does not
+    // (S36b — the tick is the acknowledgement), so Ryan gets his ✅ and
+    // the group gets no post at all. The 🪑-that-never-happened is now
+    // asserted as SILENCE rather than as a roster that says 11/14, which
+    // is the stronger form of the same claim.
+    expect(r.reply ?? "").toBe("");
+    for (const t of r.groupPosts) expect(t.toLowerCase()).not.toContain("bench");
   });
 
   test("standing offer on a FULL squad still goes to the bench (unchanged)", async ({

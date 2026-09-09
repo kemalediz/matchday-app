@@ -26,6 +26,19 @@ function composeFor(state: SquadState, messages: Parameters<typeof decide>[0]["m
 
 const TEN = ["kemal", "elvin", "sait", "mustafa", "abid", "idris", "faris", "shaz", "adam", "efat"];
 
+/** A tagged "who's playing?", which is what MAKES the batch-level roster
+ *  post since 2026-09-09 (S36b). The post is demand-driven now: an
+ *  attendance change on its own produces the ✅ and nothing else, so a
+ *  test about the post's CONTENT has to ask for it. */
+const rosterAsk = (from: string) =>
+  msg({
+    from,
+    body: "@Match Time who's playing?",
+    route: "question",
+    tagged: true,
+    facts: { kind: "question", topic: "squad", personRef: null, statedCount: null },
+  });
+
 describe("the squad post is read out of the projected state", () => {
   it("states the count AFTER the write, never the one before (2026-04-26, Wasim, ef8d801)", () => {
     const state = world({ confirmed: [...TEN, "usama", "karahan", "zair", "wasim"] });
@@ -36,6 +49,7 @@ describe("the squad post is read out of the projected state", () => {
         route: "self_att",
         facts: attendanceFacts([claim({ polarity: "out" })]),
       }),
+      rosterAsk("adam"),
     ]);
     const text = out.utterances.map((u) => u.text).join("\n");
     expect(text).toContain("13/14");
@@ -56,6 +70,7 @@ describe("the squad post is read out of the projected state", () => {
         state: withBench,
         messages: [
           msg({ from: "amir", body: "in", route: "self_att", facts: attendanceFacts([claim({})]) }),
+          rosterAsk("adam"),
         ],
       }),
     );
@@ -68,10 +83,25 @@ describe("the squad post is read out of the projected state", () => {
         state: noBench,
         messages: [
           msg({ from: "amir", body: "in", route: "self_att", facts: attendanceFacts([claim({})]) }),
+          rosterAsk("adam"),
         ],
       }),
     );
     expect(b.utterances.map((u) => u.text).join()).not.toMatch(/Bench \(/);
+  });
+
+  it("says NOTHING at all for a batch that only changed the squad (2026-09-09)", () => {
+    // The other half of the property above, and the reason this file
+    // needed `rosterAsk`. Kemal, on the live group: "for every IN, MT is
+    // responding with the squad. I think that is overmessaging. Only a
+    // tick is enough."
+    const { out } = composeFor(world({ confirmed: TEN }), [
+      msg({ from: "usama", body: "in", route: "self_att", facts: attendanceFacts([claim({})]) }),
+      msg({ from: "karahan", body: "in", route: "self_att", facts: attendanceFacts([claim({})]) }),
+    ]);
+    expect(out.utterances).toEqual([]);
+    // …and the players are still told, by the ✅ each message gets.
+    expect(out.reacts.map((r) => r.emoji)).toEqual(["✅", "✅"]);
   });
 
   it("says exactly one thing for a batch of three squad messages (§3.2 S36)", () => {
@@ -490,7 +520,9 @@ describe("a partially applied instruction says which half did not happen", () =>
     const { out } = incident();
     const refusal = out.utterances.find((u) => u.text.includes("left alone"))!;
     expect(refusal.text).not.toContain("David");
-    // …and the squad post, which carries what DID happen, is still sent.
+    // …and the squad post, which carries what DID happen, is still sent:
+    // Kemal moved DAVID's row, not his own, so there is no react on
+    // David's side of it and the roster is what tells him (S36b).
     expect(out.utterances.some((u) => u.text.includes("/14"))).toBe(true);
   });
 
