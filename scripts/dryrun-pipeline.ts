@@ -92,6 +92,9 @@
  * graded, CI-runnable version of this idea is `e2e/corpus/`.)
  * ═══════════════════════════════════════════════════════════════════════
  */
+import { peelClause } from "../src/lib/pipeline/clause-peel.ts";
+import { parseSwapNames } from "../src/lib/team-slot-swap.ts";
+import { looksLikeRatingProgressRequest } from "../src/lib/rating-progress.ts";
 import { loadSquadState } from "../src/lib/pipeline/load-state.ts";
 import { runPipeline } from "../src/lib/pipeline/run.ts";
 import { runAnswerBatch } from "../src/lib/pipeline/answer-batch.ts";
@@ -144,6 +147,21 @@ type Case = {
    *  2026-09-07, and a gate this harness cannot exercise is a gate
    *  nobody checks. */
   alreadyAskedForGuestName?: boolean;
+  /**
+   * RUN THE CLAUSE PEEL FIRST, exactly as `api/whatsapp/analyze/route.ts`
+   * does, and hand the PIPELINE the residual.
+   *
+   * The peel itself is deterministic — `lib/pipeline/clause-peel.ts` is
+   * pure and its unit tests settle the split. What is NOT deterministic,
+   * and what this harness exists to measure, is whether the live router
+   * and the live extractor then read the residual the way the fix
+   * assumes: "and I'm out", torn off a swap instruction, has to route
+   * `self_att` and extract a self-drop over 15 runs, not 13 of them.
+   *
+   * The predicate is the fast path's OWN whole-body test, passed here so
+   * the harness cannot drift from the route's choice of clause.
+   */
+  peel?: (clause: string) => boolean;
   expect: string;
 };
 
@@ -214,6 +232,46 @@ const CASES: Case[] = [
   { id: "K1", who: "Kemal", body: "Najib is out. We need one more player. Can someone pls come forward", fullSquad: true, expect: "THE ACTUAL 1 SEPT INCIDENT. Admin + recruit => addressedByRecruit. Expect DROP Najib, NEVER 'squad is already full'" },
   { id: "K2", who: "Kemal", body: "Najib is out", fullSquad: true, expect: "admin, NO recruit clause => still untagged third-party OUT. Documented behaviour is silence" },
   { id: "K3", who: "Kemal", body: "@Match Time Najib is out", tagged: true, fullSquad: true, expect: "tagged third-party OUT => DROP Najib" },
+
+  // ── Y: THE CLAUSE PEEL — incident #6 and its control ──────────────
+  //
+  // "@Match Time swap Elvin with Raihan, and I'm out" applied the swap
+  // and lost the sender's OUT, because the swap fast path peeled the
+  // WHOLE message off the pipeline. The peel now takes the SWAP CLAUSE
+  // and the rest carries on. `clause-peel.ts` settles the SPLIT (it is
+  // pure and unit-tested); these cases settle whether the live router
+  // and extractor read what is LEFT the way the fix assumes.
+  //
+  // Y1 vs Y2 is the whole change in two rows: the same sentence, the
+  // only difference being whether the peel ran.
+  // Y4 pins the STATED LIMIT — no comma, no split, no residual — so the
+  // half of the fix that was deliberately not taken is measured rather
+  // than assumed.
+  { id: "Y1", who: "Kemal", body: "@Match Time swap Elvin with Raihan, and I'm out", tagged: true, confirm: ["Kemal"], peel: (c) => parseSwapNames(c) !== null, expect: "THE FIX. The residual is \"I'm out\" -> route self_att -> DROP Kemal, every run" },
+  // Y2 IS THE CONTROL, and what it measures is NOT "before the change"
+  // — the route peels this message whole today, so the pipeline never
+  // sees it at all. It measures the OTHER option that was on the table:
+  // stop peeling and hand the WHOLE body down. MEASURED 2026-09-09,
+  // 15/15: `other_att`, "DROPPED Kemal | CONFIRMED Raihan — slot 3 of
+  // 14". It drops the sender correctly AND invents a registration for a
+  // man named only as the target of a slot move. Y1, the same sentence
+  // with the swap clause peeled off, is 15/15 "DROPPED Kemal" and
+  // nothing else. That difference is the argument for peeling the
+  // CLAUSE rather than either peeling the message or peeling nothing.
+  { id: "Y2", who: "Kemal", body: "@Match Time swap Elvin with Raihan, and I'm out", tagged: true, confirm: ["Kemal"], expect: "THE CONTROL — the WHOLE body down the pipeline, the alternative to clause peeling. Expect the drop PLUS a phantom CONFIRMED Raihan read off the swap instruction" },
+  { id: "Y3", who: "Kemal", body: "@Match Time who hasn't rated yet? Also I'm out", tagged: true, confirm: ["Kemal"], peel: looksLikeRatingProgressRequest, expect: "the rating-progress peel. Residual \"I'm out\" -> DROP Kemal" },
+  // ⚠️ Y4 IS THE ONE CASE WHOSE HARNESS OUTPUT IS NOT WHAT PRODUCTION
+  // DOES, and it is listed anyway because the difference is the point.
+  // This harness has no `fresh` and therefore no SPLICE: when the peel
+  // yields no residual it runs the pipeline on the whole body, whereas
+  // the route removes the message from the batch entirely and the
+  // pipeline never sees it. So Y4 prints what the pipeline WOULD have
+  // said if the swap peel had not owned the message — and what it says
+  // is itself the argument for the peel: it reads "swap Elvin with
+  // Raihan" as a REGISTRATION and confirms a man called Raihan into the
+  // squad. In production the swap peel owns this message, moves the
+  // slot, and the sender's OUT is lost. That is the limit, stated.
+  { id: "Y4", who: "Kemal", body: "@Match Time swap Elvin with Raihan and I'm out", tagged: true, confirm: ["Kemal"], peel: (c) => parseSwapNames(c) !== null, expect: "THE STATED LIMIT. No comma => a bare 'and' is not a boundary (or 'swap the reds and yellows' breaks) => NO residual. Read the `peel :` line, not the writes: in the route this message is spliced out and the pipeline never runs at all" },
 
   // ── P: the availability / standing-offer boundary ─────────────────
   //
@@ -1156,11 +1214,23 @@ async function main(): Promise<void> {
     const decisions: string[] = [];
     /** Diagnostics only — an LLM route is a distribution, not a value. */
     const routesSeen: string[] = [];
+    // THE CLAUSE PEEL, run exactly where the route runs it: before the
+    // router, on the raw body. What goes down the pipeline is the
+    // RESIDUAL — the half no fast path claimed.
+    const peeled = c.peel ? peelClause(c.body, c.peel) : null;
+    const bodyForPipeline = peeled && peeled.residual ? peeled.residual : c.body;
     console.log(
       `\n${"─".repeat(72)}\n${c.id}  ${sender.name}` +
         `${c.tagged ? " [@tagged]" : ""}${c.fullSquad ? " [FULL SQUAD]" : ""}` +
         `: ${JSON.stringify(c.body)}\n  expect : ${c.expect}`,
     );
+    if (c.peel) {
+      console.log(
+        peeled && peeled.residual
+          ? `  peel   : took ${JSON.stringify(peeled.consumed)} — the pipeline sees ${JSON.stringify(peeled.residual)}`
+          : `  peel   : NO residual (${peeled ? "one clause" : "predicate declined"}) — the pipeline sees the whole body`,
+      );
+    }
 
     for (let n = 0; n < repeat; n++) {
       const state = c.fullSquad
@@ -1178,7 +1248,7 @@ async function main(): Promise<void> {
           messages: [
             {
               id: `${c.id}-${n}`,
-              body: c.body,
+              body: bodyForPipeline,
               authorName: c.as ?? sender.name,
               senderUserId: sender.userId,
               senderName: c.as ?? sender.name,
