@@ -120,6 +120,14 @@
  *                                               a player their slot.
  *   • the extracted shape is one the composer
  *     cannot answer well                      → SILENCE + note
+ *   • the targeted PAYMENT read threw         → that ONE message goes
+ *                                               silent + note. The rest
+ *                                               of the batch is
+ *                                               unaffected: a fixture
+ *                                               question beside a
+ *                                               payment question still
+ *                                               gets its answer. See
+ *                                               stage 2b.
  *   • the engine threw, or proposed a write   → owns nothing → SILENCE
  *                                               + note
  *
@@ -178,6 +186,7 @@ import type {
   EngineMessage,
   EngineResult,
   Facts,
+  PaymentSnapshot,
   ProposedWrite,
   QuestionTopic,
   Route,
@@ -203,47 +212,133 @@ export const ANSWER_ROUTES = ANSWER_ENGINE_ROUTES;
  * answers become deterministic and only free-form stats need a model
  * call."* This constant is that sentence.
  *
- * `stats` and `options` are absent for a MEASURED reason, not a
- * cautious one, and `__tests__/answer-batch.test.ts` pins both:
+ * ─────────────────────────────────────────────────────────────────────
+ * `stats` AND `options` JOINED THE LIST ON 2026-09-09, AND THE REASON
+ * THEY WERE MISSING WAS NEVER THE ANSWER
+ * ─────────────────────────────────────────────────────────────────────
+ * Both have been fully implemented since §10 step 7: `engine.ts` emits
+ * them, `compose.ts` renders them deterministically, `SquadState`
+ * carries `appearances` and `smallerFormats`, and the format-switch
+ * arithmetic is `format-switch.ts`'s rather than a model's. What kept
+ * them out of this list was what happened to the answer AFTER it was
+ * composed.
  *
- *   • `compose.ts`'s stats answer renders `1. Kemal Ediz (24)` lines.
- *     `isLeaderboardLine` (`group-copy.ts:129`) recognises a leaderboard
- *     by an em dash, a percentage, "wins/votes/matches" or an "N/M ("
- *     pattern, and that shape carries none of them — so
- *     `displaysSquadState` sees a numbered run and the shipped step-4
- *     composer would REPLACE a "most consistent" answer with the
- *     upcoming-squad roster. That is precisely the 2026-05-14 incident
- *     §3.2 S16 was written for. It is a defect in the composer's
- *     FORMAT, worth its own change.
+ * Every reply this module produces reaches `results` with
+ * `handledBy: "llm"` (`route.ts:2126` — the AUDIT field says
+ * "answer-engine", the WIRE field says "llm"), and `route.ts:2480`
+ * runs `composeSquadStateReply` over every such reply. Anything
+ * `displaysSquadState` recognises is REPLACED by a squad post composed
+ * from a fresh snapshot. Both answers were recognised:
  *
- *     WHAT THE PRICE OF WAITING NOW IS. This used to end "until then
- *     the analyzer keeps stats, where the Recent History block gives it
- *     MoM winners, an all-time leaderboard and Elo that
- *     `SquadState.appearances` does not hold at all". §10 step 8 deleted
- *     the analyzer, so nothing keeps stats: a tagged stats question is
- *     silence plus an operator note. The exclusion is still right — a
- *     wrong answer overwritten by the squad roster is worse than no
- *     answer — but it stopped being free on 2026-09-06, and the data
- *     gap named above (MoM winners, leaderboard, Elo) is now a gap in
- *     what MatchTime can answer AT ALL rather than a reason to route
- *     elsewhere. NOTE: the deterministic stats-link and stats-blast
- *     peels in `route.ts` are unaffected and still fire; it is the
- *     composed stats ANSWER that is gone.
- *   • the options answer leads with "We're 8/14, need 6 more", which is
- *     rule (c) of `displaysSquadState`. `composeSquadStateReply` keeps a
- *     lead only when it makes no claim of its own, so the whole
- *     answer — including the arithmetic `format-switch.ts` computed —
- *     would be dropped rather than appended to.
+ *   • the stats answer rendered `1. Kemal Ediz (24)` lines — a numbered
+ *     run of 2+ lines, which is rule (a). `isLeaderboardLine`
+ *     (`group-copy.ts:129`) exempts a leaderboard, but only when it
+ *     carries an em dash, a percentage, "wins/votes/matches" or an
+ *     "N/M (" pattern, and that shape carried none of them. So "who's
+ *     been most consistent this season?" would have come back as the
+ *     upcoming-squad roster: the 2026-05-14 incident §3.2 S16 exists
+ *     for, reproduced by the replacement for the code that caused it.
+ *   • the options answer led with "We're 8/14, need 6 more" — an "N/M"
+ *     beside squad vocabulary, which is rule (c). `composeSquadStateReply`
+ *     keeps a lead only when it makes no claim of its own, so the whole
+ *     answer including the format-switch arithmetic would have been
+ *     dropped rather than appended to.
  *
- * `other` is absent because a topic the extractor could not place is
- * exactly the case §14.3 calls "the least designed part of this
- * document". A silent shrug is the failure this design exists to
- * remove — and the honest 2026-09-06 correction is that `other` now
- * PRODUCES one. It used to end "so it goes back to the prompt that can
- * still try"; §10 step 8 deleted that prompt, so `other` is silence
- * plus an operator note. The note is the thin difference between this
- * and the shrug §14.3 objects to: a human is told, once an hour, that a
- * question went unanswered and what it said.
+ * That is a defect in the FORMAT of two answers, and it was fixed as
+ * one: the stats rows now use the house leaderboard shape
+ * (`1. Kemal Ediz — 24 matches`, `match-history.ts:336`) which carries
+ * two of `isLeaderboardLine`'s four markers, and the options lead spells
+ * its count out ("8 of 14") so there is no slash for rule (c) to find.
+ * Both are pinned by `__tests__/answer-batch.test.ts` section 6 and
+ * `__tests__/compose.test.ts`, which assert `displaysSquadState` is
+ * FALSE for each — the tests fail the day the punctuation regresses,
+ * which is the only warning this class of defect gives.
+ *
+ * WHAT THE DELAY COST. Between §10 step 8 (which deleted the analyzer)
+ * and this change, a tagged stats or options question was answered by
+ * NOBODY: silence in the group plus a line on the operator DM. The data
+ * gap named in the old version of this comment — MoM winners, an
+ * all-time leaderboard and Elo, which `SquadState.appearances` does not
+ * hold — is real and unchanged: this answers "most consistent by
+ * appearances" and not those. That is a narrower answer than the
+ * mega-prompt gave, and a narrower answer that is always right is the
+ * trade §6.4 asks for. (The deterministic stats-link and stats-blast
+ * peels in `route.ts` are a separate path and were never affected.)
+ *
+ * ─────────────────────────────────────────────────────────────────────
+ * `score` JOINED ON 2026-09-09, AND IT COST NO NEW I/O
+ * ─────────────────────────────────────────────────────────────────────
+ * "@Match Time what was the score last week" landed on `other` and was
+ * refused, while `SquadState.completedMatch` was already carrying
+ * `redScore`, `yellowScore` and `status` for the score-REPORTING route.
+ * The read cost a topic, a composer branch and one extra field on the
+ * loader (`kickoffLabel`, so the answer names the night it is about).
+ *
+ * ⚠️ ADMITTING `stats` OPENED A WRONG ANSWER BEFORE `score` CLOSED IT,
+ * and it is worth recording because only a live run could see it. With
+ * `stats` newly answerable and no `score` topic to reach, "did we win
+ * on tuesday?" extracted as `stats` 3/3 and was answered with an
+ * appearances leaderboard — a confident non sequitur. While `stats` was
+ * refused this was invisible: both topics went to silence. The
+ * extractor's stats line now says what stats is NOT, and `score` gives
+ * the result questions somewhere correct to go. Measured after: the four
+ * unambiguous result phrasings answer 10/10, 10/10, 10/10 and 8/10 (the
+ * two misses are the ROUTER calling "how did we get on last night"
+ * banter, not the extractor).
+ *
+ * THE AMBIGUOUS ONE WAS SETTLED BY MEASUREMENT, NOT BY ARGUMENT.
+ * "whats the score situation" is a real message and reads two ways. Ten
+ * live runs BEFORE this topic existed: `count` 8/10, `other` 2/10, no
+ * drift toward a result. Ten AFTER, with `score` on the menu so the
+ * model had somewhere else to go: `count` 10/10. The model is
+ * consistent, so this follows it rather than overriding it — "score
+ * SITUATION" is the tally, "what was the score" is the result. See
+ * `QuestionTopic`'s own note.
+ *
+ * ─────────────────────────────────────────────────────────────────────
+ * `payments` JOINED ON 2026-09-09, AND IT IS THE ONLY TOPIC HERE THAT
+ * READS SOMETHING `loadSquadState` DOES NOT LOAD
+ * ─────────────────────────────────────────────────────────────────────
+ * "@Match Time who hasn't paid" was the last question on the 2026-09-06
+ * list with no data behind it. It is also the only one where being
+ * WRONG costs a person something rather than costing MatchTime
+ * credibility, so it has three refusals to its one answer and the whole
+ * decision lives in `payment-answer.ts` — which flag really gates it
+ * (not the one with "tracking" in its name), why the answer names
+ * nobody, and why the match must be COMPLETED.
+ *
+ * The SHAPE of the extra read is in this file, at stage 2b: one
+ * targeted load AFTER extraction, only when a `payments` topic survived
+ * ownership, passed down as data. `loadSquadState` runs on every batch
+ * including the 69% that are banter, and `compose.ts` cannot import
+ * Prisma, so neither "put it in the loader" nor "make it a lazy
+ * accessor" was available. Measured live: the four payment phrasings
+ * answer 40/40, and the negative control "how much do we pay each"
+ * (the FEE, which nothing here holds) stays on `other` 10/10.
+ *
+ * ─────────────────────────────────────────────────────────────────────
+ * WHAT THE THREE ADDITIONS MOVED, MEASURED THE SAME WAY EACH TIME
+ * ─────────────────────────────────────────────────────────────────────
+ * The Q1-Q24 table, twice, against the live Sutton squad:
+ *
+ *   before   38 of 48 answered · 10 handed back · 0 silent
+ *   after    46 of 48 answered ·  2 handed back · 0 silent
+ *
+ * Both remaining hand-backs are Q20, "is my mate down for tuesday" —
+ * a `person_status` that names nobody, which nothing in the system can
+ * answer and which SHOULD hand back. See §14.3 and `identity.ts`.
+ *
+ * ─────────────────────────────────────────────────────────────────────
+ * WHY `other` IS STILL ABSENT
+ * ─────────────────────────────────────────────────────────────────────
+ * A topic the extractor could not place is exactly the case §14.3 calls
+ * "the least designed part of this document". A silent shrug is the
+ * failure this design exists to remove — and the honest correction is
+ * that `other` PRODUCES one. It used to end "so it goes back to the
+ * prompt that can still try"; §10 step 8 deleted that prompt, so `other`
+ * is silence plus an operator note. The note is the thin difference
+ * between this and the shrug §14.3 objects to: a human is told, once an
+ * hour, that a question went unanswered and what it said.
  */
 export const ANSWERABLE_TOPICS: readonly QuestionTopic[] = [
   "count",
@@ -252,6 +347,10 @@ export const ANSWERABLE_TOPICS: readonly QuestionTopic[] = [
   "person_status",
   "phones",
   "fixture",
+  "payments",
+  "score",
+  "stats",
+  "options",
 ];
 
 /**
@@ -292,9 +391,10 @@ export const ANSWERABLE_TOPICS: readonly QuestionTopic[] = [
  *     Match Context either, so nothing is lost by leaving it.
  *   • "how many do we need?" and "whats the score situation" were TOPIC
  *     INSTABILITY rather than a missing topic: both extract as `count`
- *     on a re-run and both are answered. `stats` and `options` are the
- *     two that stay handed back on purpose, for the composed-format
- *     reasons above.
+ *     on a re-run and both are answered. `stats` and `options` stayed
+ *     handed back on that date for the composed-format reasons above;
+ *     both were fixed and admitted on 2026-09-09, and the format defect
+ *     that kept them out is written up on `ANSWERABLE_TOPICS`.
  *
  * WHAT THAT SWEEP'S CONCLUSION SAID, AND WHY IT NO LONGER HOLDS. It
  * ended: "Every non-answer here is a hand-back carrying a reason, never
@@ -500,6 +600,13 @@ export interface AnswerBatchDeps {
   /** `SquadState.features` carries attendance / paymentTracking /
    *  statsQa; the team post needs `teamBalancing`, which lives here. */
   loadFeatures?: (orgId: string) => Promise<OrgFeatures>;
+  /** The one targeted read that does NOT happen on every batch. Injected
+   *  so a test can prove both that it is called for a `payments` topic
+   *  and that it is NOT called for anything else. */
+  loadPayments?: (
+    orgId: string,
+    completedMatch: SquadState["completedMatch"],
+  ) => Promise<PaymentSnapshot>;
   /** Injected so a test can prove the write assertion and the
    *  throw-safety without a fabricated engine rule in the real engine. */
   decide?: (input: EngineInput) => EngineResult;
@@ -892,6 +999,50 @@ export async function runAnswerBatch(args: {
   }
 
   if (ownedIds.size === 0) return empty(degradations);
+
+  // ── Stage 2b: ONE TARGETED EXTRA READ, and only when asked ─────────
+  //
+  // `loadSquadState` runs on every batch, including the 69% that are
+  // banter, so payment rows do not belong in it: nobody should pay two
+  // queries for a "haha". And a lazy accessor on state is not available
+  // either — `compose.ts` must stay free of Prisma (its header says
+  // why), so a function on `SquadState` that reaches the database would
+  // put Prisma back on the composer's path.
+  //
+  // This is where the third option lives. Ownership is settled by the
+  // line above, so the topics in this window are KNOWN; load once if one
+  // of them needs it, and hand it down as data. The engine stays a pure
+  // function of one value and the common path is unchanged.
+  //
+  // FAILS OPEN. A payment load that throws leaves `state.payments` null,
+  // the composer says nothing under `answer_payments`, and the silent-id
+  // check below disowns the message — a hand-back with a receipt. It does
+  // NOT take the rest of the batch down: a fixture question beside a
+  // payment question still gets its answer.
+  const wantsPayments = [...ownedIds].some(
+    (id) => {
+      const f = factsById.get(id);
+      return f?.kind === "question" && f.topic === "payments";
+    },
+  );
+  if (wantsPayments) {
+    try {
+      const load =
+        deps.loadPayments ??
+        (async (o: string, cm: SquadState["completedMatch"]) => {
+          const m = await import("./load-state");
+          return m.loadPaymentSnapshot(o, cm);
+        });
+      state = { ...state, payments: await load(orgId, state.completedMatch) };
+    } catch (err) {
+      const detail =
+        `${ANSWER_DEGRADED_PREFIX} the payment read failed (${
+          err instanceof Error ? err.message : String(err)
+        }); the payment question in this batch goes unanswered and onto this note`;
+      console.error("[answer-engine] payment load failed:", err);
+      degradations.push(detail);
+    }
+  }
 
   // ── Stage 3: the engine, over the WHOLE window ─────────────────────
   const engineMessages: EngineMessage[] = messages.map((m) => ({

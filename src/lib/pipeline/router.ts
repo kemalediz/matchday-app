@@ -101,6 +101,8 @@ Rules:
 5. An @mention of a person with in or out is other_att.
 6. A question mark does not make a message a question. If it also states that someone is joining or leaving ("can anyone replace me tonight?"), route the attendance. question is only for a message that ASKS FOR information the bot holds and states no change.
 7. When in doubt between none and anything else, choose the other route.
+8. ASKING is question; INSTRUCTING is admin_ops. "Amir paid for 4 players" and "remind me on Monday" tell the bot to do something and are admin_ops. "Who hasn't paid?", "has everyone paid for last week?" and "any payments outstanding?" ask for something the bot already knows and are question.
+9. A question about a match that has ALREADY BEEN PLAYED is question, not none: "what was the score?", "did we win on tuesday?", "how did we get on last night?", "who's played the most this season?". Reporting a result ("we won 5-3") is still score.
 
 Return JSON only: {"routes":[{"id":"<id>","route":"<route>"}]}`;
 

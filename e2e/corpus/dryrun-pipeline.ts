@@ -295,12 +295,13 @@ export async function loadStateViaSql(grp: SimGroup): Promise<SquadState> {
   // through two different drivers.
   const completed = await grp.db.all<{
     id: string;
+    date: string;
     status: string;
     isHistorical: boolean;
     redScore: number | null;
     yellowScore: number | null;
   }>(
-    `SELECT m.id, m.status, m."isHistorical", m."redScore", m."yellowScore"
+    `SELECT m.id, m.date, m.status, m."isHistorical", m."redScore", m."yellowScore"
        FROM "Match" m
        JOIN "Activity" a ON a.id = m."activityId"
       WHERE a."orgId" = $1
@@ -360,6 +361,7 @@ export async function loadStateViaSql(grp: SimGroup): Promise<SquadState> {
     completedMatch: completed[0]
       ? {
           id: completed[0].id,
+          kickoffLabel: formatKickoff(new Date(completed[0].date)),
           status: completed[0].status as "TEAMS_GENERATED" | "TEAMS_PUBLISHED" | "COMPLETED",
           isHistorical: completed[0].isHistorical,
           redScore: completed[0].redScore,
@@ -368,6 +370,11 @@ export async function loadStateViaSql(grp: SimGroup): Promise<SquadState> {
         }
       : null,
     appearances: appearances.map((a) => ({ userId: a.userId, matches: Number(a.matches) })),
+    // The window the query above uses. Same 30 days as
+    // `load-state.ts`'s `LOOKBACK_DAYS`; carried so the stats answer
+    // names what it counted rather than implying "all time".
+    appearanceWindowDays: 30,
+    payments: null,
     lastBotPost: null,
     features: {
       attendance: org?.featureAttendance ?? true,

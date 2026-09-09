@@ -475,11 +475,19 @@ const CASES: Case[] = [
  * `route.ts`'s catch-all: NOTHING is said in the group, and one deduped
  * operator DM is sent (`lib/operator-note.ts`). So the HANDED BACK column
  * is no longer free — it is the number of tagged questions a real group
- * would ask and get no answer to. Q12 (money), Q20 (an unresolvable
- * person), Q22 (stats) and Q23 (options) are in it BY DESIGN and each
- * says why on its own line; anything else appearing there is a
- * regression, and the two columns should be read together rather than
- * only checking that SILENT is 0.
+ * would ask and get no answer to, and the two columns should be read
+ * together rather than only checking that SILENT is 0.
+ *
+ * THAT COLUMN WAS FOUR AND IS NOW ONE (2026-09-09). Q22 (stats) and Q23
+ * (options) were built answers refused for a composed-FORMAT reason and
+ * both now speak; Q12 (money) had no data in `SquadState` and now has a
+ * targeted loader. The measured sweep over Q1-Q24 × 2 went 38/48 → 46/48
+ * answered with SILENT still 0.
+ *
+ * Q20 is the last one, it is in this column BY DESIGN, and it is the one
+ * that should stay: "is my mate down for tuesday" names nobody, so
+ * nothing in the system can answer it and a confident guess would be the
+ * §3.2 S16 failure class. Anything else appearing here is a regression.
  *
  * `expect` is what a human decided the right column is. The harness
  * prints both and marks a mismatch; it does not fail the process, for
@@ -508,7 +516,7 @@ const QUESTION_CASES: QuestionCase[] = [
   { id: "Q9", who: "Ali", body: "@Match Time do we have enough?", expect: "ANSWERED", wants: /\d+\/\d+/, why: "count" },
   { id: "Q10", who: "Ali", body: "@Match Time show me the squad", expect: "ANSWERED", wants: /Playing:/, why: "roster — NOT the team line-ups" },
   { id: "Q11", who: "Ali", body: "@Match Time is the game still on", expect: "ANSWERED", wants: /\d{1,2}:\d{2}/, why: "fixture" },
-  { id: "Q12", who: "Ali", body: "@Match Time who hasn't paid", expect: "HANDED BACK", why: "no payment data in SquadState — and since §10 step 8 nobody answers it at all" },
+  { id: "Q12", who: "Ali", body: "@Match Time who hasn't paid", expect: "ANSWERED", wants: /still to pay|all settled|don't track|no payments|settled match/i, why: "payments — a COUNT, never a name (buildUnpaidTail's rule). Was the last unanswerable one on this list" },
 
   // ── More of the same shapes, phrased as the group phrases them ────
   { id: "Q13", who: "Zair", body: "@Match Time whos playing tonight", expect: "ANSWERED", wants: /Playing:/, why: "roster" },
@@ -520,9 +528,37 @@ const QUESTION_CASES: QuestionCase[] = [
   { id: "Q19", who: "Amir", body: "@Match Time is Zair in?", expect: "ANSWERED", wants: /Zair/, why: "person_status, resolvable" },
   { id: "Q20", who: "Amir", body: "@Match Time is my mate down for tuesday", expect: "HANDED BACK", why: "person_status that cannot resolve to one member" },
   { id: "Q21", who: "Amir", body: "@Match Time anyone in the squad without a number?", expect: "ANSWERED", why: "phones" },
-  { id: "Q22", who: "Amir", body: "@Match Time who's been most consistent this season?", expect: "HANDED BACK", why: "stats — the composed leaderboard trips displaysSquadState (2026-05-14)" },
-  { id: "Q23", who: "Amir", body: "@Match Time we're short, what are our options?", expect: "HANDED BACK", why: "options — the lead carries a count and would be replaced by the roster" },
+  { id: "Q22", who: "Amir", body: "@Match Time who's been most consistent this season?", expect: "ANSWERED", wants: /—\s\d+\smatch/, why: "stats — the leaderboard row shape must survive displaysSquadState (2026-05-14)" },
+  { id: "Q23", who: "Amir", body: "@Match Time we're short, what are our options?", expect: "ANSWERED", wants: /\bof \d+\b/, why: "options — the lead spells the count out so rule (c) cannot fire" },
   { id: "Q24", who: "Elvin", body: "@Match Time show me the teams", expect: "ANSWERED", why: "balancer/show — a real post if teams exist, the shipped 'no teams generated yet' if not" },
+
+  // ── THE RESULT OF THE LAST MATCH (topic `score`) ──────────────────
+  //
+  // Q3 ("whats the score situation") is the AMBIGUOUS one and it stays
+  // where it is, expecting a count. These four settle what the
+  // UNAMBIGUOUS phrasings do, so Q3's reading can be measured against
+  // something rather than asserted.
+  { id: "Q25", who: "Zair", body: "@Match Time what was the score last week", expect: "ANSWERED", wants: /\d+ - \d+/, why: "score — unambiguously the RESULT" },
+  { id: "Q26", who: "Zair", body: "@Match Time did we win on tuesday?", expect: "ANSWERED", wants: /\d+ - \d+/, why: "score — the result, phrased as a yes/no" },
+  { id: "Q27", who: "Ali", body: "@Match Time what was the final score", expect: "ANSWERED", wants: /\d+ - \d+/, why: "score — the result" },
+  { id: "Q28", who: "Ali", body: "@Match Time how did we get on last night", expect: "ANSWERED", wants: /\d+ - \d+/, why: "score — the result, phrased the way the group phrases it" },
+
+  // ── WHO HAS NOT PAID (topic `payments`) ───────────────────────────
+  { id: "Q29", who: "Elvin", body: "@Match Time who hasn't paid", expect: "ANSWERED", why: "payments — the question that started this, from the money collector" },
+  { id: "Q30", who: "Ali", body: "@Match Time has everyone paid for last week", expect: "ANSWERED", why: "payments — the same question from an ordinary member" },
+  { id: "Q31", who: "Zair", body: "@Match Time how many still owe for tuesday", expect: "ANSWERED", why: "payments — asked as a number rather than as names" },
+  { id: "Q32", who: "Elvin", body: "@Match Time any payments outstanding?", expect: "ANSWERED", why: "payments — the collector's phrasing" },
+
+  // ── NEGATIVE CONTROLS ─────────────────────────────────────────────
+  //
+  // Two questions that must NOT be answered from payment data, and one
+  // that must not be answered at all. Q34 is the sharp one: it carries
+  // the word "pay" and asks something MatchTime cannot answer from
+  // `Attendance.paidAt` — the FEE is a number no field in `SquadState`
+  // holds. A payments answer here would be a confident non sequitur.
+  { id: "Q33", who: "Ali", body: "@Match Time who's in for tuesday", expect: "ANSWERED", wants: /Playing:/, why: "NEGATIVE CONTROL — a roster question phrased near payment vocabulary must stay a roster question" },
+  { id: "Q34", who: "Ali", body: "@Match Time how much do we pay each", expect: "HANDED BACK", why: "NEGATIVE CONTROL — the FEE, which is not in SquadState. Naming who has not paid would be answering a different question" },
+  { id: "Q35", who: "Amir", body: "@Match Time is my mate down for tuesday", expect: "HANDED BACK", why: "TIER 4 CONTROL — an unresolvable person_status. Nothing can answer it; the hand-back is correct and must survive this change" },
 ];
 
 /**

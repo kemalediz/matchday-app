@@ -22,6 +22,11 @@
  * PROPOSED writes and a PROJECTED next state; the shadow harness
  * persists them for comparison (§10 step 2, "Still zero writes").
  */
+// Type-only, and from a module with no Prisma import of its own — see
+// `SquadState.payments` and `payment-answer.ts`'s header.
+import type { PaymentSnapshot } from "./payment-answer";
+
+export type { PaymentSnapshot };
 
 // ── Stage 1: routes ────────────────────────────────────────────────────
 
@@ -240,6 +245,52 @@ export type QuestionTopic =
   | "phones"
   /** is the match on, when does it kick off, where is it played */
   | "fixture"
+  /**
+   * THE RESULT OF THE MATCH THAT WAS PLAYED — "what was the score?",
+   * "did we win on tuesday?", "how did we get on last night?".
+   *
+   * Added 2026-09-09. The data was already there: `completedMatch`
+   * carries `redScore`, `yellowScore` and `status`, loaded for the
+   * score-REPORTING route. Reading it back cost a topic and a composer
+   * branch.
+   *
+   * ── THE AMBIGUOUS PHRASING, SETTLED BY MEASUREMENT ─────────────────
+   * "whats the score situation" is a real message from the group and it
+   * can be read two ways: the RESULT of the last match, or "how are we
+   * doing for numbers". It was NOT settled by argument. Ten live runs
+   * against the real Sutton squad with only the old nine topics
+   * available: `count` 8/10, `other` 2/10 — not one drift toward a
+   * result reading, and `count` produced "We're 6/14 for Tue 21:30,
+   * need 8 more 🙏". Ten more with `score` on the menu, so the model
+   * had somewhere else to go: `count` again.
+   *
+   * So the model is CONSISTENT, and this topic follows it rather than
+   * overriding it. "Score situation" means the tally. That also matches
+   * the English: a Sunday-league group asks "what's the score" about a
+   * result and "what's the score SITUATION" about where things stand,
+   * and it is the phrasing on the harness's Q3, which has expected
+   * `count` since the case was written.
+   *
+   * The four UNAMBIGUOUS result phrasings are Q25-Q28 and they are what
+   * this topic is for.
+   */
+  | "score"
+  /**
+   * WHO HAS NOT PAID for the last match — money, and the only topic in
+   * this list that reads something `loadSquadState` does not load.
+   *
+   * It is the one question on the 2026-09-06 list where being WRONG
+   * costs a person something rather than costing MatchTime credibility,
+   * so it is also the one with three refusals to its one answer. The
+   * whole decision — which org flag gates it, why the answer names
+   * nobody, and why the last match must be COMPLETED — is in
+   * `payment-answer.ts`'s header, not repeated here.
+   *
+   * "payments", not "unpaid": the extractor is classifying a SUBJECT,
+   * and "has everyone paid for last week" is the same subject asked from
+   * the other side.
+   */
+  | "payments"
   | "stats"
   | "options"
   | "other";
@@ -435,6 +486,15 @@ export interface SquadState {
    */
   completedMatch: {
     id: string;
+    /**
+     * Pre-formatted kickoff ("Tue 21:30"), same shape as the upcoming
+     * match's. The RESULT answer prints it so a reader can tell which
+     * night MatchTime is talking about: this field is the most recent
+     * ENDED match, and "did we win on tuesday?" asked on a Thursday
+     * would otherwise get a confident number about a different game
+     * with nothing to say so.
+     */
+    kickoffLabel: string;
     status: "TEAMS_GENERATED" | "TEAMS_PUBLISHED" | "COMPLETED";
     /** A seeded backfill rather than a match this group played through
      *  MatchTime. Never a payment-credit target. */
@@ -446,6 +506,25 @@ export interface SquadState {
   /** Appearances per user across completed matches, for stats answers
    *  that today cost a whole extra LLM call. */
   appearances: Array<{ userId: string; matches: number }>;
+  /**
+   * How many days back `appearances` was counted over.
+   *
+   * CARRIED RATHER THAN ASSUMED, because the composer has to SAY it. The
+   * loader's window is 30 days (`load-state.ts`'s `LOOKBACK_DAYS`) and
+   * the question people actually ask is "who's been most consistent this
+   * SEASON?" — measured live on 2026-09-09, where the answer was three
+   * players tied on two appearances each. Counting a month and calling
+   * it a season is a quiet wrong answer, and the fix is to name the
+   * window in the sentence.
+   *
+   * It is a FIELD and not a constant in `compose.ts` because that module
+   * cannot import `load-state.ts` (Prisma; see its header), so the only
+   * two ways to print the number are to carry it or to duplicate it. A
+   * duplicated window would drift the day the loader's changes, and the
+   * drift would be invisible: a correct-looking sentence about the wrong
+   * month.
+   */
+  appearanceWindowDays: number;
   /** MatchTime's own most recent post in the group, verbatim. A known
    *  object, not a guess: it is how a bare "Confirmed" resolves. */
   lastBotPost: string | null;
@@ -464,6 +543,28 @@ export interface SquadState {
   /** Players already asked for a guest's name for this match — the
    *  one-ask-per-player-per-match dedupe key of `guest-name-ask.ts`. */
   guestAskedUserIds: string[];
+  /**
+   * WHO HAS NOT PAID — and `null` on almost every batch, deliberately.
+   *
+   * ⚠️ THE ONLY FIELD ON THIS INTERFACE THAT `loadSquadState` DOES NOT
+   * FILL. Every other field is loaded on EVERY batch, including the 69%
+   * that are banter, so a payment query in the loader would be two more
+   * round trips per joke. `answer-batch.ts` loads state, extracts, and
+   * only then knows which topics are in the window — so it does one
+   * targeted load AFTER extraction and only when a `payments` topic
+   * survived ownership, and hands the result down as data.
+   *
+   * That is why this is a snapshot and not a lazy accessor:
+   * `compose.ts` must stay free of Prisma (its header says why — the
+   * Playwright worker never loads it), so a function on state that goes
+   * to the database is not available at all. Data in, strings out.
+   *
+   * `null` therefore means NOT LOADED, never "nothing to report" —
+   * `PaymentSnapshot` has its own shapes for those. The composer treats
+   * a null under an `answer_payments` intent as an operator note and
+   * says nothing, which makes `answer-batch.ts` disown the message.
+   */
+  payments: PaymentSnapshot | null;
 }
 
 // ── What the engine hands back ─────────────────────────────────────────
@@ -643,6 +744,20 @@ export type SpeechIntent =
   | { kind: "answer_person_status"; messageId: string; personRef: string; userId: string | null }
   | { kind: "answer_phones"; messageId: string }
   | { kind: "answer_stats"; messageId: string }
+  /**
+   * The RESULT of the last match played. Carries no numbers: the
+   * composer reads `state.completedMatch` and renders one of three
+   * sentences (a result, "nobody reported one", "we haven't played
+   * one"). The engine deliberately does not branch on which — see the
+   * engine's `case "score"`.
+   */
+  | { kind: "answer_score"; messageId: string }
+  /**
+   * How many have not paid for the last settled match. Carries no count
+   * and no name: the composer reads `state.payments`, which is a
+   * `PaymentSnapshot` and has no field a name could come out of.
+   */
+  | { kind: "answer_payments"; messageId: string }
   | { kind: "answer_options"; messageId: string }
   | { kind: "teams_post"; messageId: string }
   /**

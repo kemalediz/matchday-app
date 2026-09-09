@@ -18,6 +18,7 @@ import { selectRegistrationMatch } from "../registration-match-select";
 import { resolveTeamLabels } from "../team-labels";
 import { totalPlayersFor } from "../format-switch";
 import { guestNameAskKey, GUEST_NAME_ASK_KIND } from "../guest-name-ask";
+import { decidePaymentSnapshot, type PaymentSnapshot } from "./payment-answer";
 import type { SquadState } from "./types";
 
 /** Statuses `selectRegistrationMatch` considers, plus COMPLETED so the
@@ -219,6 +220,9 @@ export async function loadSquadState(
     completedMatch: completed
       ? {
           id: completed.id,
+          // Same format as the upcoming match's label, so the RESULT
+          // answer can name the night it is talking about. See the field.
+          kickoffLabel: formatLondon(completed.date, "EEE HH:mm"),
           status: completed.status as "TEAMS_GENERATED" | "TEAMS_PUBLISHED" | "COMPLETED",
           isHistorical: completed.isHistorical,
           redScore: completed.redScore,
@@ -230,6 +234,9 @@ export async function loadSquadState(
       userId,
       matches: matchesPlayed,
     })),
+    // The window the line above was counted over, carried so the stats
+    // answer can name it rather than imply "all time". See the field.
+    appearanceWindowDays: LOOKBACK_DAYS,
     lastBotPost: lastBotJob?.text ?? null,
     features: {
       attendance: features.attendance,
@@ -239,5 +246,97 @@ export async function loadSquadState(
     },
     smallerFormats,
     guestAskedUserIds: guestAsked,
+    // NOT LOADED HERE, on purpose — see `SquadState.payments` and
+    // `loadPaymentSnapshot` below. Everything else in this object is
+    // read on every batch including the 69% that are banter; a payment
+    // question is rare enough that its two extra reads belong behind a
+    // topic check rather than in front of every joke.
+    payments: null,
   };
+}
+
+/**
+ * THE ONE TARGETED EXTRA READ — payments, and only when asked.
+ *
+ * ── WHY IT IS NOT IN `loadSquadState` ────────────────────────────────
+ * That function runs on EVERY batch. Sutton FC's own traffic is 69%
+ * banter, and a payment question is a handful of messages a season.
+ * Putting these reads in the loader would buy an answer nobody asked for
+ * on every "haha" in the group.
+ *
+ * ── WHY IT IS NOT A LAZY ACCESSOR ON STATE ───────────────────────────
+ * The obvious shape — `state.payments()` resolved inside the composer —
+ * is not available. `compose.ts` must stay free of Prisma (its header
+ * records why: the Playwright worker never loads it, and a static import
+ * kills the corpus spec at load with an error nobody can read). A
+ * function on `SquadState` that reaches the database would put Prisma
+ * back on the composer's path the first time anyone called it.
+ *
+ * ── SO: LOAD AFTER EXTRACTION, PASS AS DATA ──────────────────────────
+ * `answer-batch.ts` already loads state and THEN extracts, so by the
+ * time ownership is decided it knows which topics are in the window. It
+ * calls this once, only when a `payments` topic survived, and puts the
+ * result on the state it hands to `decide()`. The engine stays a pure
+ * function of one value; the composer stays a pure function of the
+ * engine's result; the common path stays exactly as cheap as it was.
+ *
+ * TAKES THE MATCH RATHER THAN SELECTING ONE. The caller passes
+ * `state.completedMatch` — the last match that ENDED — and
+ * `decidePaymentSnapshot` narrows it to `COMPLETED && !isHistorical`.
+ * A second selector here could disagree with the one the rest of the
+ * request is using, which is the failure mode `answer-batch.ts`'s
+ * `expectedMatchId` check exists for on the other match.
+ */
+export async function loadPaymentSnapshot(
+  orgId: string,
+  completedMatch: SquadState["completedMatch"],
+): Promise<PaymentSnapshot> {
+  const org = await db.organisation.findUnique({
+    where: { id: orgId },
+    select: {
+      paymentTrackingEnabled: true,
+      paymentCollectionEnabled: true,
+      paymentHolderId: true,
+    },
+  });
+  if (!org) {
+    // An org row that cannot be found is the `ALL_OFF` case
+    // `getOrgFeatures` already falls back to. "Not tracked" is the
+    // honest answer and it is a refusal, not an empty list.
+    return { kind: "not_tracked" };
+  }
+  if (!completedMatch) {
+    return decidePaymentSnapshot({
+      paymentTracking: org.paymentTrackingEnabled,
+      paymentCollection: org.paymentCollectionEnabled,
+      paymentHolderId: org.paymentHolderId,
+      match: null,
+    });
+  }
+  const row = await db.match.findUnique({
+    where: { id: completedMatch.id },
+    select: {
+      paymentLinksReleasedAt: true,
+      attendances: {
+        where: { status: "CONFIRMED" },
+        select: { userId: true, paidAt: true },
+      },
+      paymentCredits: { select: { count: true } },
+    },
+  });
+  return decidePaymentSnapshot({
+    paymentTracking: org.paymentTrackingEnabled,
+    paymentCollection: org.paymentCollectionEnabled,
+    paymentHolderId: org.paymentHolderId,
+    match: row
+      ? {
+          kickoffLabel: completedMatch.kickoffLabel,
+          status: completedMatch.status,
+          isHistorical: completedMatch.isHistorical,
+          paymentLinksReleasedAt: row.paymentLinksReleasedAt,
+          confirmed: row.attendances.map((a) => ({ userId: a.userId, paid: a.paidAt !== null })),
+          creditCount: row.paymentCredits.reduce((s, c) => s + c.count, 0),
+        }
+      : null,
+  });
 }

@@ -1082,6 +1082,45 @@ export function decide(input: EngineInput): EngineResult {
           speech.push({ kind: "answer_fixture", messageId: msg.id });
           out.reasons.push("fixture question answered from the match");
           break;
+        case "score":
+          // THE RESULT OF THE LAST MATCH PLAYED. Not deferred, for the
+          // same reason `fixture` is not: a result is not a claim about
+          // the upcoming squad, so a squad post in the same batch
+          // neither answers it nor contradicts it.
+          //
+          // NO BRANCH HERE ON WHETHER A SCORE EXISTS, deliberately.
+          // `state.completedMatch` has three shapes worth different
+          // sentences — a recorded result, an ended match nobody
+          // reported, and a group that has not played — and the
+          // composer renders all three from the same field it is about
+          // to read anyway. Splitting the decision across two modules
+          // is how one of them ends up printing a `null` as a number.
+          speech.push({ kind: "answer_score", messageId: msg.id });
+          out.reasons.push("result question answered from the last match played");
+          break;
+        case "payments":
+          // WHO HAS NOT PAID. Not deferred — a payment count is not a
+          // claim about the upcoming squad, so a squad post in the same
+          // batch neither answers it nor contradicts it.
+          //
+          // NO GATE HERE, and that is not an oversight. Every payment
+          // rule lives in `payment-answer.ts` and has already run by the
+          // time this executes: `state.payments` is a snapshot whose
+          // four shapes each carry their own sentence, including "this
+          // org does not track payments". A second gate on
+          // `state.features.paymentTracking` would be the WRONG gate
+          // (Sutton has it off and its `paidAt` rows are accurate — read
+          // that module's header) and would turn an honest "I don't
+          // know" into silence.
+          //
+          // The one thing worth recording is which shape came back, so
+          // an operator triaging "why did it say that" has it in the
+          // outcome rather than having to re-run the loader.
+          speech.push({ kind: "answer_payments", messageId: msg.id });
+          out.reasons.push(
+            `payment question answered from the last settled match (${state.payments?.kind ?? "not loaded"})`,
+          );
+          break;
         case "bench":
           speech.push({ kind: "answer_bench", messageId: msg.id });
           break;

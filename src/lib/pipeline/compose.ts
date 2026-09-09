@@ -155,11 +155,9 @@ export function compose(result: EngineResult): ComposedOutput {
         // which is rule (c) of `displaysSquadState`, so
         // `composeSquadStateReply` would drop this whole answer and post
         // the roster instead: the person who asked what time kickoff is
-        // would get a list of names and no time. The same trap the STATS
-        // and OPTIONS answers are still refused for — and since §10 step
-        // 8 "refused" means unanswered rather than handed to the
-        // analyzer, which is why `answer_fixture` composes a bare
-        // sentence with no count in it rather than being refused too.
+        // would get a list of names and no time. The same trap that kept
+        // the STATS and OPTIONS answers refused until 2026-09-09, when
+        // both were re-shaped to escape it rather than left unanswered.
         // See `answer-batch.ts`'s `ANSWERABLE_TOPICS`.
         const where = state.venue.trim();
         utterances.push({
@@ -168,6 +166,89 @@ export function compose(result: EngineResult): ComposedOutput {
             ? `⚽ ${state.kickoffLabel} at ${where}.`
             : `⚽ ${state.kickoffLabel}.`,
         });
+        break;
+      }
+
+      case "answer_score": {
+        // THE RESULT OF THE LAST MATCH PLAYED, in three sentences —
+        // and the two that are not a scoreline are the point.
+        //
+        // `state.completedMatch` is the most recent match whose kickoff
+        // PLUS duration has passed, in any of three statuses. A match
+        // only becomes COMPLETED when somebody records a score, so an
+        // ended Tuesday with nobody's report sits at TEAMS_PUBLISHED
+        // with both scores null — which was the LIVE state on Sutton FC
+        // the day this was written. "0 - 0" would be a fabricated
+        // result; "we haven't played" would be false. Neither is said.
+        //
+        // The kickoff label is printed on every branch that has a match,
+        // because this field is "the most recent ended match" and the
+        // question is usually "did we win on TUESDAY?". If the two are
+        // different nights, the reader can see it. Nothing else in this
+        // answer can tell them.
+        const m = state.completedMatch;
+        if (!m) {
+          utterances.push({
+            messageId: s.messageId,
+            text: "I haven't got a played match on record for this group yet.",
+          });
+          break;
+        }
+        if (m.redScore === null || m.yellowScore === null) {
+          utterances.push({
+            messageId: s.messageId,
+            text: `No score reported for ${m.kickoffLabel} yet — tell me the result and I'll record it.`,
+          });
+          break;
+        }
+        const [redLabel, yellowLabel] = state.teamLabels;
+        const line = `${redLabel} ${m.redScore} - ${m.yellowScore} ${yellowLabel}`;
+        const verdict =
+          m.redScore === m.yellowScore
+            ? "A draw."
+            : `${m.redScore > m.yellowScore ? redLabel : yellowLabel} won.`;
+        utterances.push({
+          messageId: s.messageId,
+          text: `⚽ ${m.kickoffLabel}: ${line}. ${verdict}`,
+        });
+        break;
+      }
+
+      case "answer_payments": {
+        // WHO HAS NOT PAID — as a COUNT. There is no branch below that
+        // can print a name, because `PaymentSnapshot` has no field a
+        // name could come out of (`payment-answer.ts` returns counts on
+        // purpose). `buildUnpaidTail` posts the same shape to the same
+        // group and says why: "Poll-only format per Sait's suggestion
+        // (2026-04-25). No naming, no shaming."
+        //
+        // The question asked WHO, so the answer says out loud that it is
+        // not going to say. A count with no explanation reads as a bot
+        // that misunderstood; a count with one reads as a bot with a
+        // rule.
+        const p = state.payments;
+        if (!p) {
+          // NOT LOADED. `answer-batch.ts` does the payment load only when
+          // a `payments` topic survived ownership, so reaching here means
+          // the intent was emitted without it. Saying nothing sends this
+          // message to that module's silent-id check, which disowns it —
+          // a hand-back with a receipt rather than an empty answer.
+          operatorNotes.push(
+            `compose: answer_payments for ${s.messageId} with no payment snapshot loaded; saying nothing`,
+          );
+          break;
+        }
+        const text =
+          p.kind === "not_tracked"
+            ? "I don't track payments for this group, so I can't say who's settled up."
+            : p.kind === "no_settled_match"
+              ? "There's no settled match for me to check payments against yet."
+              : p.kind === "no_signal"
+                ? `No payments have reached me for ${p.kickoffLabel} — that could mean nobody's paid, or that I'm just not seeing them, so I'd rather not put a number on it.`
+                : p.unpaid === 0
+                  ? `💳 All settled for ${p.kickoffLabel} 🙌`
+                  : `💳 ${p.unpaid} of ${p.chargeable} still to pay for ${p.kickoffLabel}. I don't put names to that in the group.`;
+        utterances.push({ messageId: s.messageId, text });
         break;
       }
 
@@ -232,24 +313,55 @@ export function compose(result: EngineResult): ComposedOutput {
         // section of the prompt at 2,091 tokens and its worst failure
         // ("top 3 most consistent" returning the squad roster) is a
         // composition bug, not a reasoning one.
+        //
+        // ⚠️ THE ROW FORMAT IS LOAD-BEARING AND IT IS NOT COSMETIC.
+        // `route.ts:2480` runs `composeSquadStateReply` over every reply
+        // this module produces (they reach `results` with
+        // `handledBy: "llm"`, `route.ts:2126`), and anything
+        // `displaysSquadState` recognises is REPLACED by the
+        // upcoming-squad roster. A numbered run of two or more lines is
+        // rule (a). The one thing that exempts it is
+        // `isLeaderboardLine`, which wants an em-dash separator, a
+        // percentage, the word "wins"/"votes"/"matches", or an "N/M ("
+        // pattern.
+        //
+        // `1. Kemal Ediz (24)` had NONE of them — so the correct answer
+        // was composed and then thrown away for the squad list, which is
+        // the 2026-05-14 incident, which is why the topic was refused
+        // for months rather than fixed. This is the house leaderboard
+        // format (`match-history.ts:336`, `  1. Name — 4 wins`) and it
+        // carries two of the four markers. Change the punctuation here
+        // and the answer silently becomes a roster again;
+        // `__tests__/answer-batch.test.ts` section 6 fails first.
         const byId = new Map(state.roster.map((m) => [m.userId, m.name]));
         const ranked = [...state.appearances]
           .filter((a) => byId.has(a.userId))
           .sort((a, b) => b.matches - a.matches)
           .slice(0, 3);
+        // NAME THE WINDOW, ALWAYS. `state.appearances` is counted over
+        // `load-state.ts`'s 30-day lookback, and the question the group
+        // actually asks is "who's been most consistent this SEASON?"
+        // (measured live, 2026-09-09). Answering a season question with
+        // a month's data and not saying so is a quiet wrong answer —
+        // the number is right and the claim is not. `state` carries the
+        // window so this sentence cannot drift from what was counted.
+        const window = `last ${state.appearanceWindowDays} days`;
         if (ranked.length === 0) {
           utterances.push({
             messageId: s.messageId,
-            text: "I don't have enough completed matches yet to call anyone the most consistent.",
+            text: `I don't have any completed matches in the ${window} to go on, so I can't call anyone the most consistent.`,
           });
           break;
         }
         const rows = ranked.map(
-          (a, i) => `${i + 1}. ${safeName(byId.get(a.userId) ?? "")} (${a.matches})`,
+          (a, i) =>
+            `${i + 1}. ${safeName(byId.get(a.userId) ?? "")} — ${a.matches} ${
+              a.matches === 1 ? "match" : "matches"
+            }`,
         );
         utterances.push({
           messageId: s.messageId,
-          text: `Most consistent by appearances:\n${rows.join("\n")}`,
+          text: `Most appearances in the ${window}:\n${rows.join("\n")}`,
         });
         break;
       }
@@ -257,8 +369,23 @@ export function compose(result: EngineResult): ComposedOutput {
       case "answer_options": {
         // format-switch.ts computes both the arithmetic and the names.
         // The composer copies. On 2026-08-30 the model computed 8 − 5
-        // instead of 8 − 10 and named three real people as losing their
-        // place when a switch would have benched nobody.
+        // (players per TEAM) instead of 8 − 10 (the format TOTAL) and
+        // named three real people as losing their place when a switch
+        // would have benched nobody. `benchedOnFormatSwitch` takes the
+        // total and slices by position — the same rule
+        // `switchMatchFormat` applies for real — so the wrong names are
+        // not reachable from here. Nothing below recomputes anything:
+        // `f.proposal` is a finished sentence.
+        //
+        // ⚠️ THE LEAD SPELLS THE COUNT OUT, AND THAT IS NOT A STYLE
+        // CHOICE. It used to read "We're 8/14, need 6 more 🙏". An
+        // "N/M" beside squad vocabulary is rule (c) of
+        // `displaysSquadState`, and `route.ts:2480` REPLACES anything it
+        // recognises with the upcoming-squad roster — so the whole
+        // answer, arithmetic included, was dropped rather than appended
+        // to. That is why this topic was refused for months. "8 of 14"
+        // says the same thing to a human and carries no slash.
+        // `__tests__/answer-batch.test.ts` section 6 pins it.
         const need = Math.max(0, state.maxPlayers - confirmed.length);
         const facts = buildFormatSwitchFacts({
           confirmedNames: confirmed,
@@ -268,8 +395,8 @@ export function compose(result: EngineResult): ComposedOutput {
         const viable = facts.filter((f) => f.proposal !== null);
         const lines = [
           need > 0
-            ? `We're ${confirmed.length}/${state.maxPlayers}, need ${need} more 🙏`
-            : `We're ${confirmed.length}/${state.maxPlayers} ✅ full squad.`,
+            ? `We're ${confirmed.length} of ${state.maxPlayers}, need ${need} more 🙏`
+            : `We're ${confirmed.length} of ${state.maxPlayers} ✅ full squad.`,
         ];
         if (viable.length === 0) {
           lines.push(

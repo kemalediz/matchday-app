@@ -114,9 +114,11 @@ export interface WorldOpts {
    *  accepts three statuses, a payment credit accepts one) says so. */
   completedMatch?: Partial<NonNullable<SquadState["completedMatch"]>> & { id: string };
   appearances?: SquadState["appearances"];
+  appearanceWindowDays?: number;
   features?: Partial<SquadState["features"]>;
   smallerFormats?: SquadState["smallerFormats"];
   guestAskedUserIds?: string[];
+  payments?: SquadState["payments"];
   noPhone?: string[];
   admins?: string[];
 }
@@ -144,6 +146,7 @@ export function world(opts: WorldOpts = {}): SquadState {
     teamLabels: ["Red", "Yellow"],
     completedMatch: opts.completedMatch
       ? {
+          kickoffLabel: "Tue 21:30",
           status: "COMPLETED",
           isHistorical: false,
           redScore: null,
@@ -153,6 +156,7 @@ export function world(opts: WorldOpts = {}): SquadState {
         }
       : null,
     appearances: opts.appearances ?? [],
+    appearanceWindowDays: opts.appearanceWindowDays ?? 30,
     lastBotPost: opts.lastBotPost ?? null,
     features: {
       attendance: true,
@@ -163,6 +167,7 @@ export function world(opts: WorldOpts = {}): SquadState {
     },
     smallerFormats: opts.smallerFormats ?? [],
     guestAskedUserIds: opts.guestAskedUserIds ?? [],
+    payments: opts.payments ?? null,
   };
 }
 

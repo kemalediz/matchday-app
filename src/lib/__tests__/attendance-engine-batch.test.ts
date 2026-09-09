@@ -53,6 +53,8 @@ function state(over: Partial<SquadState> = {}): SquadState {
     teamLabels: ["Red", "Yellow"],
     completedMatch: null,
     appearances: [],
+    appearanceWindowDays: 30,
+    payments: null,
     lastBotPost: null,
     features: { attendance: true, paymentTracking: false, statsQa: false, reminders: false },
     smallerFormats: [],
