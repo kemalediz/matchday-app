@@ -145,6 +145,7 @@ export function world(opts: WorldOpts = {}): SquadState {
     teamLabels: ["Red", "Yellow"],
     completedMatch: opts.completedMatch
       ? {
+          kickoffLabel: "Tue 21:30",
           status: "COMPLETED",
           isHistorical: false,
           redScore: null,

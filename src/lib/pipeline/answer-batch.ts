@@ -257,6 +257,36 @@ export const ANSWER_ROUTES = ANSWER_ENGINE_ROUTES;
  * peels in `route.ts` are a separate path and were never affected.)
  *
  * ─────────────────────────────────────────────────────────────────────
+ * `score` JOINED ON 2026-09-09, AND IT COST NO NEW I/O
+ * ─────────────────────────────────────────────────────────────────────
+ * "@Match Time what was the score last week" landed on `other` and was
+ * refused, while `SquadState.completedMatch` was already carrying
+ * `redScore`, `yellowScore` and `status` for the score-REPORTING route.
+ * The read cost a topic, a composer branch and one extra field on the
+ * loader (`kickoffLabel`, so the answer names the night it is about).
+ *
+ * ⚠️ ADMITTING `stats` OPENED A WRONG ANSWER BEFORE `score` CLOSED IT,
+ * and it is worth recording because only a live run could see it. With
+ * `stats` newly answerable and no `score` topic to reach, "did we win
+ * on tuesday?" extracted as `stats` 3/3 and was answered with an
+ * appearances leaderboard — a confident non sequitur. While `stats` was
+ * refused this was invisible: both topics went to silence. The
+ * extractor's stats line now says what stats is NOT, and `score` gives
+ * the result questions somewhere correct to go. Measured after: the four
+ * unambiguous result phrasings answer 10/10, 10/10, 10/10 and 8/10 (the
+ * two misses are the ROUTER calling "how did we get on last night"
+ * banter, not the extractor).
+ *
+ * THE AMBIGUOUS ONE WAS SETTLED BY MEASUREMENT, NOT BY ARGUMENT.
+ * "whats the score situation" is a real message and reads two ways. Ten
+ * live runs BEFORE this topic existed: `count` 8/10, `other` 2/10, no
+ * drift toward a result. Ten AFTER, with `score` on the menu so the
+ * model had somewhere else to go: `count` 10/10. The model is
+ * consistent, so this follows it rather than overriding it — "score
+ * SITUATION" is the tally, "what was the score" is the result. See
+ * `QuestionTopic`'s own note.
+ *
+ * ─────────────────────────────────────────────────────────────────────
  * WHY `other` IS STILL ABSENT
  * ─────────────────────────────────────────────────────────────────────
  * A topic the extractor could not place is exactly the case §14.3 calls
@@ -275,6 +305,7 @@ export const ANSWERABLE_TOPICS: readonly QuestionTopic[] = [
   "person_status",
   "phones",
   "fixture",
+  "score",
   "stats",
   "options",
 ];

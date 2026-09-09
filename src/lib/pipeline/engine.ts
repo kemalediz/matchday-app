@@ -1082,6 +1082,22 @@ export function decide(input: EngineInput): EngineResult {
           speech.push({ kind: "answer_fixture", messageId: msg.id });
           out.reasons.push("fixture question answered from the match");
           break;
+        case "score":
+          // THE RESULT OF THE LAST MATCH PLAYED. Not deferred, for the
+          // same reason `fixture` is not: a result is not a claim about
+          // the upcoming squad, so a squad post in the same batch
+          // neither answers it nor contradicts it.
+          //
+          // NO BRANCH HERE ON WHETHER A SCORE EXISTS, deliberately.
+          // `state.completedMatch` has three shapes worth different
+          // sentences — a recorded result, an ended match nobody
+          // reported, and a group that has not played — and the
+          // composer renders all three from the same field it is about
+          // to read anyway. Splitting the decision across two modules
+          // is how one of them ends up printing a `null` as a number.
+          speech.push({ kind: "answer_score", messageId: msg.id });
+          out.reasons.push("result question answered from the last match played");
+          break;
         case "bench":
           speech.push({ kind: "answer_bench", messageId: msg.id });
           break;

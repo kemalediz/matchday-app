@@ -240,6 +240,36 @@ export type QuestionTopic =
   | "phones"
   /** is the match on, when does it kick off, where is it played */
   | "fixture"
+  /**
+   * THE RESULT OF THE MATCH THAT WAS PLAYED — "what was the score?",
+   * "did we win on tuesday?", "how did we get on last night?".
+   *
+   * Added 2026-09-09. The data was already there: `completedMatch`
+   * carries `redScore`, `yellowScore` and `status`, loaded for the
+   * score-REPORTING route. Reading it back cost a topic and a composer
+   * branch.
+   *
+   * ── THE AMBIGUOUS PHRASING, SETTLED BY MEASUREMENT ─────────────────
+   * "whats the score situation" is a real message from the group and it
+   * can be read two ways: the RESULT of the last match, or "how are we
+   * doing for numbers". It was NOT settled by argument. Ten live runs
+   * against the real Sutton squad with only the old nine topics
+   * available: `count` 8/10, `other` 2/10 — not one drift toward a
+   * result reading, and `count` produced "We're 6/14 for Tue 21:30,
+   * need 8 more 🙏". Ten more with `score` on the menu, so the model
+   * had somewhere else to go: `count` again.
+   *
+   * So the model is CONSISTENT, and this topic follows it rather than
+   * overriding it. "Score situation" means the tally. That also matches
+   * the English: a Sunday-league group asks "what's the score" about a
+   * result and "what's the score SITUATION" about where things stand,
+   * and it is the phrasing on the harness's Q3, which has expected
+   * `count` since the case was written.
+   *
+   * The four UNAMBIGUOUS result phrasings are Q25-Q28 and they are what
+   * this topic is for.
+   */
+  | "score"
   | "stats"
   | "options"
   | "other";
@@ -435,6 +465,15 @@ export interface SquadState {
    */
   completedMatch: {
     id: string;
+    /**
+     * Pre-formatted kickoff ("Tue 21:30"), same shape as the upcoming
+     * match's. The RESULT answer prints it so a reader can tell which
+     * night MatchTime is talking about: this field is the most recent
+     * ENDED match, and "did we win on tuesday?" asked on a Thursday
+     * would otherwise get a confident number about a different game
+     * with nothing to say so.
+     */
+    kickoffLabel: string;
     status: "TEAMS_GENERATED" | "TEAMS_PUBLISHED" | "COMPLETED";
     /** A seeded backfill rather than a match this group played through
      *  MatchTime. Never a payment-credit target. */
@@ -662,6 +701,14 @@ export type SpeechIntent =
   | { kind: "answer_person_status"; messageId: string; personRef: string; userId: string | null }
   | { kind: "answer_phones"; messageId: string }
   | { kind: "answer_stats"; messageId: string }
+  /**
+   * The RESULT of the last match played. Carries no numbers: the
+   * composer reads `state.completedMatch` and renders one of three
+   * sentences (a result, "nobody reported one", "we haven't played
+   * one"). The engine deliberately does not branch on which — see the
+   * engine's `case "score"`.
+   */
+  | { kind: "answer_score"; messageId: string }
   | { kind: "answer_options"; messageId: string }
   | { kind: "teams_post"; messageId: string }
   /**

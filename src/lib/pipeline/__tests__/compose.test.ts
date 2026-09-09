@@ -317,6 +317,74 @@ describe("questions are answered from state, not from the model", () => {
     expect(displaysSquadState(text)).toBe(false);
   });
 
+  // ── THE RESULT OF THE LAST MATCH ───────────────────────────────────
+  //
+  // `SquadState.completedMatch` already carried `redScore`,
+  // `yellowScore`, `status` and `isHistorical` for the score-REPORTING
+  // route. Reading them back is a different question with three answers,
+  // and the two that are not "Red 5 - 3 Yellow" are the ones worth
+  // pinning: a group that has never played, and a match nobody reported
+  // a score for. Both were live on Sutton FC the day this was written.
+  const scoreAsk = () =>
+    msg({
+      from: "shaz",
+      body: "@Match Time what was the score",
+      route: "question",
+      tagged: true,
+      facts: { kind: "question", topic: "score", personRef: null, statedCount: null },
+    });
+
+  it("answers a result question with the recorded score and who won", () => {
+    const state = world({
+      confirmed: TEN.slice(0, 6),
+      completedMatch: { id: "m-old", kickoffLabel: "Tue 21:30", redScore: 5, yellowScore: 3 },
+    });
+    const { out } = composeFor(state, [scoreAsk()]);
+    const text = out.utterances[0].text;
+    expect(text).toContain("Red 5 - 3 Yellow");
+    expect(text).toMatch(/Red won/i);
+    // It names the match it is talking about, so a reader can tell when
+    // MatchTime has answered about a different night from the one they
+    // meant. Without it, "did we win on tuesday?" gets a confident
+    // number about last Thursday and nothing says so.
+    expect(text).toContain("Tue 21:30");
+    expect(displaysSquadState(text)).toBe(false);
+  });
+
+  it("calls a draw a draw rather than naming a winner", () => {
+    const state = world({
+      confirmed: TEN.slice(0, 6),
+      completedMatch: { id: "m-old", kickoffLabel: "Tue 21:30", redScore: 4, yellowScore: 4 },
+    });
+    const { out } = composeFor(state, [scoreAsk()]);
+    expect(out.utterances[0].text).toMatch(/draw/i);
+    expect(out.utterances[0].text).not.toMatch(/won/i);
+  });
+
+  it("says nobody reported a score rather than inventing one", () => {
+    // The live state on 2026-09-09: the last match had ENDED and sat at
+    // TEAMS_PUBLISHED with both scores null, because a match only
+    // becomes COMPLETED when somebody records a result. Rendering a
+    // null as a number here is the whole failure mode.
+    const state = world({
+      confirmed: TEN.slice(0, 6),
+      completedMatch: { id: "m-old", status: "TEAMS_PUBLISHED", kickoffLabel: "Tue 21:30" },
+    });
+    const { out } = composeFor(state, [scoreAsk()]);
+    const text = out.utterances[0].text;
+    expect(text).toMatch(/no score|nobody.*reported|not been reported/i);
+    expect(text).not.toMatch(/\bnull\b|\bundefined\b|\bNaN\b/);
+    expect(text).toContain("Tue 21:30");
+  });
+
+  it("says there is no played match at all when there is none", () => {
+    const state = world({ confirmed: TEN.slice(0, 6) });
+    const { out } = composeFor(state, [scoreAsk()]);
+    const text = out.utterances[0].text;
+    expect(text).toMatch(/haven't|no match|not played/i);
+    expect(text).not.toMatch(/\bnull\b|\bundefined\b|\bNaN\b|\d+\s-\s\d+/);
+  });
+
   it("the OPTIONS answer with no smaller format configured is not mistaken for squad state", () => {
     const state = world({ confirmed: TEN.slice(0, 8), smallerFormats: [] });
     const { out } = composeFor(state, [

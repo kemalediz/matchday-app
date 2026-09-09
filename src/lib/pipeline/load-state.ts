@@ -219,6 +219,9 @@ export async function loadSquadState(
     completedMatch: completed
       ? {
           id: completed.id,
+          // Same format as the upcoming match's label, so the RESULT
+          // answer can name the night it is talking about. See the field.
+          kickoffLabel: formatLondon(completed.date, "EEE HH:mm"),
           status: completed.status as "TEAMS_GENERATED" | "TEAMS_PUBLISHED" | "COMPLETED",
           isHistorical: completed.isHistorical,
           redScore: completed.redScore,

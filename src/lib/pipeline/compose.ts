@@ -169,6 +169,51 @@ export function compose(result: EngineResult): ComposedOutput {
         break;
       }
 
+      case "answer_score": {
+        // THE RESULT OF THE LAST MATCH PLAYED, in three sentences —
+        // and the two that are not a scoreline are the point.
+        //
+        // `state.completedMatch` is the most recent match whose kickoff
+        // PLUS duration has passed, in any of three statuses. A match
+        // only becomes COMPLETED when somebody records a score, so an
+        // ended Tuesday with nobody's report sits at TEAMS_PUBLISHED
+        // with both scores null — which was the LIVE state on Sutton FC
+        // the day this was written. "0 - 0" would be a fabricated
+        // result; "we haven't played" would be false. Neither is said.
+        //
+        // The kickoff label is printed on every branch that has a match,
+        // because this field is "the most recent ended match" and the
+        // question is usually "did we win on TUESDAY?". If the two are
+        // different nights, the reader can see it. Nothing else in this
+        // answer can tell them.
+        const m = state.completedMatch;
+        if (!m) {
+          utterances.push({
+            messageId: s.messageId,
+            text: "I haven't got a played match on record for this group yet.",
+          });
+          break;
+        }
+        if (m.redScore === null || m.yellowScore === null) {
+          utterances.push({
+            messageId: s.messageId,
+            text: `No score reported for ${m.kickoffLabel} yet — tell me the result and I'll record it.`,
+          });
+          break;
+        }
+        const [redLabel, yellowLabel] = state.teamLabels;
+        const line = `${redLabel} ${m.redScore} - ${m.yellowScore} ${yellowLabel}`;
+        const verdict =
+          m.redScore === m.yellowScore
+            ? "A draw."
+            : `${m.redScore > m.yellowScore ? redLabel : yellowLabel} won.`;
+        utterances.push({
+          messageId: s.messageId,
+          text: `⚽ ${m.kickoffLabel}: ${line}. ${verdict}`,
+        });
+        break;
+      }
+
       case "answer_bench":
         utterances.push({
           messageId: s.messageId,

@@ -2706,6 +2706,40 @@ describe("S16 · a fixture question is answered, not shrugged at", () => {
   });
 });
 
+describe("a result question is answered from the match that was played", () => {
+  const scoreAsk = () =>
+    msg({
+      from: "adam",
+      body: "@Match Time what was the score",
+      route: "question",
+      tagged: true,
+      facts: { kind: "question", topic: "score", personRef: null, statedCount: null },
+    });
+
+  it("emits `answer_score` rather than degrading to silence", () => {
+    const state = world({
+      confirmed: ["kemal"],
+      completedMatch: { id: "m-old", redScore: 5, yellowScore: 3 },
+    });
+    const r = decide({ now: NOW, state, messages: [scoreAsk()] });
+    expect(r.speech.some((s) => s.kind === "answer_score")).toBe(true);
+    expect(r.outcomes[0].disposition).toBe("acted");
+    expect(r.degradations).toHaveLength(0);
+    expect(r.writes).toHaveLength(0);
+  });
+
+  it("still emits it when no match has been played — the composer says so", () => {
+    // The engine does NOT branch on whether a score exists. It emits the
+    // intent and the composer renders the honest sentence for each of
+    // the three states, because splitting the decision across two
+    // modules is how one of them ends up rendering a `null` as a number.
+    const state = world({ confirmed: ["kemal"] });
+    const r = decide({ now: NOW, state, messages: [scoreAsk()] });
+    expect(r.speech.some((s) => s.kind === "answer_score")).toBe(true);
+    expect(r.writes).toHaveLength(0);
+  });
+});
+
 // ══════════════════════════════════════════════════════════════════════
 // 2026-09-07 · THE SHAHROKH INCIDENT — an admin reporting a player out,
 // with no @Match Time tag.

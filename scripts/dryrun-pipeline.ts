@@ -530,10 +530,10 @@ const QUESTION_CASES: QuestionCase[] = [
   // where it is, expecting a count. These four settle what the
   // UNAMBIGUOUS phrasings do, so Q3's reading can be measured against
   // something rather than asserted.
-  { id: "Q25", who: "Zair", body: "@Match Time what was the score last week", expect: "ANSWERED", why: "score — unambiguously the RESULT" },
-  { id: "Q26", who: "Zair", body: "@Match Time did we win on tuesday?", expect: "ANSWERED", why: "score — the result, phrased as a yes/no" },
-  { id: "Q27", who: "Ali", body: "@Match Time what was the final score", expect: "ANSWERED", why: "score — the result" },
-  { id: "Q28", who: "Ali", body: "@Match Time how did we get on last night", expect: "ANSWERED", why: "score — the result, phrased the way the group phrases it" },
+  { id: "Q25", who: "Zair", body: "@Match Time what was the score last week", expect: "ANSWERED", wants: /\d+ - \d+/, why: "score — unambiguously the RESULT" },
+  { id: "Q26", who: "Zair", body: "@Match Time did we win on tuesday?", expect: "ANSWERED", wants: /\d+ - \d+/, why: "score — the result, phrased as a yes/no" },
+  { id: "Q27", who: "Ali", body: "@Match Time what was the final score", expect: "ANSWERED", wants: /\d+ - \d+/, why: "score — the result" },
+  { id: "Q28", who: "Ali", body: "@Match Time how did we get on last night", expect: "ANSWERED", wants: /\d+ - \d+/, why: "score — the result, phrased the way the group phrases it" },
 
   // ── WHO HAS NOT PAID (topic `payments`) ───────────────────────────
   { id: "Q29", who: "Elvin", body: "@Match Time who hasn't paid", expect: "ANSWERED", why: "payments — the question that started this, from the money collector" },
