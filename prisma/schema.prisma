@@ -126,6 +126,36 @@ model Organisation {
   whatsappGroupId    String?
   whatsappBotEnabled Boolean @default(false)
 
+  /// ─── Lifecycle: is this club still a club? (2026-09-09) ─────────
+  /// NULL = live. A timestamp = a human declared this organisation
+  /// dormant on that date: the group is gone, the club has churned or
+  /// disbanded, and MatchTime should stop acting on its own initiative
+  /// for it. Data is deliberately RETAINED (that was the call for
+  /// Sutton Lads, who churned 2026-06-18) — dormancy is the honest
+  /// middle state between "live" and `deleteOrganisation`, which wipes
+  /// everything.
+  ///
+  /// This exists because `whatsappBotEnabled` was being read as if it
+  /// meant this, and it does not. That flag is a MUTE switch — Kemal
+  /// muted the very-much-alive Sutton FC with it twice in the week of
+  /// 2026-09-06 while doing engineering work, and the weekly fixture
+  /// generator kept running for them, correctly. Gating anything
+  /// lifecycle-shaped on the mute switch would mean an hour of
+  /// engineering silently costs a live club its next squad.
+  ///
+  /// DECLARED, never inferred. A heuristic ("no attendance for N
+  /// weeks") cannot tell a churned club from a club on a summer break,
+  /// a winter break, or a venue closure, and the cost of guessing
+  /// wrong is a squad that quietly never got created. See
+  /// `src/lib/org-lifecycle.ts` for the full argument and the one
+  /// place this is read.
+  ///
+  /// NOT the same axis as `Activity.isActive`, which stays exactly as
+  /// it is: that is the per-FIXTURE switch (a format switch leaves the
+  /// old format's Activity active on purpose), this is the per-CLUB
+  /// one. Both are checked.
+  dormantAt DateTime?
+
   /// The player who collects match fees on behalf of the group.
   /// Often a trusted long-serving member, not always the OWNER
   /// (e.g. Sutton FC — Kemal owns the org, Elvin collects payments).
