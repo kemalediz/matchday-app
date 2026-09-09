@@ -1,4 +1,5 @@
 import { config } from "./config.js";
+import type { HeartbeatPayload } from "./heartbeat.js";
 
 const headers = {
   "Content-Type": "application/json",
@@ -366,8 +367,25 @@ export async function postAnalyzeFull(params: {
     body: JSON.stringify(params),
   });
   if (!res.ok) {
-    console.error("analyze post failed:", res.status, await res.text());
-    return { results: [], nextKickoffMs: null };
+    // THROW. Do not return an empty result set.
+    //
+    // 2026-08-30 audit §4.1: this used to `console.error` and return
+    // `{results: [], nextKickoffMs: null}`. `flushGroup` clears the group
+    // buffer optimistically and requeues ONLY from a `catch` — a `catch`
+    // that a non-throwing function can never enter. So `planFlushRetry`,
+    // written specifically to stop a batch of IN/OUT messages being
+    // binned, was dead code for the most likely failure of all: the
+    // analyze route runs an LLM, and a 5xx or a Vercel 504 is its
+    // EXPECTED failure mode, not an exotic one. A stale API key (401) did
+    // the same thing. In every case the buffer was already cleared, no
+    // requeue happened, nothing said CRITICAL, and the flush went on to
+    // log `sent N, 0/0 actionable` as though all was well.
+    //
+    // Throwing hands control to the caller's existing retry path, which
+    // requeues up to `MAX_FLUSH_ATTEMPTS` and then logs a CRITICAL naming
+    // the message ids whose attendance is NOT recorded.
+    const body = await res.text().catch(() => "");
+    throw new Error(`analyze post failed: ${res.status} ${body}`.trim());
   }
   const json = (await res.json()) as {
     results?: AnalyzeResult[];
@@ -379,3 +397,65 @@ export async function postAnalyzeFull(params: {
   };
 }
 
+
+// ─────────────────────── Heartbeat (off-Pi signal) ───────────────────
+
+/**
+ * Report this process's health to the server.
+ *
+ * Called from the batch-flush timer on EVERY tick, including the tick
+ * where the buffer was empty. That is the whole point: the failure being
+ * hunted (August 2026 — every inbound message dropped before the buffer)
+ * produces nothing but empty flushes, so a report conditional on having
+ * something to say would have been silent for exactly the three days it
+ * was needed. It is also why this is not piggybacked on the analyze POST,
+ * which only happens when there ARE messages.
+ *
+ * TOTAL, by design. It swallows every failure and returns `undefined`.
+ *   - Wire compatibility: a NEW Pi routinely runs against an OLDER server
+ *     (the server ships on merge; the Pi is deployed by hand), where this
+ *     route does not exist and the call 404s. That must be a no-op.
+ *   - Priority: monitoring must never be able to break the thing it
+ *     monitors. A heartbeat is worth exactly zero customer messages.
+ *
+ * A failure is logged ONCE per process rather than every ten minutes,
+ * because a line every ten minutes forever is how a log stops being read
+ * — the failure this whole feature exists to fix. The server's own
+ * staleness sweep is what notices the missing heartbeats anyway, and it
+ * does not need the Pi's cooperation to do it.
+ */
+let heartbeatFailureLogged = false;
+
+export async function postHeartbeat(payload: HeartbeatPayload): Promise<void> {
+  try {
+    const res = await fetch(`${config.apiUrl}/api/whatsapp/heartbeat`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      if (!heartbeatFailureLogged) {
+        heartbeatFailureLogged = true;
+        console.warn(
+          `[heartbeat] the server rejected the health report (${res.status}). ` +
+            "If this is a 404 the server predates the heartbeat endpoint and the Pi's " +
+            "half of the health signal is simply not armed yet; the server-side " +
+            "staleness sweep still runs. Not retried, and not logged again this process.",
+        );
+      }
+      return;
+    }
+    // A recovered heartbeat re-arms the one-shot log, so a LATER outage
+    // still gets its line.
+    heartbeatFailureLogged = false;
+  } catch (err) {
+    if (!heartbeatFailureLogged) {
+      heartbeatFailureLogged = true;
+      console.warn(
+        "[heartbeat] could not reach the server to report health (not logged again " +
+          "this process):",
+        err instanceof Error ? err.message : err,
+      );
+    }
+  }
+}

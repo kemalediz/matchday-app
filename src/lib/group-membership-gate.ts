@@ -297,6 +297,8 @@ export function groupSyncAdminWarning(sync: GroupSyncStatus): string | null {
     `${age}, so it cannot tell who is currently in the WhatsApp group. Players who joined ` +
     "since then can only mark themselves in on the app if we already have them in a squad " +
     "or have seen them post in the group. Everyone else should reply IN in the group, which " +
-    "always works. Worth restarting the bot."
+    "always works. This is not something you can fix from here, and it is not fixed by " +
+    "restarting: MatchTime is being blocked by a change on WhatsApp's side. It has been " +
+    "reported and it does not affect anything else the bot does."
   );
 }

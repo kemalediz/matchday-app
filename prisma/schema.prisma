@@ -738,6 +738,92 @@ model RosterSurveyResponse {
   @@index([surveyId])
 }
 
+/**
+ * The WhatsApp bot's latest self-report, one row per org.
+ *
+ * Everything the bot knows about its own health used to be a
+ * `console.error` in `bot.log` on a Raspberry Pi that nobody reads — the
+ * 2026-08-30 audit's headline finding, and the reason a three-day outage
+ * was a three-day outage. This is where that signal lands instead.
+ *
+ * LATEST-ONLY, not a history table. The counters are cumulative per bot
+ * PROCESS, so every rule in `src/lib/bot-health.ts` is expressible as
+ * "has this ever happened since the process started" and needs no deltas.
+ * One row per org means no growth, no retention cron, and no second place
+ * for the truth to live. `processStartedAt` is what tells a reader the
+ * counters reset.
+ *
+ * Written by `POST /api/whatsapp/heartbeat` (every ~10 min, from the
+ * Pi's batch-flush timer, INCLUDING the tick where there was nothing to
+ * flush — an empty buffer is the failure being hunted, so the report
+ * cannot be conditional on having something to say). Read by
+ * `GET /api/cron/bot-health` hourly, which is the half that notices
+ * ABSENCE: a Pi that sends nothing cannot report that it sent nothing.
+ *
+ * No relation to Organisation, matching `BotJob` next door: this is
+ * operational telemetry, not domain data, and it must survive being
+ * looked at when the org row is mid-edit.
+ */
+model BotHealth {
+  id        String @id @default(cuid())
+  orgId     String @unique
+  /// The WhatsApp group the reporting bot was monitoring for this org.
+  /// Null until a heartbeat has actually arrived.
+  waGroupId String?
+
+  /// When the Pi last reported. ABSENCE of a fresh value here is the
+  /// signal that catches a dead Pi, and it is the only signal that can.
+  ///
+  /// NULLABLE, and the distinction is load-bearing: null means "no
+  /// heartbeat has EVER arrived", which is what a healthy Pi running a
+  /// build older than 2026-09-09 looks like, and it must never be read
+  /// as an outage. A row can exist with this still null because the
+  /// server-side alert rules (stale sweep, nameless senders) fire off
+  /// data an older Pi already produces, and their dedupe state lives
+  /// here. Storing a sentinel date instead would make every such org
+  /// look permanently dead.
+  lastHeartbeatAt  DateTime?
+  /// When the reporting bot process started. Counters are per-process,
+  /// so a change here means they reset (and is itself evidence of a
+  /// restart loop when it keeps changing).
+  processStartedAt DateTime?
+  /// Free-form build marker from the Pi, for "which build is running".
+  botVersion       String?
+
+  /// Cumulative per-process inbound counters as of `lastHeartbeatAt`.
+  /// See `HealthCounters` in src/lib/bot-health.ts for what each means
+  /// and which alert rule reads it.
+  seen               Int @default(0)
+  buffered           Int @default(0)
+  synthetic          Int @default(0)
+  reconstructed      Int @default(0)
+  notGroup           Int @default(0)
+  degradedEnrichment Int @default(0)
+  nameless           Int @default(0)
+  reactFailures      Int @default(0)
+  flushFailures      Int @default(0)
+  droppedMessages    Int @default(0)
+
+  /// Capabilities the Pi itself declared degraded, verbatim from
+  /// `whatsapp-bot/src/degraded.ts` (e.g. "participant-sync"). Forwarded
+  /// rather than re-derived so a capability added there surfaces without
+  /// the server needing to know about it.
+  degradedCapabilities String[]
+
+  /// Alert dedupe, kept HERE rather than in SentNotification because it
+  /// is a property of this org's health, not of a match. `alertedCodes`
+  /// is what makes "a NEW condition appeared" distinguishable from "the
+  /// same thing is still broken" — the difference between speaking up
+  /// immediately and waiting for the repeat window.
+  lastAlertAt    DateTime?
+  lastAlertCodes String[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([lastHeartbeatAt])
+}
+
 model BotJob {
   id           String    @id @default(cuid())
   orgId        String

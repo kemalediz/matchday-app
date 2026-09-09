@@ -348,6 +348,32 @@ describe("groupSyncAdminWarning", () => {
     expect(w).toMatch(/never/i);
   });
 
+  it("does NOT tell the admin to restart the bot", () => {
+    // It used to end "Worth restarting the bot." A restart cannot fix
+    // this: the sweep has been dead since 2026-07-07 because
+    // whatsapp-web.js's injected page code is out of step with the live
+    // WhatsApp Web build, and every restart since has failed the same way.
+    // Advice that cannot work is worse than no advice — it sends the owner
+    // to do something useless and then believe the problem is elsewhere.
+    for (const w of [
+      groupSyncAdminWarning(STALE_SYNC),
+      groupSyncAdminWarning({ lastSyncAt: null, now: new Date() }),
+    ]) {
+      expect(w!.toLowerCase()).not.toMatch(/worth restarting|try restarting|restart the bot/);
+      // And it says so out loud, so nobody spends an evening rebooting a
+      // Raspberry Pi.
+      expect(w!.toLowerCase()).toContain("not fixed by restarting");
+    }
+  });
+
+  it("says the group itself still works, because it does", () => {
+    // The failure is confined to the app's self-IN button. Replying IN in
+    // the WhatsApp group is a different path entirely and is unaffected,
+    // and that is the sentence that keeps a club playing while somebody
+    // fixes the sweep.
+    expect(groupSyncAdminWarning(STALE_SYNC)).toMatch(/repl(y|ying) IN/i);
+  });
+
   it("follows house style: no em dashes and no slashes", () => {
     for (const w of [groupSyncAdminWarning(STALE_SYNC), groupSyncAdminWarning({ lastSyncAt: null, now: new Date() })]) {
       expect(w).not.toContain("—");

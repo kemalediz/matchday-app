@@ -17,6 +17,7 @@ import {
 } from "./api.js";
 import {
   enqueueForAnalysis,
+  recordDegradedCapability,
   recordHistory,
   recoverGroupMessages,
   startBatchFlushTimer,
@@ -155,6 +156,12 @@ async function main() {
       // step with the live WhatsApp Web build (2026-08-28: this threw the
       // minified `r: r` while every contact/chat lookup on the inbound path
       // died the same way). Say so loudly rather than logging a bare error.
+      // Logged AND reported. The log line is for whoever is reading the
+      // journal; the record is what actually reaches a human, since since
+      // 2026-09-09 the counters and this set travel off the Pi in the
+      // 10-minute heartbeat. This particular one is the canary for the
+      // whole injected layer.
+      recordDegradedCapability("group-enumeration");
       console.error(degradedMessage("group-enumeration", err));
     }
 
@@ -232,6 +239,7 @@ async function main() {
           // assumes the group is simply already in sync. Treat it as the
           // failure it is.
           if (!Array.isArray(participants) || participants.length === 0) {
+            recordDegradedCapability("participant-sync");
             console.error(
               degradedMessage(
                 "participant-sync",
@@ -239,6 +247,11 @@ async function main() {
                 `${o.orgName} (${o.groupId})`,
               ),
             );
+            // NOTE: this `continue` skips only the sync POST for THIS org
+            // and moves to the next one. Nothing else in the loop body
+            // runs after the POST, so no guard below is being deleted —
+            // and the degradation is now recorded ABOVE the continue, so
+            // it still reaches the server on the next heartbeat.
             continue;
           }
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -286,6 +299,7 @@ async function main() {
           // Was `[sync-participants] <org> failed: r` — a line that told
           // nobody the web app's self-IN gate was about to start rejecting
           // real players. Say what it costs.
+          recordDegradedCapability("participant-sync");
           console.error(degradedMessage("participant-sync", err, `${o.orgName} (${o.groupId})`));
         }
       }
@@ -611,6 +625,7 @@ async function main() {
         // the server has to JOIN this reaction to the bench prompt it already
         // sent, and only the real WhatsApp id can do that. So the only honest
         // thing is to say so.
+        recordDegradedCapability("reaction-forwarding");
         console.error(
           degradedMessage(
             "reaction-forwarding",

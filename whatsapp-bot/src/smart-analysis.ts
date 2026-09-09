@@ -19,10 +19,17 @@
 import type { Client, Message } from "whatsapp-web.js";
 import {
   postAnalyzeFull,
+  postHeartbeat,
   type AnalyzeInboundHistory,
   type AnalyzeInboundMessage,
   type AnalyzeResult,
 } from "./api.js";
+import {
+  buildHeartbeat,
+  emptyCounters,
+  isUnattributable,
+  type BotCounters,
+} from "./heartbeat.js";
 import { enrichOrDegrade, planFlushRetry, type InboundEnrichment } from "./inbound-enrich.js";
 import { rewriteMentions, type MentionName, type RawMentionContact } from "./mentions.js";
 import { firstUsableName, readMessageBody, readNotifyName, safeRead } from "./wa-read.js";
@@ -154,50 +161,101 @@ interface Pending {
 // can't wedge a group's buffer forever.
 const MAX_FLUSH_ATTEMPTS = 3;
 
-// ─── Inbound counters (diagnostics) ─────────────────────────────────
+// ─── Inbound counters (diagnostics AND the off-Pi health signal) ─────
 /**
  * Per-process tallies of what the inbound path did with the messages it was
  * handed. These exist because the 2026-08-30 outage was INVISIBLE: `[msg]`
  * lines scrolled past all day while `enqueueForAnalysis` dropped every one
  * of them before the buffer, and `flushGroup` returned on an empty buffer
- * without logging. `seen` far exceeding `buffered` is now the signature of
- * that class of failure, and it is printed on every empty flush (i.e. within
- * ten minutes) rather than never.
+ * without logging. `seen` far exceeding `buffered` is the signature of that
+ * class of failure.
+ *
+ * They used to be printed on every empty flush and NOTHING ELSE — into
+ * `bot.log`, on a Pi, which the 2026-08-30 audit named as the single
+ * biggest problem in the whole incident. Since 2026-09-09 they also leave
+ * the building via `reportHealth` → `POST /api/whatsapp/heartbeat`, where
+ * `src/lib/bot-health.ts` decides whether a human is told. The shape lives
+ * in `heartbeat.ts` so the Pi and the server cannot drift apart about what
+ * each number means.
  */
-interface InboundStats {
-  /** enqueueForAnalysis calls. */
-  seen: number;
-  /** Messages that made it onto a group buffer. */
-  buffered: number;
-  /** Of those, how many needed a synthesised waMessageId. */
-  synthetic: number;
-  /**
-   * How many had a REAL id rebuilt from the message key's parts because
-   * `id._serialized` was gone.
-   *
-   * Worth counting separately from `synthetic`: a reconstructed id still
-   * joins to `message_reaction` events, so the product keeps working — but a
-   * non-zero count is the earliest hard evidence that the injected layer has
-   * drifted from the live WhatsApp Web build, usually days before something
-   * user-visible breaks.
-   */
-  reconstructed: number;
-  /** Skipped because they were not a group (@g.us) message. */
-  notGroup: number;
-}
-const inboundStats: InboundStats = {
-  seen: 0,
-  buffered: 0,
-  synthetic: 0,
-  reconstructed: 0,
-  notGroup: 0,
-};
+const inboundStats: BotCounters = emptyCounters();
 
-function formatInboundStats(s: InboundStats): string {
+/**
+ * When this bot process started. Sent with every heartbeat because the
+ * counters above are per-PROCESS: without it, a server reading `synthetic=0`
+ * cannot tell "the fix worked" from "it restarted a minute ago".
+ */
+const processStartedAt = new Date();
+
+/**
+ * Capabilities this process has declared degraded, as a SET.
+ *
+ * Populated by the call sites that already log a `degradedMessage(...)`
+ * CRITICAL. Recording them here is what carries that sentence off the Pi:
+ * the participant sweep has been dead since 2026-07-07 and said so in
+ * `bot.log` every single startup, to nobody.
+ *
+ * Never cleared while the process lives. A capability that failed once and
+ * then appeared to work is still a capability that failed, and clearing it
+ * would let an intermittent fault hide between heartbeats.
+ */
+const degradedCapabilities = new Set<string>();
+
+/**
+ * Record that a capability is unavailable, for the next heartbeat.
+ *
+ * Deliberately separate from `degradedMessage()`, which composes the log
+ * line: one of them is for a human reading the journal, the other is for
+ * the server. Coupling them would mean any caller that logs its own
+ * sentence silently stops being visible off-Pi.
+ */
+export function recordDegradedCapability(capability: string): void {
+  if (typeof capability === "string" && capability.trim().length > 0) {
+    degradedCapabilities.add(capability.trim());
+  }
+}
+
+function formatInboundStats(s: BotCounters): string {
   return (
     `seen=${s.seen} buffered=${s.buffered} synthetic=${s.synthetic} ` +
-    `reconstructed=${s.reconstructed} notGroup=${s.notGroup}`
+    `reconstructed=${s.reconstructed} notGroup=${s.notGroup} ` +
+    `nameless=${s.nameless} degradedEnrichment=${s.degradedEnrichment} ` +
+    `reactFailures=${s.reactFailures} flushFailures=${s.flushFailures} ` +
+    `dropped=${s.droppedMessages}`
   );
+}
+
+/**
+ * Send one health report per monitored group.
+ *
+ * Called from the batch-flush timer on EVERY tick, including the tick where
+ * every buffer was empty. That unconditionality is the entire design:
+ * `flushGroup` returns early on an empty buffer and never POSTs to analyze,
+ * so anything piggybacked on THAT call would have been silent for exactly
+ * the three days in August when every message was being dropped before the
+ * buffer. See `src/app/api/whatsapp/heartbeat/route.ts` for the full
+ * transport argument.
+ *
+ * TOTAL. A failure to report health must never be able to disturb message
+ * delivery — `postHeartbeat` already swallows its own errors, and this
+ * catches anything left (a throwing `buildHeartbeat`, an exotic client
+ * state) so a monitoring bug cannot take the flush timer down with it.
+ */
+export async function reportHealth(groupIds: string[]): Promise<void> {
+  for (const groupId of groupIds) {
+    try {
+      await postHeartbeat(
+        buildHeartbeat({
+          groupId,
+          counters: inboundStats,
+          processStartedAt,
+          degradedCapabilities: [...degradedCapabilities],
+        }),
+      );
+    } catch (err) {
+      console.warn("[heartbeat] health report failed (ignored):", err);
+    }
+  }
 }
 
 /** A string when the value is a usable non-blank one, else undefined. */
@@ -359,7 +417,11 @@ export async function enqueueForAnalysis(client: Client, msg: Message): Promise<
   const enriched = await enrichOrDegrade(
     fallbackIdentity,
     () => enrichInbound(client, msg, rawBody, fallbackIdentity),
-    (err) =>
+    (err) => {
+      // Counted BEFORE the log, because the log is the half that has never
+      // worked: this exact CRITICAL has been printing into `bot.log` on the
+      // Pi since 2026-08-30 and no human has read one.
+      inboundStats.degradedEnrichment++;
       console.error(
         `CRITICAL: enrichment failed for ${waMessageId} in ${groupId} — ` +
           "forwarding the RAW message to the analyzer instead (author name and " +
@@ -367,9 +429,17 @@ export async function enqueueForAnalysis(client: Client, msg: Message): Promise<
           "whatsapp-web.js's injected page code is out of step with the live " +
           "WhatsApp Web build — consider pinning WA_WEB_VERSION. Cause:",
         err instanceof Error ? err.message : err,
-      ),
+      );
+    },
   );
   const { body, authorName, authorPhone, botMentioned, mentionNames } = enriched;
+
+  // The audit's §3 as a number. With no phone AND no usable name the server
+  // resolves nobody, writes no attendance, and returns HTTP 200 while doing
+  // it — and until 2026-09-09 the message was also excluded by construction
+  // from the group nudge and the admin queue built to catch exactly this.
+  // Counted here, at the last point the Pi still knows both fields.
+  if (isUnattributable(authorPhone, authorName)) inboundStats.nameless++;
 
   const pending: Pending = {
     waMessageId,
@@ -442,11 +512,31 @@ async function enrichInbound(
   // Every read off `contact` is total: on the broken build these are
   // throwing getters, and one throw here used to take the whole enrichment
   // (and, before PR #11, the whole message) with it.
+  // THE RAW PAYLOAD'S NAME COMES FIRST (2026-09-09, audit recommendation #1).
+  //
+  // `fallback.authorName` is `msg._data.notifyName` — the sender's pushname
+  // serialised ONTO the message when the event fired. Plain data, no page
+  // call, so it survives whatever WhatsApp ships. The contact reads below
+  // go through the injected layer and are the ones that die.
+  //
+  // The order used to be the other way round, and "prefer the richer
+  // source" sounds right until you notice what it costs: the string the
+  // server matches against the roster then CHANGES the moment the layer
+  // degrades. A `UserAlias` curated against the contact's `pushname`
+  // silently stops matching mid-outage, so a player who resolved fine on
+  // Monday is unresolvable on Tuesday for a reason nobody can see. Taking
+  // the stable field first means the identity the server sees is the SAME
+  // on a healthy build and a broken one — which is the property that makes
+  // the degraded path actually work rather than merely not crash.
+  //
+  // In practice these are the same string: `notifyName` IS the pushname.
+  // The contact reads remain as the fallback for the case `_data` carries
+  // no notifyName at all (older payloads, some system messages).
   const authorName = firstUsableName(
+    fallback.authorName,
     asOptionalString(safeRead(contact, "pushname")),
     asOptionalString(safeRead(contact, "name")),
     asOptionalString(safeRead(contact, "verifiedName")),
-    fallback.authorName,
   );
 
   // `@lid` privacy senders carry no phone in their JID, but the contact
@@ -575,7 +665,13 @@ async function flushGroup(client: Client, groupId: string): Promise<void> {
       // whole batch of IN/OUT messages is binned on a transient network
       // blip. Put it back (bounded, so a poison batch can't loop forever)
       // and let the next tick — or the next enqueue — retry it.
+      // Both counters leave the Pi on the next heartbeat. `flushFailures`
+      // is a warning sign; `droppedMessages` is a customer's IN or OUT that
+      // will never be recorded, which is why the server treats any non-zero
+      // value as critical.
+      inboundStats.flushFailures++;
       const { requeue, dropped } = planFlushRetry(pending, MAX_FLUSH_ATTEMPTS);
+      inboundStats.droppedMessages += dropped.length;
       if (requeue.length > 0) {
         bufferByGroup.set(groupId, [...requeue, ...(bufferByGroup.get(groupId) ?? [])]);
       }
@@ -690,6 +786,14 @@ async function flushGroup(client: Client, groupId: string): Promise<void> {
       }
     }
 
+    // Off-Pi signal for the ✅ that IS the player's confirmation. A WARNING
+    // server-side, not a critical: attendance is still recorded and the
+    // text catch-up below covers the player. It matters because the club
+    // reads a missing emoji as "the bot is broken", and in August it was
+    // silent to BOTH the player and the log (Message.react() resolved
+    // without placing anything, so nothing threw).
+    inboundStats.reactFailures += failedReacts.length;
+
     await handleFailedReacts(client, groupId, failedReacts, reactAttempts, failureReasons);
   } finally {
     inFlightFlush.delete(groupId);
@@ -778,6 +882,19 @@ export function startBatchFlushTimer(client: Client, groupIds: string[]): void {
     for (const g of groupIds) {
       flushGroup(client, g).catch((err) => console.error("[smart] scheduled flush failed:", err));
     }
+    // AFTER the flushes are dispatched, and UNCONDITIONALLY — including
+    // the tick where every buffer was empty.
+    //
+    // This is the whole off-Pi signal, and its unconditionality is the
+    // design. The failure it exists to catch (August 2026: every inbound
+    // message dropped before the buffer) produces nothing but empty
+    // flushes, so a report that only rode along with the analyze POST
+    // would have been silent for exactly the three days it was needed.
+    //
+    // Not awaited and never allowed to throw: `reportHealth` is total, and
+    // the flushes above are already in flight, so a slow or failing report
+    // cannot delay or break a single customer message.
+    void reportHealth(groupIds);
   }, FLUSH_INTERVAL_MS);
 
   // Also do one flush a few seconds after startup so any messages that
@@ -788,6 +905,11 @@ export function startBatchFlushTimer(client: Client, groupIds: string[]): void {
         /* logged inside */
       });
     }
+    // Report at startup too, so a bot that comes up, fails its startup
+    // sweep and then sits there says so within seconds rather than waiting
+    // out a full flush interval. It is also the first thing that tells the
+    // server this org has a heartbeat-capable Pi at all.
+    void reportHealth(groupIds);
   }, 15_000);
 }
 
@@ -830,6 +952,7 @@ export async function recoverGroupMessages(client: Client, groupIds: string[]): 
       // Ibrahim's "in" landed during a deploy restart and was never
       // registered). When it fails, that gap is silently back open — and it
       // fails on exactly the deploys where it matters most.
+      recordDegradedCapability("message-recovery");
       console.error(degradedMessage("message-recovery", err, gid));
     }
   }
@@ -848,7 +971,7 @@ export function _test_flushNow(groupId: string): Promise<void> {
 }
 
 /** Test-only: snapshot of the inbound counters. */
-export function _test_getInboundStats(): InboundStats {
+export function _test_getInboundStats(): BotCounters {
   return { ...inboundStats };
 }
 
@@ -860,9 +983,9 @@ export function _test_reset(): void {
   inFlightFlush.clear();
   lastReactFallbackAt.clear();
   sharedClient = null;
-  inboundStats.seen = 0;
-  inboundStats.buffered = 0;
-  inboundStats.synthetic = 0;
-  inboundStats.reconstructed = 0;
-  inboundStats.notGroup = 0;
+  degradedCapabilities.clear();
+  // Reset EVERY counter by rebuilding from the canonical shape, so a
+  // counter added to `BotCounters` later cannot silently leak between test
+  // cases because somebody forgot to add a line here.
+  Object.assign(inboundStats, emptyCounters());
 }
