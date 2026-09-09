@@ -118,6 +118,7 @@ export interface WorldOpts {
   features?: Partial<SquadState["features"]>;
   smallerFormats?: SquadState["smallerFormats"];
   guestAskedUserIds?: string[];
+  payments?: SquadState["payments"];
   noPhone?: string[];
   admins?: string[];
 }
@@ -166,6 +167,7 @@ export function world(opts: WorldOpts = {}): SquadState {
     },
     smallerFormats: opts.smallerFormats ?? [],
     guestAskedUserIds: opts.guestAskedUserIds ?? [],
+    payments: opts.payments ?? null,
   };
 }
 

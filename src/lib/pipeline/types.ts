@@ -22,6 +22,11 @@
  * PROPOSED writes and a PROJECTED next state; the shadow harness
  * persists them for comparison (§10 step 2, "Still zero writes").
  */
+// Type-only, and from a module with no Prisma import of its own — see
+// `SquadState.payments` and `payment-answer.ts`'s header.
+import type { PaymentSnapshot } from "./payment-answer";
+
+export type { PaymentSnapshot };
 
 // ── Stage 1: routes ────────────────────────────────────────────────────
 
@@ -270,6 +275,22 @@ export type QuestionTopic =
    * this topic is for.
    */
   | "score"
+  /**
+   * WHO HAS NOT PAID for the last match — money, and the only topic in
+   * this list that reads something `loadSquadState` does not load.
+   *
+   * It is the one question on the 2026-09-06 list where being WRONG
+   * costs a person something rather than costing MatchTime credibility,
+   * so it is also the one with three refusals to its one answer. The
+   * whole decision — which org flag gates it, why the answer names
+   * nobody, and why the last match must be COMPLETED — is in
+   * `payment-answer.ts`'s header, not repeated here.
+   *
+   * "payments", not "unpaid": the extractor is classifying a SUBJECT,
+   * and "has everyone paid for last week" is the same subject asked from
+   * the other side.
+   */
+  | "payments"
   | "stats"
   | "options"
   | "other";
@@ -522,6 +543,28 @@ export interface SquadState {
   /** Players already asked for a guest's name for this match — the
    *  one-ask-per-player-per-match dedupe key of `guest-name-ask.ts`. */
   guestAskedUserIds: string[];
+  /**
+   * WHO HAS NOT PAID — and `null` on almost every batch, deliberately.
+   *
+   * ⚠️ THE ONLY FIELD ON THIS INTERFACE THAT `loadSquadState` DOES NOT
+   * FILL. Every other field is loaded on EVERY batch, including the 69%
+   * that are banter, so a payment query in the loader would be two more
+   * round trips per joke. `answer-batch.ts` loads state, extracts, and
+   * only then knows which topics are in the window — so it does one
+   * targeted load AFTER extraction and only when a `payments` topic
+   * survived ownership, and hands the result down as data.
+   *
+   * That is why this is a snapshot and not a lazy accessor:
+   * `compose.ts` must stay free of Prisma (its header says why — the
+   * Playwright worker never loads it), so a function on state that goes
+   * to the database is not available at all. Data in, strings out.
+   *
+   * `null` therefore means NOT LOADED, never "nothing to report" —
+   * `PaymentSnapshot` has its own shapes for those. The composer treats
+   * a null under an `answer_payments` intent as an operator note and
+   * says nothing, which makes `answer-batch.ts` disown the message.
+   */
+  payments: PaymentSnapshot | null;
 }
 
 // ── What the engine hands back ─────────────────────────────────────────
@@ -709,6 +752,12 @@ export type SpeechIntent =
    * engine's `case "score"`.
    */
   | { kind: "answer_score"; messageId: string }
+  /**
+   * How many have not paid for the last settled match. Carries no count
+   * and no name: the composer reads `state.payments`, which is a
+   * `PaymentSnapshot` and has no field a name could come out of.
+   */
+  | { kind: "answer_payments"; messageId: string }
   | { kind: "answer_options"; messageId: string }
   | { kind: "teams_post"; messageId: string }
   /**

@@ -385,6 +385,96 @@ describe("questions are answered from state, not from the model", () => {
     expect(text).not.toMatch(/\bnull\b|\bundefined\b|\bNaN\b|\d+\s-\s\d+/);
   });
 
+  // ── WHO HAS NOT PAID ───────────────────────────────────────────────
+  //
+  // The composer NAMES NOBODY, on every branch, because there is no name
+  // in `PaymentSnapshot` to print. `buildUnpaidTail` set that precedent
+  // in the same group ("no naming, no shaming", Sait, 2026-04-25).
+  const paymentAsk = () =>
+    msg({
+      from: "elvin",
+      body: "@Match Time who hasn't paid",
+      route: "question",
+      tagged: true,
+      facts: { kind: "question", topic: "payments", personRef: null, statedCount: null },
+    });
+
+  const NAMES = /Kemal|Elvin|Sait|Mustafa|Abid|Idris/;
+
+  it("answers with a count and no names", () => {
+    const state = {
+      ...world({ confirmed: TEN }),
+      payments: {
+        kind: "counted" as const,
+        chargeable: 9,
+        unpaid: 5,
+        kickoffLabel: "Tue 21:15",
+      },
+    };
+    const { out } = composeFor(state, [paymentAsk()]);
+    const text = out.utterances[0].text;
+    expect(text).toContain("5 of 9");
+    expect(text).toContain("Tue 21:15");
+    expect(text).not.toMatch(NAMES);
+    expect(displaysSquadState(text)).toBe(false);
+  });
+
+  it("says everyone is settled rather than printing a zero", () => {
+    const state = {
+      ...world({ confirmed: TEN }),
+      payments: {
+        kind: "counted" as const,
+        chargeable: 9,
+        unpaid: 0,
+        kickoffLabel: "Tue 21:15",
+      },
+    };
+    const { out } = composeFor(state, [paymentAsk()]);
+    expect(out.utterances[0].text).toMatch(/all settled|everyone/i);
+    expect(out.utterances[0].text).not.toMatch(NAMES);
+  });
+
+  it("says MatchTime does not know rather than implying everyone has paid", () => {
+    // The whole reason `not_tracked` exists. An empty list reads as "all
+    // clear" and that is a claim, not an absence.
+    const state = { ...world({ confirmed: TEN }), payments: { kind: "not_tracked" as const } };
+    const { out } = composeFor(state, [paymentAsk()]);
+    const text = out.utterances[0].text;
+    expect(text).toMatch(/don't track|not track/i);
+    expect(text).not.toMatch(/all settled|everyone.*paid|nobody owes/i);
+  });
+
+  it("refuses to put a number on a match with no payment signal", () => {
+    const state = {
+      ...world({ confirmed: TEN }),
+      payments: { kind: "no_signal" as const, kickoffLabel: "Tue 21:30" },
+    };
+    const { out } = composeFor(state, [paymentAsk()]);
+    const text = out.utterances[0].text;
+    expect(text).toContain("Tue 21:30");
+    expect(text).not.toMatch(/\b\d+ of \d+\b/);
+    expect(text).not.toMatch(NAMES);
+  });
+
+  it("says there is nothing settled to check when there is no completed match", () => {
+    const state = { ...world({ confirmed: TEN }), payments: { kind: "no_settled_match" as const } };
+    const { out } = composeFor(state, [paymentAsk()]);
+    expect(out.utterances[0].text).toMatch(/settled|played/i);
+  });
+
+  it("says NOTHING, loudly, when the payment load never happened", () => {
+    // `state.payments` is null on every batch that did not ask for it —
+    // which is nearly all of them. Reaching this branch means the engine
+    // emitted the intent without the load, and the right answer is an
+    // operator note and no utterance: `answer-batch.ts` then disowns the
+    // message, so it hands back instead of passing an empty string off
+    // as an answer.
+    const state = world({ confirmed: TEN });
+    const { out } = composeFor(state, [paymentAsk()]);
+    expect(out.utterances).toHaveLength(0);
+    expect(out.operatorNotes.join(" ")).toMatch(/payment/i);
+  });
+
   it("the OPTIONS answer with no smaller format configured is not mistaken for squad state", () => {
     const state = world({ confirmed: TEN.slice(0, 8), smallerFormats: [] });
     const { out } = composeFor(state, [

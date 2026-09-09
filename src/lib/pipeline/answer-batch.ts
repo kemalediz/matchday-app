@@ -120,6 +120,14 @@
  *                                               a player their slot.
  *   • the extracted shape is one the composer
  *     cannot answer well                      → SILENCE + note
+ *   • the targeted PAYMENT read threw         → that ONE message goes
+ *                                               silent + note. The rest
+ *                                               of the batch is
+ *                                               unaffected: a fixture
+ *                                               question beside a
+ *                                               payment question still
+ *                                               gets its answer. See
+ *                                               stage 2b.
  *   • the engine threw, or proposed a write   → owns nothing → SILENCE
  *                                               + note
  *
@@ -178,6 +186,7 @@ import type {
   EngineMessage,
   EngineResult,
   Facts,
+  PaymentSnapshot,
   ProposedWrite,
   QuestionTopic,
   Route,
@@ -287,6 +296,39 @@ export const ANSWER_ROUTES = ANSWER_ENGINE_ROUTES;
  * `QuestionTopic`'s own note.
  *
  * ─────────────────────────────────────────────────────────────────────
+ * `payments` JOINED ON 2026-09-09, AND IT IS THE ONLY TOPIC HERE THAT
+ * READS SOMETHING `loadSquadState` DOES NOT LOAD
+ * ─────────────────────────────────────────────────────────────────────
+ * "@Match Time who hasn't paid" was the last question on the 2026-09-06
+ * list with no data behind it. It is also the only one where being
+ * WRONG costs a person something rather than costing MatchTime
+ * credibility, so it has three refusals to its one answer and the whole
+ * decision lives in `payment-answer.ts` — which flag really gates it
+ * (not the one with "tracking" in its name), why the answer names
+ * nobody, and why the match must be COMPLETED.
+ *
+ * The SHAPE of the extra read is in this file, at stage 2b: one
+ * targeted load AFTER extraction, only when a `payments` topic survived
+ * ownership, passed down as data. `loadSquadState` runs on every batch
+ * including the 69% that are banter, and `compose.ts` cannot import
+ * Prisma, so neither "put it in the loader" nor "make it a lazy
+ * accessor" was available. Measured live: the four payment phrasings
+ * answer 40/40, and the negative control "how much do we pay each"
+ * (the FEE, which nothing here holds) stays on `other` 10/10.
+ *
+ * ─────────────────────────────────────────────────────────────────────
+ * WHAT THE THREE ADDITIONS MOVED, MEASURED THE SAME WAY EACH TIME
+ * ─────────────────────────────────────────────────────────────────────
+ * The Q1-Q24 table, twice, against the live Sutton squad:
+ *
+ *   before   38 of 48 answered · 10 handed back · 0 silent
+ *   after    46 of 48 answered ·  2 handed back · 0 silent
+ *
+ * Both remaining hand-backs are Q20, "is my mate down for tuesday" —
+ * a `person_status` that names nobody, which nothing in the system can
+ * answer and which SHOULD hand back. See §14.3 and `identity.ts`.
+ *
+ * ─────────────────────────────────────────────────────────────────────
  * WHY `other` IS STILL ABSENT
  * ─────────────────────────────────────────────────────────────────────
  * A topic the extractor could not place is exactly the case §14.3 calls
@@ -305,6 +347,7 @@ export const ANSWERABLE_TOPICS: readonly QuestionTopic[] = [
   "person_status",
   "phones",
   "fixture",
+  "payments",
   "score",
   "stats",
   "options",
@@ -557,6 +600,13 @@ export interface AnswerBatchDeps {
   /** `SquadState.features` carries attendance / paymentTracking /
    *  statsQa; the team post needs `teamBalancing`, which lives here. */
   loadFeatures?: (orgId: string) => Promise<OrgFeatures>;
+  /** The one targeted read that does NOT happen on every batch. Injected
+   *  so a test can prove both that it is called for a `payments` topic
+   *  and that it is NOT called for anything else. */
+  loadPayments?: (
+    orgId: string,
+    completedMatch: SquadState["completedMatch"],
+  ) => Promise<PaymentSnapshot>;
   /** Injected so a test can prove the write assertion and the
    *  throw-safety without a fabricated engine rule in the real engine. */
   decide?: (input: EngineInput) => EngineResult;
@@ -949,6 +999,50 @@ export async function runAnswerBatch(args: {
   }
 
   if (ownedIds.size === 0) return empty(degradations);
+
+  // ── Stage 2b: ONE TARGETED EXTRA READ, and only when asked ─────────
+  //
+  // `loadSquadState` runs on every batch, including the 69% that are
+  // banter, so payment rows do not belong in it: nobody should pay two
+  // queries for a "haha". And a lazy accessor on state is not available
+  // either — `compose.ts` must stay free of Prisma (its header says
+  // why), so a function on `SquadState` that reaches the database would
+  // put Prisma back on the composer's path.
+  //
+  // This is where the third option lives. Ownership is settled by the
+  // line above, so the topics in this window are KNOWN; load once if one
+  // of them needs it, and hand it down as data. The engine stays a pure
+  // function of one value and the common path is unchanged.
+  //
+  // FAILS OPEN. A payment load that throws leaves `state.payments` null,
+  // the composer says nothing under `answer_payments`, and the silent-id
+  // check below disowns the message — a hand-back with a receipt. It does
+  // NOT take the rest of the batch down: a fixture question beside a
+  // payment question still gets its answer.
+  const wantsPayments = [...ownedIds].some(
+    (id) => {
+      const f = factsById.get(id);
+      return f?.kind === "question" && f.topic === "payments";
+    },
+  );
+  if (wantsPayments) {
+    try {
+      const load =
+        deps.loadPayments ??
+        (async (o: string, cm: SquadState["completedMatch"]) => {
+          const m = await import("./load-state");
+          return m.loadPaymentSnapshot(o, cm);
+        });
+      state = { ...state, payments: await load(orgId, state.completedMatch) };
+    } catch (err) {
+      const detail =
+        `${ANSWER_DEGRADED_PREFIX} the payment read failed (${
+          err instanceof Error ? err.message : String(err)
+        }); the payment question in this batch goes unanswered and onto this note`;
+      console.error("[answer-engine] payment load failed:", err);
+      degradations.push(detail);
+    }
+  }
 
   // ── Stage 3: the engine, over the WHOLE window ─────────────────────
   const engineMessages: EngineMessage[] = messages.map((m) => ({

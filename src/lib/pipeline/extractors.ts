@@ -135,6 +135,7 @@ Report nothing (an empty claims array) only when the message genuinely makes no 
                "person_status" whether a specific named person is playing
                "phones" who has a phone number on record
                "fixture" the match itself: whether it is on, what time it kicks off, where it is played ("what time is kickoff?", "where are we playing?", "are we playing tuesday?", "is the game still on?", "same place as usual?")
+               "payments" who has or has not paid their match fee, how many are still outstanding ("who hasn't paid?", "has everyone paid for last week?", "how many still owe?", "any payments outstanding?"). NOT how much the fee IS — that is "other".
                "score" the RESULT of a match that has already been played ("what was the score?", "did we win on tuesday?", "how did we get on last night?", "what did it finish?")
                "stats" how OFTEN someone plays, or how they rate, ACROSS matches — appearances, form over a run of games, most consistent, man of the match. Never the RESULT of a single match: "did we win?" and "what was the score?" are "score", not "stats".
                "options" what to do about being short (smaller format, alternatives)
@@ -238,6 +239,7 @@ const QUESTION_SCHEMA = {
         "person_status",
         "phones",
         "fixture",
+        "payments",
         "score",
         "stats",
         "options",
@@ -329,6 +331,7 @@ const TOPICS: QuestionTopic[] = [
   "person_status",
   "phones",
   "fixture",
+  "payments",
   "score",
   "stats",
   "options",

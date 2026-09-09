@@ -1098,6 +1098,29 @@ export function decide(input: EngineInput): EngineResult {
           speech.push({ kind: "answer_score", messageId: msg.id });
           out.reasons.push("result question answered from the last match played");
           break;
+        case "payments":
+          // WHO HAS NOT PAID. Not deferred — a payment count is not a
+          // claim about the upcoming squad, so a squad post in the same
+          // batch neither answers it nor contradicts it.
+          //
+          // NO GATE HERE, and that is not an oversight. Every payment
+          // rule lives in `payment-answer.ts` and has already run by the
+          // time this executes: `state.payments` is a snapshot whose
+          // four shapes each carry their own sentence, including "this
+          // org does not track payments". A second gate on
+          // `state.features.paymentTracking` would be the WRONG gate
+          // (Sutton has it off and its `paidAt` rows are accurate — read
+          // that module's header) and would turn an honest "I don't
+          // know" into silence.
+          //
+          // The one thing worth recording is which shape came back, so
+          // an operator triaging "why did it say that" has it in the
+          // outcome rather than having to re-run the loader.
+          speech.push({ kind: "answer_payments", messageId: msg.id });
+          out.reasons.push(
+            `payment question answered from the last settled match (${state.payments?.kind ?? "not loaded"})`,
+          );
+          break;
         case "bench":
           speech.push({ kind: "answer_bench", messageId: msg.id });
           break;

@@ -35,7 +35,7 @@ import {
   type AnswerBatchDeps,
 } from "../answer-batch";
 import type { OrgFeatures } from "../../org-features";
-import type { Route, SpeechIntent, SquadState } from "../types";
+import type { PaymentSnapshot, Route, SpeechIntent, SquadState } from "../types";
 import { NOW, fullName, world, type WorldOpts } from "./helpers";
 
 // ── Fixtures ───────────────────────────────────────────────────────────
@@ -98,11 +98,13 @@ function deps(
   model: PipelineModel,
   state: SquadState,
   features: Partial<OrgFeatures> = {},
+  loadPayments?: AnswerBatchDeps["loadPayments"],
 ): AnswerBatchDeps {
   return {
     model,
     loadState: async () => state,
     loadFeatures: async () => ({ ...FEATURES_ON, ...features }),
+    loadPayments,
   };
 }
 
@@ -114,6 +116,7 @@ async function run(args: {
   features?: Partial<OrgFeatures>;
   state?: SquadState;
   expectedMatchId?: string | null;
+  loadPayments?: AnswerBatchDeps["loadPayments"];
 }) {
   const state = args.state ?? world(args.worldOpts ?? { confirmed: ELEVEN });
   return runAnswerBatch({
@@ -123,7 +126,7 @@ async function run(args: {
     history: [],
     expectedMatchId: args.expectedMatchId === undefined ? state.matchId : args.expectedMatchId,
     enabled: new Set<Route>(args.enabled ?? ["question", "balancer"]),
-    deps: deps(args.model, state, args.features),
+    deps: deps(args.model, state, args.features, args.loadPayments),
   });
 }
 
@@ -1129,5 +1132,96 @@ describe("nothing that reaches Prisma is imported statically", () => {
     expect(SRC).toMatch(/await import\("\.\.\/org-features"\)/);
     expect(SRC).toMatch(/m\.loadSquadState/);
     expect(SRC).toMatch(/m\.getOrgFeatures/);
+  });
+});
+
+// ── 7. THE ONE TARGETED EXTRA READ ───────────────────────────────────
+//
+// `loadSquadState` runs on EVERY batch, including the 69% that are
+// banter, so the payment rows are not in it. They are loaded here, AFTER
+// extraction, and only when a `payments` topic survived ownership. These
+// four tests are the whole contract: it fires when it must, it does not
+// fire otherwise, a failure costs one answer rather than the batch, and
+// nothing on this path can print a name.
+
+describe("payments are read only when a payment question is in the window", () => {
+  const PAY_Q = "@Match Time who hasn't paid";
+  const PAY_FACTS = { topic: "payments", personRef: "", statedCount: -1 };
+
+  function spyLoader(snapshot: PaymentSnapshot) {
+    const calls: string[] = [];
+    const loadPayments: AnswerBatchDeps["loadPayments"] = async (orgId) => {
+      calls.push(orgId);
+      return snapshot;
+    };
+    return { calls, loadPayments };
+  }
+
+  it("does NOT read payments for an ordinary count question — the common path stays cheap", async () => {
+    const { model } = stubModel({ [COUNT_Q]: COUNT_FACTS });
+    const { calls, loadPayments } = spyLoader({ kind: "not_tracked" });
+    const res = await run({
+      messages: [msg({ body: COUNT_Q, route: "question" })],
+      model,
+      loadPayments,
+    });
+    expect([...res.ownedIds]).toHaveLength(1);
+    expect(calls).toEqual([]);
+  });
+
+  it("reads payments exactly once for a payment question", async () => {
+    const { model } = stubModel({ [PAY_Q]: PAY_FACTS });
+    const { calls, loadPayments } = spyLoader({
+      kind: "counted",
+      chargeable: 9,
+      unpaid: 5,
+      kickoffLabel: "Tue 21:15",
+    });
+    const res = await run({
+      messages: [msg({ body: PAY_Q, route: "question" })],
+      model,
+      worldOpts: { confirmed: ELEVEN, completedMatch: { id: "m-old" } },
+      loadPayments,
+    });
+    expect(calls).toEqual(["org-1"]);
+    const reply = [...res.outcomes.values()][0]?.reply ?? "";
+    expect(reply).toContain("5 of 9");
+    // NOT ONE NAME. `PaymentSnapshot` has no field a name could come out
+    // of; this asserts the consequence rather than the shape.
+    expect(reply).not.toMatch(/Kemal|Elvin|Sait|Mustafa|Abid|Idris|Faris|Shaz|Adam|Efat|Amir/);
+  });
+
+  it("a payment read that throws costs that answer, not the batch", async () => {
+    const { model } = stubModel({ [PAY_Q]: PAY_FACTS, [COUNT_Q]: COUNT_FACTS });
+    const res = await run({
+      messages: [
+        msg({ waMessageId: "wa-pay", body: PAY_Q, route: "question" }),
+        msg({ waMessageId: "wa-count", body: COUNT_Q, route: "question" }),
+      ],
+      model,
+      worldOpts: { confirmed: ELEVEN, completedMatch: { id: "m-old" } },
+      loadPayments: async () => {
+        throw new Error("db is on fire");
+      },
+    });
+    // The count question is still answered…
+    expect([...res.ownedIds]).toEqual(["wa-count"]);
+    // …and the payment question hands back with a reason, never a silent
+    // empty answer.
+    expect(res.outcomes.has("wa-pay")).toBe(false);
+    expect(res.degradations.join(" ")).toMatch(/payment read failed/i);
+    expect(res.degradations.join(" ")).toMatch(/db is on fire/);
+  });
+
+  it("owns the payments topic, and says MatchTime does not know when it does not", async () => {
+    const { model } = stubModel({ [PAY_Q]: PAY_FACTS });
+    const { loadPayments } = spyLoader({ kind: "not_tracked" });
+    const res = await run({
+      messages: [msg({ body: PAY_Q, route: "question" })],
+      model,
+      loadPayments,
+    });
+    expect([...res.ownedIds]).toHaveLength(1);
+    expect([...res.outcomes.values()][0].reply).toMatch(/don't track/i);
   });
 });

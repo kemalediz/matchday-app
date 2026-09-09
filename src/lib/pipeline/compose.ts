@@ -214,6 +214,44 @@ export function compose(result: EngineResult): ComposedOutput {
         break;
       }
 
+      case "answer_payments": {
+        // WHO HAS NOT PAID — as a COUNT. There is no branch below that
+        // can print a name, because `PaymentSnapshot` has no field a
+        // name could come out of (`payment-answer.ts` returns counts on
+        // purpose). `buildUnpaidTail` posts the same shape to the same
+        // group and says why: "Poll-only format per Sait's suggestion
+        // (2026-04-25). No naming, no shaming."
+        //
+        // The question asked WHO, so the answer says out loud that it is
+        // not going to say. A count with no explanation reads as a bot
+        // that misunderstood; a count with one reads as a bot with a
+        // rule.
+        const p = state.payments;
+        if (!p) {
+          // NOT LOADED. `answer-batch.ts` does the payment load only when
+          // a `payments` topic survived ownership, so reaching here means
+          // the intent was emitted without it. Saying nothing sends this
+          // message to that module's silent-id check, which disowns it —
+          // a hand-back with a receipt rather than an empty answer.
+          operatorNotes.push(
+            `compose: answer_payments for ${s.messageId} with no payment snapshot loaded; saying nothing`,
+          );
+          break;
+        }
+        const text =
+          p.kind === "not_tracked"
+            ? "I don't track payments for this group, so I can't say who's settled up."
+            : p.kind === "no_settled_match"
+              ? "There's no settled match for me to check payments against yet."
+              : p.kind === "no_signal"
+                ? `No payments have reached me for ${p.kickoffLabel} — that could mean nobody's paid, or that I'm just not seeing them, so I'd rather not put a number on it.`
+                : p.unpaid === 0
+                  ? `💳 All settled for ${p.kickoffLabel} 🙌`
+                  : `💳 ${p.unpaid} of ${p.chargeable} still to pay for ${p.kickoffLabel}. I don't put names to that in the group.`;
+        utterances.push({ messageId: s.messageId, text });
+        break;
+      }
+
       case "answer_bench":
         utterances.push({
           messageId: s.messageId,

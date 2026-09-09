@@ -475,11 +475,19 @@ const CASES: Case[] = [
  * `route.ts`'s catch-all: NOTHING is said in the group, and one deduped
  * operator DM is sent (`lib/operator-note.ts`). So the HANDED BACK column
  * is no longer free — it is the number of tagged questions a real group
- * would ask and get no answer to. Q12 (money), Q20 (an unresolvable
- * person), Q22 (stats) and Q23 (options) are in it BY DESIGN and each
- * says why on its own line; anything else appearing there is a
- * regression, and the two columns should be read together rather than
- * only checking that SILENT is 0.
+ * would ask and get no answer to, and the two columns should be read
+ * together rather than only checking that SILENT is 0.
+ *
+ * THAT COLUMN WAS FOUR AND IS NOW ONE (2026-09-09). Q22 (stats) and Q23
+ * (options) were built answers refused for a composed-FORMAT reason and
+ * both now speak; Q12 (money) had no data in `SquadState` and now has a
+ * targeted loader. The measured sweep over Q1-Q24 × 2 went 38/48 → 46/48
+ * answered with SILENT still 0.
+ *
+ * Q20 is the last one, it is in this column BY DESIGN, and it is the one
+ * that should stay: "is my mate down for tuesday" names nobody, so
+ * nothing in the system can answer it and a confident guess would be the
+ * §3.2 S16 failure class. Anything else appearing here is a regression.
  *
  * `expect` is what a human decided the right column is. The harness
  * prints both and marks a mismatch; it does not fail the process, for
@@ -508,7 +516,7 @@ const QUESTION_CASES: QuestionCase[] = [
   { id: "Q9", who: "Ali", body: "@Match Time do we have enough?", expect: "ANSWERED", wants: /\d+\/\d+/, why: "count" },
   { id: "Q10", who: "Ali", body: "@Match Time show me the squad", expect: "ANSWERED", wants: /Playing:/, why: "roster — NOT the team line-ups" },
   { id: "Q11", who: "Ali", body: "@Match Time is the game still on", expect: "ANSWERED", wants: /\d{1,2}:\d{2}/, why: "fixture" },
-  { id: "Q12", who: "Ali", body: "@Match Time who hasn't paid", expect: "HANDED BACK", why: "no payment data in SquadState — and since §10 step 8 nobody answers it at all" },
+  { id: "Q12", who: "Ali", body: "@Match Time who hasn't paid", expect: "ANSWERED", wants: /still to pay|all settled|don't track|no payments|settled match/i, why: "payments — a COUNT, never a name (buildUnpaidTail's rule). Was the last unanswerable one on this list" },
 
   // ── More of the same shapes, phrased as the group phrases them ────
   { id: "Q13", who: "Zair", body: "@Match Time whos playing tonight", expect: "ANSWERED", wants: /Playing:/, why: "roster" },

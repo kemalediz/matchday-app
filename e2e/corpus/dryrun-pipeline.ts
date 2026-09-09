@@ -374,6 +374,7 @@ export async function loadStateViaSql(grp: SimGroup): Promise<SquadState> {
     // `load-state.ts`'s `LOOKBACK_DAYS`; carried so the stats answer
     // names what it counted rather than implying "all time".
     appearanceWindowDays: 30,
+    payments: null,
     lastBotPost: null,
     features: {
       attendance: org?.featureAttendance ?? true,
